@@ -13,7 +13,7 @@ option(AGENTOS_STRIP       "Strip release binary"                  ON)
 # Force static libraries for ZeroMQ and fmt
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-find_library(FMT_LIB    NAMES fmt             REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
+find_library(FMT_LIB    NAMES libfmt.a fmt.a fmt             REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".so" ".a" "")
 
 # cppzmq (C++ header-only binding)

@@ -20,7 +20,7 @@
 #include <rapidjson/writer.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <zmq.h>
+#include <zmq.hpp>
 
 #include "agentos/dispatcher.h"
 #include "agentos/obs_bus.h"
@@ -56,8 +56,7 @@ static void verify_deps ()
                 SPDLOG_VER_PATCH);
 
   // ZeroMQ
-  int major, minor, patch;
-  zmq_version (&major, &minor, &patch);
+  auto [major, minor, patch] = zmq::version ();
   spdlog::info ("ZeroMQ {}.{}.{}  ✓", major, minor, patch);
 
   // RapidJSON — build a sample executor.register handshake

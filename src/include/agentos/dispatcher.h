@@ -22,7 +22,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
-#include <zmq.h>
+#include <zmq.hpp>
 
 namespace agentos
 {
@@ -70,8 +70,8 @@ namespace agentos
     void stop ();
 
   private:
-    void *context_;
-    void *socket_;
+    zmq::context_t *context_;
+    zmq::socket_t *socket_;
     std::string socket_path_;
     std::unordered_map<std::string, MethodHandler> method_handlers_;
     ConnectHandler connect_handler_;

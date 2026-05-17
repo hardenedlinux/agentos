@@ -80,12 +80,13 @@ namespace agentos
 
     if (socket_)
     {
-      zmq_close (socket_);
+      socket_->close ();
+      delete socket_;
       socket_ = nullptr;
     }
     if (context_)
     {
-      zmq_ctx_destroy (context_);
+      delete context_;
       context_ = nullptr;
     }
 

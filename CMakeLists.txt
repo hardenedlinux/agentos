@@ -50,6 +50,9 @@ FetchContent_Declare(cppzmq
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cppzmq)
+if(TARGET cppzmq)
+  set_target_properties(cppzmq PROPERTIES INTERFACE_LINK_LIBRARIES "${ZMQ_LIB}")
+endif()
 
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)

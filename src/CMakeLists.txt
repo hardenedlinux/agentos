@@ -12,7 +12,6 @@ option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
 # ZeroMQ (C library)
 find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-find_path   (ZMQ_INC    zmq.h                REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
 
 # cppzmq (C++ header-only binding)
 find_path   (CPPZMQ_INC zmq.hpp              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)

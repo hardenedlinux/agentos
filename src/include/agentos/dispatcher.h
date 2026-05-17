@@ -22,7 +22,6 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
-#include <zmq.hpp>
 #include <zmq.h>
 
 namespace agentos

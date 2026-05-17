@@ -20,7 +20,6 @@
 #include <rapidjson/writer.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <zmq.hpp>
 #include <zmq.h>
 
 #include "agentos/dispatcher.h"

@@ -71,8 +71,8 @@ namespace agentos
     void stop ();
 
   private:
-    zmq::context_t *context_;
-    zmq::socket_t *socket_;
+    void *context_;
+    void *socket_;
     std::string socket_path_;
     std::unordered_map<std::string, MethodHandler> method_handlers_;
     ConnectHandler connect_handler_;

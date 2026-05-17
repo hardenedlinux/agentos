@@ -37,6 +37,7 @@ set(ENABLE_NORM OFF CACHE BOOL "" FORCE)
 set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)
 set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(libzmq)
+set_target_properties(libzmq PROPERTIES OUTPUT_NAME zmq)
 
 # cppzmq (C++ binding for ZeroMQ, depends on libzmq)
 FetchContent_Declare(cppzmq

@@ -10,12 +10,21 @@ option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
-find_library(LIBUV_LIB    NAMES uv_a uv     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-find_path   (LIBUV_INC    uv.h              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+# ZeroMQ (C library)
+find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
+find_path   (ZMQ_INC    zmq.h                REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+
+# cppzmq (C++ header-only binding)
+find_path   (CPPZMQ_INC zmq.hpp              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+
+# RapidJSON (header-only)
 find_path   (RAPIDJSON_INC rapidjson/document.h REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+
+# spdlog (header-only with static library)
 find_path   (SPDLOG_INC   spdlog/spdlog.h   REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
 
-message(STATUS "[agentos] libuv     : ${LIBUV_LIB}")
+message(STATUS "[agentos] ZeroMQ  : ${ZMQ_LIB}")
+message(STATUS "[agentos] cppzmq  : ${CPPZMQ_INC}")
 message(STATUS "[agentos] RapidJSON : ${RAPIDJSON_INC}")
 message(STATUS "[agentos] spdlog    : ${SPDLOG_INC}")
 

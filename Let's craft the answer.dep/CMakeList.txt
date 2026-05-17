@@ -30,3 +30,31 @@ ExternalProject_Add(spdlog
   BUILD_ALWAYS FALSE
   INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
 )
+
+# libzmq (ZeroMQ core library)
+ExternalProject_Add(libzmq
+  GIT_REPOSITORY https://github.com/zeromq/libzmq.git
+  GIT_TAG v4.3.5
+  CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=${DEPS_INSTALL_DIR}
+    -DBUILD_SHARED=OFF
+    -DBUILD_STATIC=ON
+    -DZMQ_BUILD_TESTS=OFF
+    -DWITH_PERF_TOOL=OFF
+    -DWITH_DOCS=OFF
+  BUILD_ALWAYS FALSE
+  INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
+)
+
+# cppzmq (C++ binding for ZeroMQ, depends on libzmq)
+ExternalProject_Add(cppzmq
+  DEPENDS         libzmq
+  GIT_REPOSITORY https://github.com/zeromq/cppzmq.git
+  GIT_TAG v4.10.0
+  CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=${DEPS_INSTALL_DIR}
+    -DCPPZMQ_BUILD_TESTS=OFF
+    -DCPPZMQ_CMAKE_SUPPRESS_INSTALL=OFF
+  BUILD_ALWAYS FALSE
+  INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
+)

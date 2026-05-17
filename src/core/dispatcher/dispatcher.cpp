@@ -5,7 +5,10 @@ namespace agentos
 {
 
   Dispatcher::Dispatcher (const std::string &socket_path)
-    : socket_path_ (socket_path)
+    : socket_path_ (socket_path),
+      context_ (nullptr),
+      socket_ (nullptr),
+      running_ (false)
   {
   }
 
@@ -32,9 +35,10 @@ namespace agentos
   bool Dispatcher::listen ()
   {
     // TODO Phase 0:
-    //   uv_pipe_init + uv_pipe_bind(socket_path_)
-    //   uv_listen → on_new_connection callback
-    //   Each connection: uv_read_start → frame parser (4-byte len prefix + JSON
+    //   zmq_ctx_new + zmq_socket (ZMQ_STREAM)
+    //   zmq_bind(socket_path_)
+    //   zmq_poll → on_new_connection callback
+    //   Each connection: zmq_recv → frame parser (4-byte len prefix + JSON
     //   body) Dispatch to method_handlers_[method] on each complete message
     spdlog::info ("[dispatcher] listen() stub — socket: {}", socket_path_);
     return false;
@@ -69,12 +73,22 @@ namespace agentos
 
   void Dispatcher::stop ()
   {
-    if (false = running_)
+    if (!running_)
       return;
 
     running_ = false;
 
-    uv_stop (loop_); // thread-safe for uv_default_loop
+    if (socket_)
+    {
+      socket_->close ();
+      delete socket_;
+      socket_ = nullptr;
+    }
+    if (context_)
+    {
+      delete context_;
+      context_ = nullptr;
+    }
 
     spdlog::info ("[dispatcher] stop requested");
   }

@@ -5,7 +5,7 @@
  *
  * Wires up all subsystems and verifies deps compile cleanly:
  *   ✓ spdlog    — structured logging       (header-only)
- *   ✓ libuv     — async I/O / event loop   (static archive)
+ *   ✓ ZeroMQ    — async I/O / event loop   (static archive)
  *   ✓ RapidJSON — JSON serialisation       (header-only)
  *
  * Architecture verified:
@@ -20,7 +20,8 @@
 #include <rapidjson/writer.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <uv.h>
+#include <zmq.hpp>
+#include <zmq.h>
 
 #include "agentos/dispatcher.h"
 #include "agentos/obs_bus.h"
@@ -55,11 +56,10 @@ static void verify_deps ()
   spdlog::info ("spdlog {}.{}.{}  ✓", SPDLOG_VER_MAJOR, SPDLOG_VER_MINOR,
                 SPDLOG_VER_PATCH);
 
-  // libuv
-  uv_loop_t loop;
-  uv_loop_init (&loop);
-  uv_loop_close (&loop);
-  spdlog::info ("libuv {}  ✓", uv_version_string ());
+  // ZeroMQ
+  int major, minor, patch;
+  zmq_version (&major, &minor, &patch);
+  spdlog::info ("ZeroMQ {}.{}.{}  ✓", major, minor, patch);
 
   // RapidJSON — build a sample executor.register handshake
   std::string payload = R"({

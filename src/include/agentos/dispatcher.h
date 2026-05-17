@@ -2,7 +2,7 @@
 /**
  * agentos/dispatcher.h
  *
- * Dispatcher — owns the Unix domain socket server.
+ * Dispatcher — owns the ZeroMQ socket server.
  *
  * Responsibilities (single):
  *   - Accept incoming connections from agents and executors
@@ -11,7 +11,7 @@
  *   - Send outbound requests and match responses by id
  *
  * The Dispatcher knows nothing about agents, executors, plans, or tasks.
- * It only speaks JSON-RPC 2.0 over a Unix socket.
+ * It only speaks JSON-RPC 2.0 over a ZeroMQ socket.
  *
  * Message framing:
  *   [ 4 bytes: uint32 little-endian payload length ][ UTF-8 JSON payload ]
@@ -22,7 +22,8 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
-#inlcude "uv.h"
+#include <zmq.hpp>
+#include <zmq.h>
 
 namespace agentos
 {
@@ -70,11 +71,13 @@ namespace agentos
     void stop ();
 
   private:
-    uv_loop_t *loop_;
+    zmq::context_t *context_;
+    zmq::socket_t *socket_;
     std::string socket_path_;
     std::unordered_map<std::string, MethodHandler> method_handlers_;
     ConnectHandler connect_handler_;
     DisconnectHandler disconnect_handler_;
+    bool running_;
   };
 
 } // namespace agentos

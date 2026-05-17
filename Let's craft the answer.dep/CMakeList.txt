@@ -4,22 +4,8 @@ project(deps NONE)
 # Build dependencies as static libraries
 set(DEPS_INSTALL_DIR "${DEPS_INSTALL_DIR}" CACHE PATH "Install dir")
 
-# fmt (needed by spdlog)
-ExternalProject_Add(fmt
-  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG 10.1.1
-  CMAKE_ARGS
-    -DCMAKE_INSTALL_PREFIX=${DEPS_INSTALL_DIR}
-    -DBUILD_SHARED_LIBS=OFF
-    -DFMT_TEST=OFF
-    -DFMT_DOC=OFF
-  BUILD_ALWAYS FALSE
-  INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
-)
-
-# spdlog (depends on fmt)
+# spdlog (uses bundled fmt, no external fmt needed)
 ExternalProject_Add(spdlog
-  DEPENDS         fmt
   GIT_REPOSITORY https://github.com/gabime/spdlog.git
   GIT_TAG v1.12.0
   CMAKE_ARGS
@@ -28,7 +14,7 @@ ExternalProject_Add(spdlog
     -DSPDLOG_BUILD_SHARED=OFF
     -DSPDLOG_BUILD_EXAMPLE=OFF
     -DSPDLOG_BUILD_TESTS=OFF
-    -DSPDLOG_FMT_EXTERNAL=ON
+    -DSPDLOG_FMT_EXTERNAL=OFF
   BUILD_ALWAYS FALSE
   INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
 )

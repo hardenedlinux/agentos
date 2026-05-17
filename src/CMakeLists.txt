@@ -10,10 +10,9 @@ option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
-# Force static libraries for ZeroMQ and fmt
+# Force static library for ZeroMQ
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-find_library(FMT_LIB    NAMES libfmt.a fmt.a fmt             REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".so" ".a" "")
 
 # cppzmq (C++ header-only binding)
@@ -27,7 +26,6 @@ find_path   (SPDLOG_INC   spdlog/spdlog.h   REQUIRED HINTS ${CMAKE_PREFIX_PATH}/
 
 message(STATUS "[agentos] ZeroMQ  : ${ZMQ_LIB}")
 message(STATUS "[agentos] cppzmq  : ${CPPZMQ_INC}")
-message(STATUS "[agentos] fmt     : ${FMT_LIB}")
 message(STATUS "[agentos] RapidJSON : ${RAPIDJSON_INC}")
 message(STATUS "[agentos] spdlog    : ${SPDLOG_INC}")
 
@@ -38,8 +36,8 @@ endif()
 add_subdirectory(core)
 add_subdirectory(cli)
 
-# Link ZeroMQ and fmt to the agentos executable
-target_link_libraries(agentos PRIVATE ${ZMQ_LIB} ${FMT_LIB})
+# Link ZeroMQ to the agentos executable
+target_link_libraries(agentos PRIVATE ${ZMQ_LIB})
 
 if(AGENTOS_BUILD_TESTS)
   find_library(GTEST_LIB  NAMES gtest      REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
@@ -49,8 +47,8 @@ if(AGENTOS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 
-  # Link ZeroMQ and fmt to the test executable
-  target_link_libraries(agentos_tests PRIVATE ${ZMQ_LIB} ${FMT_LIB})
+  # Link ZeroMQ to the test executable
+  target_link_libraries(agentos_tests PRIVATE ${ZMQ_LIB})
 endif()
 
 install(TARGETS agentos RUNTIME DESTINATION bin)

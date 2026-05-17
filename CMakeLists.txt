@@ -39,11 +39,6 @@ set(ENABLE_NORM OFF CACHE BOOL "" FORCE)
 set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)
 set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(libzmq)
-find_library(ZMQ_LIB NAMES zmq libzmq PATHS ${CMAKE_BINARY_DIR}/_deps/libzmq-build/lib NO_DEFAULT_PATH)
-if(NOT ZMQ_LIB)
-  message(FATAL_ERROR "Could not find libzmq.a in build tree")
-endif()
-
 # cppzmq (C++ binding for ZeroMQ, depends on libzmq)
 FetchContent_Declare(cppzmq
   GIT_REPOSITORY https://github.com/zeromq/cppzmq.git
@@ -52,8 +47,8 @@ FetchContent_Declare(cppzmq
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cppzmq)
-if(TARGET cppzmq)
-  set_target_properties(cppzmq PROPERTIES INTERFACE_LINK_LIBRARIES "${ZMQ_LIB}")
+if(TARGET cppzmq AND TARGET libzmq)
+  target_link_libraries(cppzmq INTERFACE libzmq)
 endif()
 
 # gtest (Google Test)

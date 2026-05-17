@@ -46,7 +46,7 @@ FetchContent_MakeAvailable(libzmq)
 if(NOT TARGET libzmq-static AND NOT TARGET libzmq)
   message(FATAL_ERROR "Failed to fetch libzmq")
 endif()
-set(ZMQ_LIB "$<TARGET_FILE:libzmq>")
+set(ZMQ_LIB "$<TARGET_FILE:libzmq-static>")
 
 # cppzmq (C++ binding for ZeroMQ, depends on libzmq)
 FetchContent_Declare(cppzmq

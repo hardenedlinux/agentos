@@ -46,4 +46,12 @@ if(AGENTOS_BUILD_TESTS)
   target_link_libraries(agentos_tests PRIVATE spdlog::spdlog ${ZMQ_LIB} GTest::gtest GTest::gtest_main GTest::gmock)
 endif()
 
-install(TARGETS agentos RUNTIME DESTINATION bin)
+install(TARGETS agentos RUNTIME DESTINATION dist/bin)
+
+# Copy binary to expected location for build script
+set(EXPECTED_BIN_DIR "${CMAKE_BINARY_DIR}/dist/bin")
+file(MAKE_DIRECTORY "${EXPECTED_BIN_DIR}")
+add_custom_command(TARGET agentos POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:agentos> "${EXPECTED_BIN_DIR}/agentos"
+  COMMENT "Copying agentos to ${EXPECTED_BIN_DIR}/agentos"
+)

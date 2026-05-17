@@ -51,7 +51,7 @@ FetchContent_MakeAvailable(cppzmq)
 if(AGENTOS_BUILD_TESTS)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG release-1.14.0
+    GIT_TAG v1.14.0
   )
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(INSTALL_GTEST ON CACHE BOOL "" FORCE)

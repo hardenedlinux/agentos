@@ -1,0 +1,15 @@
+build/
+.cache/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+.DS_Store
+__pycache__/
+*.pyc
+.aider*
+deps-src/

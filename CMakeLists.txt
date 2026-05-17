@@ -46,7 +46,10 @@ FetchContent_MakeAvailable(libzmq)
 if(NOT TARGET libzmq-static AND NOT TARGET libzmq)
   message(FATAL_ERROR "Failed to fetch libzmq")
 endif()
-set(ZMQ_LIB "$<TARGET_FILE:libzmq-static>")
+find_library(ZMQ_LIB NAMES zmq libzmq PATHS ${FETCHCONTENT_BASE_DIR}/libzmq-build/lib NO_DEFAULT_PATH)
+if(NOT ZMQ_LIB)
+  message(FATAL_ERROR "Could not find libzmq.a in build tree")
+endif()
 
 # cppzmq (C++ binding for ZeroMQ, depends on libzmq)
 FetchContent_Declare(cppzmq

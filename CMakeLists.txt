@@ -15,8 +15,7 @@ set(FETCHCONTENT_QUIET OFF)
 
 # spdlog (uses bundled fmt)
 FetchContent_Declare(spdlog
-  GIT_REPOSITORY https://github.com/gabime/spdlog.git
-  GIT_TAG v1.12.0
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
 )
 set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
@@ -30,8 +29,7 @@ endif()
 
 # libzmq (ZeroMQ core library)
 FetchContent_Declare(libzmq
-  GIT_REPOSITORY https://github.com/zeromq/libzmq.git
-  GIT_TAG v4.3.5
+  URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
 )
 set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -51,8 +49,7 @@ endif()
 
 # cppzmq (C++ binding for ZeroMQ, depends on libzmq)
 FetchContent_Declare(cppzmq
-  GIT_REPOSITORY https://github.com/zeromq/cppzmq.git
-  GIT_TAG v4.10.0
+  URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
 )
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
@@ -68,8 +65,7 @@ endif()
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)
   FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.14.0
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
   )
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(INSTALL_GTEST ON CACHE BOOL "" FORCE)

@@ -31,14 +31,14 @@ add_subdirectory(core)
 add_subdirectory(cli)
 
 # Link dependencies using imported targets from FetchContent
-target_link_libraries(agentos PRIVATE spdlog::spdlog libzmq cppzmq::cppzmq)
+target_link_libraries(agentos PRIVATE spdlog::spdlog libzmq cppzmq)
 
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 
   # Link test dependencies
-  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog libzmq cppzmq::cppzmq GTest::gtest GTest::gtest_main GTest::gmock)
+  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog libzmq cppzmq GTest::gtest GTest::gtest_main GTest::gmock)
 endif()
 
 install(TARGETS agentos RUNTIME DESTINATION bin)

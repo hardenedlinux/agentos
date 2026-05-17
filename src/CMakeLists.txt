@@ -10,9 +10,9 @@ option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
-# Force static library for ZeroMQ
+# Force static library for ZeroMQ (only our built one)
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
+find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".so" ".a" "")
 
 # cppzmq (C++ header-only binding)

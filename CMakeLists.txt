@@ -51,17 +51,18 @@ if(NOT ZMQ_LIB)
   message(FATAL_ERROR "Could not find libzmq.a in build tree")
 endif()
 
-# cppzmq (C++ binding for ZeroMQ, depends on libzmq)
+# cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 FetchContent_Declare(cppzmq
   URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
 )
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
 message(STATUS "Downloading cppzmq...")
-FetchContent_MakeAvailable(cppzmq)
-if(NOT TARGET cppzmq)
-  message(FATAL_ERROR "Failed to fetch cppzmq")
+FetchContent_GetProperties(cppzmq)
+if(NOT cppzmq_POPULATED)
+  FetchContent_Populate(cppzmq)
 endif()
+set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
 
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)

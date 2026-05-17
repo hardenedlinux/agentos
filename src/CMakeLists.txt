@@ -11,7 +11,9 @@ option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
 # cppzmq (C++ header-only binding)
-find_path   (CPPZMQ_INC zmq.hpp              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+if(NOT DEFINED CPPZMQ_INC)
+  find_path(CPPZMQ_INC zmq.hpp REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
+endif()
 
 # RapidJSON (header-only)
 find_path   (RAPIDJSON_INC rapidjson/document.h REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
@@ -34,14 +36,14 @@ add_subdirectory(core)
 add_subdirectory(cli)
 
 # Link dependencies using imported targets from FetchContent
-target_link_libraries(agentos PRIVATE spdlog::spdlog ${ZMQ_LIB} cppzmq)
+target_link_libraries(agentos PRIVATE spdlog::spdlog ${ZMQ_LIB})
 
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 
   # Link test dependencies
-  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog ${ZMQ_LIB} cppzmq GTest::gtest GTest::gtest_main GTest::gmock)
+  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog ${ZMQ_LIB} GTest::gtest GTest::gtest_main GTest::gmock)
 endif()
 
 install(TARGETS agentos RUNTIME DESTINATION bin)

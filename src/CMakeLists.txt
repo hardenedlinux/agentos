@@ -10,14 +10,14 @@ option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
-# ZeroMQ (C library)
+# Force static libraries for ZeroMQ and fmt
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
+find_library(FMT_LIB    NAMES fmt             REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".so" ".a" "")
 
 # cppzmq (C++ header-only binding)
 find_path   (CPPZMQ_INC zmq.hpp              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
-
-# fmt (needed by spdlog)
-find_library(FMT_LIB    NAMES fmt             REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
 
 # RapidJSON (header-only)
 find_path   (RAPIDJSON_INC rapidjson/document.h REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
@@ -30,6 +30,10 @@ message(STATUS "[agentos] cppzmq  : ${CPPZMQ_INC}")
 message(STATUS "[agentos] fmt     : ${FMT_LIB}")
 message(STATUS "[agentos] RapidJSON : ${RAPIDJSON_INC}")
 message(STATUS "[agentos] spdlog    : ${SPDLOG_INC}")
+
+if(AGENTOS_STATIC)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+endif()
 
 add_subdirectory(core)
 add_subdirectory(cli)

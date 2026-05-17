@@ -157,7 +157,12 @@ static void start (int argc, char *argv[])
   spdlog::info ("Starting AgentOS...");
 }
 
-int main (int /*argc*/, char * /*argv*/[])
+static void stop (int /*argc*/, char * /*argv*/[])
+{
+  spdlog::info ("Stopping AgentOS...");
+}
+
+int main (int argc, char *argv[])
 {
   auto logger = spdlog::stdout_color_mt ("agentos");
   logger->set_pattern ("[%H:%M:%S] [%^%l%$] %v");

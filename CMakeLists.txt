@@ -16,11 +16,11 @@ set(DEPS_INSTALL_DIR "${CMAKE_BINARY_DIR}/deps/install"
   include(ExternalProject)
 
   # Step 1: deps
-  # deps/CMakeLists.txt runs each dep as its own ExternalProject.
+  # dep/CMakeLists.txt runs each dep as its own ExternalProject.
   # It is purely a build-time orchestrator — it has no install target itself.
   # We use BUILD_COMMAND to drive it and suppress the default INSTALL_COMMAND.
   ExternalProject_Add(deps
-    SOURCE_DIR      "${CMAKE_SOURCE_DIR}/deps"
+    SOURCE_DIR      "${CMAKE_SOURCE_DIR}/dep"
     BINARY_DIR      "${CMAKE_BINARY_DIR}/deps/build"
     CMAKE_ARGS
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}

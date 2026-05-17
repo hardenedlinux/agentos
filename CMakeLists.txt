@@ -8,42 +8,54 @@ option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
-# All deps install headers + static libs here.
-# src/ build uses this as CMAKE_PREFIX_PATH.
-set(DEPS_INSTALL_DIR "${CMAKE_BINARY_DIR}/deps/install"
-    CACHE PATH "Where deps install their headers and libs")
+include(FetchContent)
 
-  include(ExternalProject)
+# spdlog (uses bundled fmt)
+FetchContent_Declare(spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog.git
+  GIT_TAG v1.12.0
+)
+set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(spdlog)
 
-  # Step 1: deps
-  # dep/CMakeLists.txt runs each dep as its own ExternalProject.
-  # It is purely a build-time orchestrator — it has no install target itself.
-  # We use BUILD_COMMAND to drive it and suppress the default INSTALL_COMMAND.
-  ExternalProject_Add(deps
-    SOURCE_DIR      "${CMAKE_SOURCE_DIR}/dep"
-    BINARY_DIR      "${CMAKE_BINARY_DIR}/deps/build"
-    CMAKE_ARGS
-    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-    -DDEPS_INSTALL_DIR=${DEPS_INSTALL_DIR}
-    -DBUILD_SHARED_LIBS=OFF
-    BUILD_ALWAYS    FALSE
-    INSTALL_COMMAND "" # deps installs itself during BUILD via each sub-ExternalProject
+# libzmq (ZeroMQ core library)
+FetchContent_Declare(libzmq
+  GIT_REPOSITORY https://github.com/zeromq/libzmq.git
+  GIT_TAG v4.3.5
+)
+set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
+set(WITH_DOCS OFF CACHE BOOL "" FORCE)
+set(ENABLE_CURVE OFF CACHE BOOL "" FORCE)
+set(ENABLE_PGM OFF CACHE BOOL "" FORCE)
+set(ENABLE_NORM OFF CACHE BOOL "" FORCE)
+set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)
+set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(libzmq)
+
+# cppzmq (C++ binding for ZeroMQ, depends on libzmq)
+FetchContent_Declare(cppzmq
+  GIT_REPOSITORY https://github.com/zeromq/cppzmq.git
+  GIT_TAG v4.10.0
+)
+set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(cppzmq)
+
+# gtest (Google Test)
+if(AGENTOS_BUILD_TESTS)
+  FetchContent_Declare(googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG release-1.14.0
   )
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  set(INSTALL_GTEST ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+endif()
 
-  # Step 2: agentos core
-  ExternalProject_Add(agentos
-    DEPENDS         deps
-    SOURCE_DIR      "${CMAKE_SOURCE_DIR}/src"
-    BINARY_DIR      "${CMAKE_BINARY_DIR}/src/build"
-    INSTALL_DIR     "${CMAKE_BINARY_DIR}/dist"
-    CMAKE_ARGS
-    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-    -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/dist
-    -DCMAKE_PREFIX_PATH=${DEPS_INSTALL_DIR}
-    -DAGENTOS_STATIC=${AGENTOS_STATIC}
-    -DAGENTOS_MUSL=${AGENTOS_MUSL}
-    -DAGENTOS_BUILD_TESTS=${AGENTOS_BUILD_TESTS}
-    -DAGENTOS_STRIP=${AGENTOS_STRIP}
-    BUILD_ALWAYS    TRUE
-    INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
-  )
+add_subdirectory(src)

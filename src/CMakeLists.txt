@@ -10,11 +10,6 @@ option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
-# Force static library for ZeroMQ (only our built one)
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-find_library(ZMQ_LIB    NAMES zmq libzmq     REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".so" ".a" "")
-
 # cppzmq (C++ header-only binding)
 find_path   (CPPZMQ_INC zmq.hpp              REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
 
@@ -24,7 +19,6 @@ find_path   (RAPIDJSON_INC rapidjson/document.h REQUIRED HINTS ${CMAKE_PREFIX_PA
 # spdlog (header-only with static library)
 find_path   (SPDLOG_INC   spdlog/spdlog.h   REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
 
-message(STATUS "[agentos] ZeroMQ  : ${ZMQ_LIB}")
 message(STATUS "[agentos] cppzmq  : ${CPPZMQ_INC}")
 message(STATUS "[agentos] RapidJSON : ${RAPIDJSON_INC}")
 message(STATUS "[agentos] spdlog    : ${SPDLOG_INC}")
@@ -36,19 +30,15 @@ endif()
 add_subdirectory(core)
 add_subdirectory(cli)
 
-# Link ZeroMQ to the agentos executable
-target_link_libraries(agentos PRIVATE ${ZMQ_LIB})
+# Link dependencies using imported targets from FetchContent
+target_link_libraries(agentos PRIVATE spdlog::spdlog ZeroMQ::libzmq cppzmq::cppzmq)
 
 if(AGENTOS_BUILD_TESTS)
-  find_library(GTEST_LIB  NAMES gtest      REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-  find_library(GTEST_MAIN NAMES gtest_main REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-  find_library(GMOCK_LIB  NAMES gmock      REQUIRED HINTS ${CMAKE_PREFIX_PATH}/lib)
-  find_path   (GTEST_INC  gtest/gtest.h   REQUIRED HINTS ${CMAKE_PREFIX_PATH}/include)
   enable_testing()
   add_subdirectory(tests)
 
-  # Link ZeroMQ to the test executable
-  target_link_libraries(agentos_tests PRIVATE ${ZMQ_LIB})
+  # Link test dependencies
+  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog ZeroMQ::libzmq cppzmq::cppzmq GTest::gtest GTest::gtest_main GTest::gmock)
 endif()
 
 install(TARGETS agentos RUNTIME DESTINATION bin)

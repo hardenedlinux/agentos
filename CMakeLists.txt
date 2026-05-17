@@ -8,6 +8,8 @@ option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
+# Store downloaded dependency sources outside the build directory
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
 include(FetchContent)
 
 # spdlog (uses bundled fmt)

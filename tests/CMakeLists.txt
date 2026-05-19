@@ -17,6 +17,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 target_link_libraries(agentos_tests PRIVATE
   agentos_core
+  agentos_forge
   GTest::gtest
   GTest::gtest_main
   ${ZMQ_LIB}
@@ -27,6 +28,7 @@ target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src/core
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/include
+  ${CMAKE_SOURCE_DIR}/src/core/forge
   ${CPPZMQ_INC}
 )
 

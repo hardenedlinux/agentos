@@ -33,16 +33,18 @@ DEPS_ONLY=false
 CLEAN=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-for arg in "$@"; do
-  case $arg in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --debug)     BUILD_TYPE="Debug"  ;;
     --musl)      USE_MUSL=ON         ;;
     --no-tests)  BUILD_TESTS=OFF     ;;
     --deps-only) DEPS_ONLY=true      ;;
     --clean)     CLEAN=true          ;;
     --target)    shift; TARGET="$1"  ;;
-    *) echo "Unknown option: $arg"; exit 1 ;;
+    --coverage)  AGENTOS_COVERAGE=ON ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
   esac
+  shift
 done
 
 if $CLEAN; then
@@ -58,7 +60,8 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
   -DAGENTOS_MUSL="$USE_MUSL"         \
   -DAGENTOS_BUILD_TESTS="$BUILD_TESTS" \
   -DAGENTOS_STATIC=ON                \
-  -DAGENTOS_STRIP=ON
+  -DAGENTOS_STRIP=ON                 \
+  -DAGENTOS_COVERAGE="${AGENTOS_COVERAGE:-OFF}"
 
 if $DEPS_ONLY; then
   echo "→ Building deps only"

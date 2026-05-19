@@ -14,3 +14,5 @@ __pycache__/
 .aider*
 deps-src/
 design
+coverage*
+tests/private

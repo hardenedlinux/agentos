@@ -322,6 +322,8 @@ class ForgeManagerTest : public ::testing::Test {
 protected:
     MockDatabase mockDb;
     Registry registry{mockDb};
+    Verifier verifier{registry};
+    Scheduler scheduler{registry, dispatcher};
     Dispatcher dispatcher{"/tmp/forge_test"};
     Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, ""};
     ObsBus obsBus;

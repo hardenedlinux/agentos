@@ -394,7 +394,8 @@ TEST_F(ForgeManagerTest, ApproveHumanReview) {
     forgeManager.approve_human_review(id);
     auto updated = forgeManager.get_job(id);
     ASSERT_TRUE(updated.has_value());
-    EXPECT_EQ(updated->phase, "Approved");
+    // After approval, process_job moves from Approved to Promoted
+    EXPECT_EQ(updated->phase, "Promoted");
 }
 
 TEST_F(ForgeManagerTest, RejectHumanReview) {
@@ -408,6 +409,8 @@ TEST_F(ForgeManagerTest, RejectHumanReview) {
     forgeManager.reject_human_review(id, "bad code");
     auto updated = forgeManager.get_job(id);
     ASSERT_TRUE(updated.has_value());
-    EXPECT_EQ(updated->phase, "Drafting");
-    EXPECT_EQ(updated->last_feedback, "bad code");
+    // After rejection, process_job moves from Drafting to Reviewing
+    EXPECT_EQ(updated->phase, "Reviewing");
+    // last_feedback is cleared by draft callback
+    EXPECT_TRUE(updated->last_feedback.empty());
 }

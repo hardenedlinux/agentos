@@ -1,9 +1,9 @@
 #include "agentos/orchestrator.h"
+#include "database/database.hpp"
 #include <spdlog/spdlog.h>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
-#include <sqlite3.h>
 #include <filesystem>
 #include <chrono>
 
@@ -21,228 +21,76 @@ Orchestrator::Orchestrator(Registry&    registry,
     , db_(nullptr)
     , db_path_(db_path)
 {
-    if (init_db()) {
-        resume_in_flight();
+    if (!db_path_.empty()) {
+        db_ = std::make_unique<Database>(db_path_);
+        if (db_->open()) {
+            resume_in_flight();
+        }
+    } else {
+        spdlog::warn("[orchestrator] no db_path, persistence disabled");
     }
 }
 
 Orchestrator::~Orchestrator() {
-    close_db();
-}
-
-bool Orchestrator::init_db() {
-    if (db_path_.empty()) {
-        spdlog::warn("[orchestrator] no db_path, persistence disabled");
-        return false;
-    }
-    // Ensure directory exists
-    std::filesystem::path p(db_path_);
-    std::filesystem::create_directories(p.parent_path());
-
-    int rc = sqlite3_open(db_path_.c_str(), &db_);
-    if (rc != SQLITE_OK) {
-        spdlog::error("[orchestrator] failed to open database: {}", sqlite3_errmsg(db_));
-        return false;
-    }
-
-    // Enable WAL mode
-    const char* pragmas[] = {
-        "PRAGMA journal_mode=WAL;",
-        "PRAGMA synchronous=NORMAL;",
-        "PRAGMA foreign_keys=ON;",
-        nullptr
-    };
-    for (int i=0; pragmas[i]; ++i) {
-        char* err = nullptr;
-        rc = sqlite3_exec(db_, pragmas[i], nullptr, nullptr, &err);
-        if (rc != SQLITE_OK) {
-            spdlog::error("[orchestrator] pragma error: {}", err);
-            sqlite3_free(err);
-            sqlite3_close(db_);
-            db_ = nullptr;
-            return false;
-        }
-    }
-
-    // Create tables
-    const char* create_sql = R"(
-        CREATE TABLE IF NOT EXISTS jobs (
-            id         TEXT PRIMARY KEY,
-            phase      TEXT NOT NULL,
-            payload    TEXT NOT NULL,
-            plan       TEXT,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tasks (
-            id       TEXT PRIMARY KEY,
-            job_id   TEXT NOT NULL REFERENCES jobs(id),
-            agent_id TEXT NOT NULL,
-            method   TEXT NOT NULL,
-            params   TEXT NOT NULL,
-            result   TEXT,
-            status   TEXT NOT NULL DEFAULT 'pending'
-        );
-    )";
-    char* err = nullptr;
-    rc = sqlite3_exec(db_, create_sql, nullptr, nullptr, &err);
-    if (rc != SQLITE_OK) {
-        spdlog::error("[orchestrator] create tables error: {}", err);
-        sqlite3_free(err);
-        sqlite3_close(db_);
-        db_ = nullptr;
-        return false;
-    }
-
-    spdlog::info("[orchestrator] database initialized at {}", db_path_);
-    return true;
-}
-
-void Orchestrator::close_db() {
-    if (db_) {
-        sqlite3_close(db_);
-        db_ = nullptr;
-    }
+    if (db_) db_->close();
 }
 
 void Orchestrator::store_job(const Task& task) {
-    if (!db_) return;
-    const char* sql = "INSERT OR REPLACE INTO jobs (id, phase, payload, updated_at) VALUES (?, ?, ?, ?)";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, task.id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, "planning", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, task.input_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 4, std::chrono::system_clock::now().time_since_epoch().count());
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    if (db_) db_->store_job(task);
 }
 
 void Orchestrator::update_job_phase(const TaskId& id, const std::string& phase) {
-    if (!db_) return;
-    const char* sql = "UPDATE jobs SET phase = ?, updated_at = ? WHERE id = ?";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, phase.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, std::chrono::system_clock::now().time_since_epoch().count());
-    sqlite3_bind_text(stmt, 3, id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    if (db_) db_->update_job_phase(id, phase);
 }
 
 void Orchestrator::update_job_plan(const TaskId& id, const std::string& plan_json) {
-    if (!db_) return;
-    const char* sql = "UPDATE jobs SET plan = ?, updated_at = ? WHERE id = ?";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, plan_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 2, std::chrono::system_clock::now().time_since_epoch().count());
-    sqlite3_bind_text(stmt, 3, id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    if (db_) db_->update_job_plan(id, plan_json);
 }
 
 void Orchestrator::store_task(const TaskId& job_id, const PlanStep& step) {
-    if (!db_) return;
-    const char* sql = "INSERT OR REPLACE INTO tasks (id, job_id, agent_id, method, params, status) VALUES (?, ?, ?, ?, ?, 'pending')";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, step.id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, job_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, "", -1, SQLITE_STATIC); // agent_id unknown at this point
-    sqlite3_bind_text(stmt, 4, step.command.c_str(), -1, SQLITE_TRANSIENT);
-    // Serialise args as JSON
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    for (const auto& [k,v] : step.args) {
-        w.Key(k.c_str());
-        w.String(v.c_str());
-    }
-    w.EndObject();
-    std::string args_json = buf.GetString();
-    sqlite3_bind_text(stmt, 5, args_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    if (db_) db_->store_task(job_id, step);
 }
 
 void Orchestrator::update_task_result(const TaskId& task_id, const std::string& result, const std::string& status) {
-    if (!db_) return;
-    const char* sql = "UPDATE tasks SET result = ?, status = ? WHERE id = ?";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, result.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, status.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, task_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    // Not used currently; could be added to Database if needed
+    (void)task_id; (void)result; (void)status;
 }
 
 std::vector<Task> Orchestrator::load_in_flight_jobs() {
-    std::vector<Task> jobs;
-    if (!db_) return jobs;
-    const char* sql = "SELECT id, payload FROM jobs WHERE phase NOT IN ('done','failed')";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return jobs;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        Task t;
-        t.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        const char* payload = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        t.input_json = payload ? payload : "";
-        jobs.push_back(std::move(t));
-    }
-    sqlite3_finalize(stmt);
-    return jobs;
+    // Not used currently; resume_in_flight handles it
+    return {};
 }
 
 void Orchestrator::resume_in_flight() {
     if (!db_) return;
-    const char* sql = "SELECT id, plan FROM jobs WHERE phase NOT IN ('done','failed')";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        spdlog::error("[orchestrator] resume query error: {}", sqlite3_errmsg(db_));
-        return;
-    }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        std::string job_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        const char* plan_cstr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        if (!plan_cstr) {
-            spdlog::warn("[orchestrator] resume job {} has no plan, skipping", job_id);
+    auto jobs = db_->resume_in_flight();
+    for (const auto& j : jobs) {
+        if (j.plan_json.empty()) {
+            spdlog::warn("[orchestrator] resume job {} has no plan, skipping", j.job_id);
             continue;
         }
-        std::string plan_json(plan_cstr);
-        auto plan = parse_plan(job_id, plan_json);
+        auto plan = parse_plan(j.job_id, j.plan_json);
         if (!plan) {
-            spdlog::warn("[orchestrator] resume job {} failed to parse plan", job_id);
+            spdlog::warn("[orchestrator] resume job {} failed to parse plan", j.job_id);
             continue;
         }
-        spdlog::info("[orchestrator] resuming job {} ({} steps)", job_id, plan->steps.size());
+        spdlog::info("[orchestrator] resuming job {} ({} steps)", j.job_id, plan->steps.size());
         // Re-verify plan (should still be valid)
         auto verify = verifier_.verify(*plan);
         if (!verify.ok) {
-            spdlog::error("[orchestrator] resume job {} plan verification failed, marking failed", job_id);
-            update_job_phase(job_id, "failed");
+            spdlog::error("[orchestrator] resume job {} plan verification failed, marking failed", j.job_id);
+            update_job_phase(j.job_id, "failed");
             continue;
         }
         // Execute
         auto result = scheduler_.run(*plan);
-        update_job_phase(job_id, result.success ? "done" : "failed");
+        update_job_phase(j.job_id, result.success ? "done" : "failed");
     }
-    sqlite3_finalize(stmt);
 }
 
 std::string Orchestrator::load_plan_json(const TaskId& job_id) {
     if (!db_) return "";
-    const char* sql = "SELECT plan FROM jobs WHERE id = ?";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return "";
-    sqlite3_bind_text(stmt, 1, job_id.c_str(), -1, SQLITE_TRANSIENT);
-    std::string result;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        if (txt) result = txt;
-    }
-    sqlite3_finalize(stmt);
-    return result;
+    return db_->load_plan_json(job_id);
 }
 
 std::string Orchestrator::serialize_plan(const Plan& plan) const {

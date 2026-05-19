@@ -29,10 +29,10 @@ target_compile_options(agentos_core PRIVATE
 
 # Find static SQLite3 library
 find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
-find_library(SQLITE3_LIBRARY NAMES sqlite3 libsqlite3
-  PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
-  NO_DEFAULT_PATH
-)
+set(_saved_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+find_library(SQLITE3_LIBRARY NAMES sqlite3 libsqlite3)
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${_saved_suffixes})
 if(NOT SQLITE3_LIBRARY)
   message(FATAL_ERROR "Could not find static libsqlite3.a")
 endif()

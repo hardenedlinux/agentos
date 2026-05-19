@@ -12,10 +12,14 @@ file(GLOB_RECURSE TEST_SOURCES
 # Create a single test executable containing all tests
 add_executable(agentos_tests ${TEST_SOURCES})
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 target_link_libraries(agentos_tests PRIVATE
   agentos_core
   GTest::gtest
   GTest::gtest_main
+  ${ZMQ_LIB}
 )
 
 # Provide include paths for headers that are private to agentos_core
@@ -23,6 +27,7 @@ target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src/core
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/include
+  ${CPPZMQ_INC}
 )
 
 # Register with CTest

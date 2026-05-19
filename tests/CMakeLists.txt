@@ -19,6 +19,7 @@ target_link_libraries(test_database PRIVATE
 target_include_directories(test_database PRIVATE
   ${CMAKE_SOURCE_DIR}/src/core
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src/include
 )
 
 # Register with CTest

@@ -4,10 +4,12 @@
 #include <string>
 #include <cstdint>
 
+#include "agentos/types.h"
+
 namespace agentos {
 
 struct ForgeJob {
-    std::string id;
+    ForgeJobId id;
     std::string method;
     std::string requirement;
     int attempt = 0;

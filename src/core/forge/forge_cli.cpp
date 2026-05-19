@@ -2,8 +2,6 @@
 #include <iostream>
 #include <zmq.hpp>
 #include <rapidjson/document.h>
-#include <rapidjson/writer.h>
-#include <rapidjson/stringbuffer.h>
 #include <spdlog/spdlog.h>
 
 namespace agentos {
@@ -65,15 +63,9 @@ void ForgeCli::list_jobs() {
     zmq::socket_t sock(ctx, zmq::socket_type::req);
     sock.connect("ipc:///tmp/agentos_forge.sock");
 
-    // Send request
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("method"); w.String("forge.list");
-    w.Key("params"); w.String("{}");
-    w.EndObject();
-
-    zmq::message_t request(buf.GetString(), buf.GetSize());
+    // Send request using raw string literal (ADR‑010)
+    const char* request_str = R"({"method":"forge.list","params":{}})";
+    zmq::message_t request(request_str, strlen(request_str));
     sock.send(request, zmq::send_flags::none);
 
     // Receive response
@@ -101,17 +93,9 @@ void ForgeCli::show_job(const std::string& id) {
     zmq::socket_t sock(ctx, zmq::socket_type::req);
     sock.connect("ipc:///tmp/agentos_forge.sock");
 
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("method"); w.String("forge.show");
-    w.Key("params");
-    w.StartObject();
-    w.Key("id"); w.String(id.c_str());
-    w.EndObject();
-    w.EndObject();
-
-    zmq::message_t request(buf.GetString(), buf.GetSize());
+    // Build request with raw string literal (ADR‑010)
+    std::string request_str = R"({"method":"forge.show","params":{"id":")" + id + R"("}})";
+    zmq::message_t request(request_str.data(), request_str.size());
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;
@@ -138,17 +122,8 @@ void ForgeCli::approve_job(const std::string& id) {
     zmq::socket_t sock(ctx, zmq::socket_type::req);
     sock.connect("ipc:///tmp/agentos_forge.sock");
 
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("method"); w.String("forge.approve");
-    w.Key("params");
-    w.StartObject();
-    w.Key("id"); w.String(id.c_str());
-    w.EndObject();
-    w.EndObject();
-
-    zmq::message_t request(buf.GetString(), buf.GetSize());
+    std::string request_str = R"({"method":"forge.approve","params":{"id":")" + id + R"("}})";
+    zmq::message_t request(request_str.data(), request_str.size());
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;
@@ -162,18 +137,8 @@ void ForgeCli::reject_job(const std::string& id, const std::string& reason) {
     zmq::socket_t sock(ctx, zmq::socket_type::req);
     sock.connect("ipc:///tmp/agentos_forge.sock");
 
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("method"); w.String("forge.reject");
-    w.Key("params");
-    w.StartObject();
-    w.Key("id"); w.String(id.c_str());
-    w.Key("reason"); w.String(reason.c_str());
-    w.EndObject();
-    w.EndObject();
-
-    zmq::message_t request(buf.GetString(), buf.GetSize());
+    std::string request_str = R"({"method":"forge.reject","params":{"id":")" + id + R"(","reason":")" + reason + R"("}})";
+    zmq::message_t request(request_str.data(), request_str.size());
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;

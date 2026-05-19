@@ -6,19 +6,32 @@
  * No dependencies on other agentos headers.
  */
 
+#include <expected>
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include "agentos/strong_id.hpp"
 
 namespace agentos
 {
 
-  // Identity
+  // Identity – StrongId phantom types (ADR‑010)
 
-  using ClientId = std::string; // assigned by core on registration
-  using TaskId = std::string;   // UUID assigned per task.submit
+  using ClientId   = StrongId<struct ClientTag>;
+  using TaskId     = StrongId<struct TaskTag>;
+  using JobId      = StrongId<struct JobTag>;
+  using ForgeJobId = StrongId<struct ForgeJobTag>;
+
+  // Error handling (ADR‑010)
+
+  using Error = std::string;
+
+  template<typename T>
+  using Result = std::expected<T, Error>;
 
   // Executor command schema
   // Self-described by the worker at registration time.

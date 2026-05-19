@@ -13,6 +13,7 @@
  * The Registry never touches the network. It is pure in-memory state.
  */
 
+#include <memory>
 #include "agentos/types.h"
 #include <optional>
 #include <shared_mutex>

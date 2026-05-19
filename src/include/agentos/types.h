@@ -59,6 +59,7 @@ namespace agentos
     ClientId id;
     std::string name;
     std::string version;
+    std::string binary_path; // path to the agent binary (from static catalog)
     // Advisers declare which domains they can plan for (e.g. "research",
     // "coding")
     std::vector<std::string> domains;
@@ -69,6 +70,7 @@ namespace agentos
     ClientId id;
     std::string name;
     std::string version;
+    std::string binary_path; // path to the worker binary (from static catalog)
     std::vector<CommandSchema> commands; // self-described at registration
   };
 

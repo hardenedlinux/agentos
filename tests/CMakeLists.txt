@@ -1,45 +1,26 @@
-if(AGENTOS_BUILD_TESTS)
-    add_executable(agentos_tests
-        test_main.cpp
-        test_registry.cpp
-        test_verifier.cpp
-        test_dispatcher.cpp
-        test_rpc.cpp
-        test_obs_bus.cpp
-        test_database.cpp
-    )
+# Unit tests for AgentOS core library
+# Built only when AGENTOS_BUILD_TESTS is ON
 
-    target_include_directories(agentos_tests PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src/core
-        ${RAPIDJSON_INC}
-        ${SPDLOG_INC}
-        ${GTEST_INC}
-    )
+# Google Test is already fetched by the superbuild (FetchContent_MakeAvailable)
+# so the targets GTest::gtest and GTest::gtest_main are available directly.
 
-    target_compile_options(agentos_tests PRIVATE
-        -Wall -Wextra -Wno-unused-parameter
-        $<$<CONFIG:Release>:-O2>
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-O0>
-    )
+# Test executable
+add_executable(test_database
+  ${CMAKE_SOURCE_DIR}/tests/test_database.cpp
+)
 
-    target_link_libraries(agentos_tests PRIVATE
-        agentos_core
-        GTest::gtest
-        GTest::gtest_main
-        GTest::gmock
-        spdlog::spdlog
-        ${ZMQ_LIB}
-        sqlite3
-        pthread
-        dl
-    )
+target_link_libraries(test_database PRIVATE
+  agentos_core
+  GTest::gtest
+  GTest::gtest_main
+)
 
-    if(AGENTOS_STATIC)
-        target_link_options(agentos_tests PRIVATE -static-libgcc -static-libstdc++)
-    endif()
+# Provide include paths for headers that are private to agentos_core
+target_include_directories(test_database PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/core
+  ${CMAKE_SOURCE_DIR}/include
+)
 
-    include(GoogleTest)
-    gtest_discover_tests(agentos_tests)
-endif()
+# Register with CTest
+include(GoogleTest)
+gtest_discover_tests(test_database)

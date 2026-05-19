@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(agentos_superbuild NONE)
+project(agentos_superbuild CXX)
 
 # Use all available CPU cores for parallel builds
 if(NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)

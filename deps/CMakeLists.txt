@@ -23,28 +23,6 @@ endif()
 message(STATUS "Deps will install to: ${DEPS_INSTALL_DIR}")
 include(ExternalProject)
 
-# libuv
-ExternalProject_Add(libuv
-  GIT_REPOSITORY    https://github.com/libuv/libuv.git
-  GIT_TAG           v1.48.0
-  GIT_SHALLOW       TRUE
-  GIT_PROGRESS      TRUE
-  CMAKE_ARGS
-  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-  -DCMAKE_INSTALL_PREFIX=${DEPS_INSTALL_DIR}
-  -DBUILD_SHARED_LIBS=OFF
-  -DLIBUV_BUILD_SHARED=OFF
-  -DLIBUV_BUILD_TESTS=OFF
-  -DLIBUV_BUILD_BENCH=OFF
-  INSTALL_COMMAND   ${CMAKE_COMMAND} --install <BINARY_DIR>
-  LOG_DOWNLOAD      ON
-  LOG_CONFIGURE     ON
-  LOG_BUILD         ON
-  LOG_INSTALL       ON
-  LOG_OUTPUT_ON_FAILURE ON
-  USES_TERMINAL_DOWNLOAD TRUE
-  USES_TERMINAL_BUILD    TRUE
-)
 
 # RapidJSON (header-only)
 ExternalProject_Add(rapidjson

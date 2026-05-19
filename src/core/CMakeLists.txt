@@ -4,7 +4,7 @@ set(AGENTOS_CORE_SOURCES
   registry/registry.cpp
   verifier/verifier.cpp
   scheduler/scheduler.cpp
-  orchestrator/orchestrator.cpp
+  master/master.cpp
   obs_bus/obs_bus.cpp
 )
 

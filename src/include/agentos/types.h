@@ -16,6 +16,12 @@
 
 #include "agentos/strong_id.hpp"
 
+// Forward declarations of tag types for StrongId (ADR‑010)
+struct ClientTag;
+struct TaskTag;
+struct JobTag;
+struct ForgeJobTag;
+
 namespace agentos
 {
 

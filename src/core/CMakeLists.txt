@@ -30,6 +30,8 @@ target_compile_definitions(agentos_core PRIVATE
   SQLITE_OMIT_LOAD_EXTENSION
 )
 
+set_source_files_properties(${SQLITE3_SRC_DIR}/sqlite3.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")
+
 target_compile_options(agentos_core PRIVATE
   -Wall -Wextra -Wpedantic -Wno-unused-parameter
   $<$<CONFIG:Release>:-O2>

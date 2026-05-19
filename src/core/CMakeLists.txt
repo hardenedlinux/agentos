@@ -27,14 +27,8 @@ target_compile_options(agentos_core PRIVATE
   $<$<CONFIG:Debug>:-O0>
 )
 
-find_library(UUID_LIB uuid)
-if(NOT UUID_LIB)
-  message(FATAL_ERROR "uuid library not found")
-endif()
-
 target_link_libraries(agentos_core PUBLIC
   ${LIBUV_LIB}
-  ${UUID_LIB}
   pthread
   dl
 )

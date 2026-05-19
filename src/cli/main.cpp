@@ -24,7 +24,7 @@
 
 #include "agentos/dispatcher.h"
 #include "agentos/obs_bus.h"
-#include "agentos/orchestrator.h"
+#include "agentos/master.h"
 #include "agentos/registry.h"
 #include "agentos/scheduler.h"
 #include "agentos/types.h"
@@ -110,14 +110,14 @@ static void verify_architecture ()
       return R"({"result":"stub"})";
     });
 
-  agentos::Orchestrator orchestrator (dispatcher, registry, verifier,
-                                      scheduler);
+  agentos::Master master (dispatcher, registry, verifier,
+                          scheduler);
 
   spdlog::info ("Dispatcher    ✓");
   spdlog::info ("Registry      ✓");
   spdlog::info ("Verifier      ✓");
   spdlog::info ("Scheduler     ✓");
-  spdlog::info ("Orchestrator  ✓");
+  spdlog::info ("Master  ✓");
   spdlog::info ("ObsBus        ✓");
 
   // Verify the Verifier with a trivial plan (no commands registered = should
@@ -146,7 +146,7 @@ static void help ()
   spdlog::info ("  Verifier     — plan validation against registered commands");
   spdlog::info ("  Scheduler    — topological execution, parallelism, retries");
   spdlog::info (
-                "  Orchestrator — task lifecycle coordinator (adviser → core → executor)");
+                "  Master       — task lifecycle coordinator (adviser → core → executor)");
   spdlog::info ("  ObsBus       — structured logs, metrics, task events");
   spdlog::info ("");
   spdlog::info ("Ready. Waiting for advisers and executors to connect.");

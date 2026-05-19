@@ -111,7 +111,7 @@ static void verify_architecture ()
   spdlog::info ("Registry      ✓");
   spdlog::info ("Verifier      ✓");
   spdlog::info ("Scheduler     ✓");
-  spdlog::info ("Master  ✓");
+  spdlog::info ("Master        ✓");
   spdlog::info ("ObsBus        ✓");
 
   // Verify the Verifier with a trivial plan (no commands registered = should

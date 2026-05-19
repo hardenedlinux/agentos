@@ -39,9 +39,9 @@ TEST(ForgeJobTest, DefaultValues) {
     ForgeJob job;
     EXPECT_EQ(job.attempt, 0);
     EXPECT_EQ(job.max_attempts, 3);
-    EXPECT_TRUE(job.phase.empty());
-    EXPECT_TRUE(job.last_code.empty());
-    EXPECT_TRUE(job.last_feedback.empty());
+    EXPECT_EQ(job.phase, "");
+    EXPECT_EQ(job.last_code, "");
+    EXPECT_EQ(job.last_feedback, "");
     EXPECT_EQ(job.created_at, 0);
     EXPECT_EQ(job.updated_at, 0);
 }

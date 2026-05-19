@@ -27,9 +27,17 @@ bool validate_capability(const CapabilityDeclaration &decl,
 
     // Rule: fs_read paths must be inside job_dir
     for (const auto &path : decl.fs_read) {
-        // Resolve relative to job_dir if not absolute
-        std::filesystem::path abs_path =
-            std::filesystem::absolute(std::filesystem::path(path));
+        // If job_dir is empty, reject any fs_read path
+        if (job_dir.empty()) {
+            return false;
+        }
+
+        // Resolve relative paths relative to job_dir
+        std::filesystem::path p(path);
+        if (p.is_relative()) {
+            p = std::filesystem::path(job_dir) / p;
+        }
+        std::filesystem::path abs_path = std::filesystem::absolute(p);
         std::filesystem::path job_path =
             std::filesystem::absolute(std::filesystem::path(job_dir));
 

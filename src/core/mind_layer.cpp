@@ -55,3 +55,5 @@ std::vector<CapabilityDeclaration> MindLayer::required_capabilities(
 }
 
 } // namespace agentos
+// No changes needed
+// No changes needed

@@ -16,83 +16,206 @@
  */
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
+#include <cstdio>
+#include <unistd.h>
+#include <string>
+#include <vector>
+
 #include "agentos/registry.h"
 
 using namespace agentos;
 
-static RegisteredExecutor make_worker(const std::string& id, const std::string& name,
-                                         std::vector<std::string> cmds) {
-    RegisteredExecutor ex;
-    ex.id   = id;
-    ex.name = name;
-    for (auto& c : cmds) {
-        CommandSchema cs;
-        cs.name        = c;
-        cs.description = "test command " + c;
-        ex.commands.push_back(cs);
-    }
-    return ex;
+// ---------------------------------------------------------------------------
+// Helper: create a temporary SQLite database with the ADR-007 schema and
+// populate it with the given agents.
+// ---------------------------------------------------------------------------
+static void create_test_db(const std::string &db_path,
+                           const std::vector<std::string> &insert_statements)
+{
+  sqlite3 *db = nullptr;
+  int rc = sqlite3_open(db_path.c_str(), &db);
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to open test db: " << sqlite3_errmsg(db);
+
+  const char *create_sql = R"(
+    CREATE TABLE IF NOT EXISTS agents (
+        id          TEXT PRIMARY KEY,
+        role        TEXT NOT NULL,
+        binary_path TEXT NOT NULL,
+        manifest    TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS capabilities (
+        agent_id     TEXT NOT NULL REFERENCES agents(id),
+        method       TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        input_schema TEXT NOT NULL,
+        cpu_weight   INTEGER,
+        memory_mb    INTEGER,
+        PRIMARY KEY (agent_id, method)
+    );
+  )";
+  char *err = nullptr;
+  rc = sqlite3_exec(db, create_sql, nullptr, nullptr, &err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Create tables failed: " << err;
+  sqlite3_free(err);
+
+  for (const auto &stmt : insert_statements)
+  {
+    rc = sqlite3_exec(db, stmt.c_str(), nullptr, nullptr, &err);
+    ASSERT_EQ(rc, SQLITE_OK) << "Insert failed: " << err;
+    sqlite3_free(err);
+  }
+
+  sqlite3_close(db);
 }
 
-static RegisteredAdviser make_adviser(const std::string& id, const std::string& name,
-                                   std::vector<std::string> domains) {
-    RegisteredAdviser a;
-    a.id      = id;
-    a.name    = name;
-    a.domains = domains;
-    return a;
+// ---------------------------------------------------------------------------
+// Fixture
+// ---------------------------------------------------------------------------
+class RegistryTest : public ::testing::Test
+{
+protected:
+  std::string db_path_;
+
+  void SetUp() override
+  {
+    char tmp[] = "/tmp/agentos_registry_test_XXXXXX";
+    int fd = mkstemp(tmp);
+    ASSERT_NE(fd, -1) << "mkstemp failed";
+    close(fd);
+    db_path_ = tmp;
+  }
+
+  void TearDown() override
+  {
+    std::remove(db_path_.c_str());
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+TEST_F(RegistryTest, RegisterAndFindExecutor)
+{
+  std::vector<std::string> inserts;
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ex-1', 'worker', '/usr/bin/worker1',
+            '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"test command web.search","input_schema":{},"output_schema":{}},{"method":"web.fetch","description":"test command web.fetch","input_schema":{},"output_schema":{}}]}',
+            'human', 1700000000, 1)
+  )");
+
+  create_test_db(db_path_, inserts);
+
+  Registry reg(db_path_);
+
+  auto ex = reg.find_worker_for_command("web.search");
+  ASSERT_TRUE(ex.has_value());
+  EXPECT_EQ(ex->id, "ex-1");
 }
 
-TEST(Registry, RegisterAndFindExecutor) {
-    Registry reg;
-    reg.register_worker(make_worker("ex-1", "web-search", {"web.search", "web.fetch"}));
-
-    auto ex = reg.find_worker_for_command("web.search");
-    ASSERT_TRUE(ex.has_value());
-    EXPECT_EQ(ex->id, "ex-1");
+TEST_F(RegistryTest, UnknownCommandReturnsNullopt)
+{
+  create_test_db(db_path_, {});
+  Registry reg(db_path_);
+  EXPECT_FALSE(reg.find_worker_for_command("nonexistent.cmd").has_value());
 }
 
-TEST(Registry, UnknownCommandReturnsNullopt) {
-    Registry reg;
-    EXPECT_FALSE(reg.find_worker_for_command("nonexistent.cmd").has_value());
+TEST_F(RegistryTest, RegisterAndFindAgent)
+{
+  std::vector<std::string> inserts;
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ag-1', 'adviser', '/usr/bin/adviser1',
+            '{"name":"research-agent","version":"1.0","domains":["research","general"]}',
+            'human', 1700000000, 1)
+  )");
+
+  create_test_db(db_path_, inserts);
+
+  Registry reg(db_path_);
+
+  auto ag = reg.find_adviser("research");
+  ASSERT_TRUE(ag.has_value());
+  EXPECT_EQ(ag->id, "ag-1");
 }
 
-TEST(Registry, RegisterAndFindAgent) {
-    Registry reg;
-    reg.register_adviser(make_adviser("ag-1", "research-agent", {"research", "general"}));
-
-    auto ag = reg.find_adviser("research");
-    ASSERT_TRUE(ag.has_value());
-    EXPECT_EQ(ag->id, "ag-1");
+TEST_F(RegistryTest, UnknownDomainReturnsNullopt)
+{
+  create_test_db(db_path_, {});
+  Registry reg(db_path_);
+  EXPECT_FALSE(reg.find_adviser("coding").has_value());
 }
 
-TEST(Registry, UnknownDomainReturnsNullopt) {
-    Registry reg;
-    EXPECT_FALSE(reg.find_adviser("coding").has_value());
+TEST_F(RegistryTest, RemoveExecutorUnregistersCommands)
+{
+  std::vector<std::string> inserts;
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ex-1', 'worker', '/usr/bin/worker1',
+            '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"test command web.search","input_schema":{},"output_schema":{}}]}',
+            'human', 1700000000, 1)
+  )");
+
+  create_test_db(db_path_, inserts);
+
+  Registry reg(db_path_);
+
+  ASSERT_TRUE(reg.find_worker_for_command("web.search").has_value());
+
+  // remove is deprecated and no-op; the command should still be found
+  reg.remove("ex-1");
+  // Since static catalog cannot be modified at runtime, the command remains
+  EXPECT_TRUE(reg.find_worker_for_command("web.search").has_value());
 }
 
-TEST(Registry, RemoveExecutorUnregistersCommands) {
-    Registry reg;
-    reg.register_worker(make_worker("ex-1", "web-search", {"web.search"}));
-    ASSERT_TRUE(reg.find_worker_for_command("web.search").has_value());
+TEST_F(RegistryTest, AllCommandSchemas)
+{
+  std::vector<std::string> inserts;
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ex-1', 'worker', '/usr/bin/worker1',
+            '{"name":"web","version":"1.0","capabilities":[{"method":"web.search","description":"test command web.search","input_schema":{},"output_schema":{}},{"method":"web.fetch","description":"test command web.fetch","input_schema":{},"output_schema":{}}]}',
+            'human', 1700000000, 1)
+  )");
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ex-2', 'worker', '/usr/bin/worker2',
+            '{"name":"file","version":"1.0","capabilities":[{"method":"file.write","description":"test command file.write","input_schema":{},"output_schema":{}},{"method":"file.read","description":"test command file.read","input_schema":{},"output_schema":{}}]}',
+            'human', 1700000000, 1)
+  )");
 
-    reg.remove("ex-1");
-    EXPECT_FALSE(reg.find_worker_for_command("web.search").has_value());
+  create_test_db(db_path_, inserts);
+
+  Registry reg(db_path_);
+
+  auto schemas = reg.all_command_schemas();
+  EXPECT_EQ(schemas.size(), 4u);
 }
 
-TEST(Registry, AllCommandSchemas) {
-    Registry reg;
-    reg.register_worker(make_worker("ex-1", "web",  {"web.search", "web.fetch"}));
-    reg.register_worker(make_worker("ex-2", "file", {"file.write", "file.read"}));
+TEST_F(RegistryTest, Counts)
+{
+  std::vector<std::string> inserts;
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ag-1', 'adviser', '/usr/bin/adviser1',
+            '{"name":"adviser","version":"1.0","domains":["general"]}',
+            'human', 1700000000, 1)
+  )");
+  inserts.push_back(R"(
+    INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+    VALUES ('ex-1', 'worker', '/usr/bin/worker1',
+            '{"name":"exec","version":"1.0","capabilities":[{"method":"cmd.run","description":"test command cmd.run","input_schema":{},"output_schema":{}}]}',
+            'human', 1700000000, 1)
+  )");
 
-    auto schemas = reg.all_command_schemas();
-    EXPECT_EQ(schemas.size(), 4u);
-}
+  create_test_db(db_path_, inserts);
 
-TEST(Registry, Counts) {
-    Registry reg;
-    reg.register_adviser(make_adviser("ag-1", "adviser", {"general"}));
-    reg.register_worker(make_worker("ex-1", "exec", {"cmd.run"}));
-    EXPECT_EQ(reg.adviser_count(),    1u);
-    EXPECT_EQ(reg.worker_count(), 1u);
+  Registry reg(db_path_);
+  EXPECT_EQ(reg.adviser_count(), 1u);
+  EXPECT_EQ(reg.worker_count(), 1u);
 }

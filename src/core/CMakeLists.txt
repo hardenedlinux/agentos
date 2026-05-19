@@ -17,7 +17,6 @@ target_include_directories(agentos_core PUBLIC
   SYSTEM PUBLIC
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
-  ${LIBUV_INC}
 )
 
 target_compile_options(agentos_core PRIVATE
@@ -28,7 +27,6 @@ target_compile_options(agentos_core PRIVATE
 )
 
 target_link_libraries(agentos_core PUBLIC
-  ${LIBUV_LIB}
   pthread
   dl
 )

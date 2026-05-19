@@ -1,6 +1,7 @@
 #ifndef AGENTOS_DATABASE_HPP
 #define AGENTOS_DATABASE_HPP
 
+#include <sqlite3.h>
 #include <string>
 #include <memory>
 #include <vector>

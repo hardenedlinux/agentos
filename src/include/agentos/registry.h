@@ -18,6 +18,7 @@
 
 namespace agentos
 {
+  class Database; // forward declaration
 
   class Registry
   {

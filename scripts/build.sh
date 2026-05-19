@@ -40,6 +40,7 @@ for arg in "$@"; do
     --no-tests)  BUILD_TESTS=OFF     ;;
     --deps-only) DEPS_ONLY=true      ;;
     --clean)     CLEAN=true          ;;
+    --target)    shift; TARGET="$1"  ;;
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
@@ -66,10 +67,15 @@ if $DEPS_ONLY; then
   exit 0
 fi
 
-echo "→ Building all ($JOBS jobs)"
-echo "  Step 1/2: deps  (downloaded + built once, cached after)"
-echo "  Step 2/2: agentos core"
-cmake --build "$BUILD_DIR" --parallel "$JOBS"
+if [ -n "${TARGET:-}" ]; then
+  echo "→ Building target '$TARGET' ($JOBS jobs)"
+  cmake --build "$BUILD_DIR" --target "$TARGET" --parallel "$JOBS"
+else
+  echo "→ Building all ($JOBS jobs)"
+  echo "  Step 1/2: deps  (downloaded + built once, cached after)"
+  echo "  Step 2/2: agentos core"
+  cmake --build "$BUILD_DIR" --parallel "$JOBS"
+fi
 
 BINARY="$DIST_DIR/bin/agentos"
 echo ""

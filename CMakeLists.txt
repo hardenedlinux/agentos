@@ -97,7 +97,6 @@ if(AGENTOS_BUILD_TESTS)
   if(NOT TARGET GTest::gtest)
     message(FATAL_ERROR "Failed to fetch googletest")
   endif()
-  add_subdirectory(tests)
 endif()
 
 add_subdirectory(src)

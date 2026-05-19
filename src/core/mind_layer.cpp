@@ -45,6 +45,7 @@ std::vector<CapabilityDeclaration> MindLayer::required_capabilities(
         return caps;
     }
     for (const auto& step : doc["steps"].GetArray()) {
+        (void)step; // suppress unused variable warning
         CapabilityDeclaration decl;
         // For now, assume no network or exec needed
         decl.network = false;

@@ -78,7 +78,7 @@ std::string ForgeManager::create_job(const std::string& method,
     // Generate UUID
     std::ostringstream oss;
     oss << std::chrono::system_clock::now().time_since_epoch().count();
-    job.id = "forge_" + oss.str();
+    job.id = ForgeJobId("forge_" + oss.str());
     job.method = method;
     job.requirement = requirement;
     job.attempt = 0;
@@ -92,7 +92,7 @@ std::string ForgeManager::create_job(const std::string& method,
 
     forgeDb_->insert_job(job);
     spdlog::info("[forge] created job {} for method {}", job.id, method);
-    return job.id;
+    return job.id.value();
 }
 
 void ForgeManager::process_job(const std::string& job_id) {

@@ -107,7 +107,7 @@ namespace agentos
 
     if (role == "adviser")
     {
-      out_adviser.id = agent_id;
+      out_adviser.id = ClientId(agent_id);
       out_adviser.name = name;
       out_adviser.version = version;
       out_adviser.binary_path = binary_path;
@@ -116,7 +116,7 @@ namespace agentos
     }
 
     // role == "worker"
-    out_worker.id = agent_id;
+    out_worker.id = ClientId(agent_id);
     out_worker.name = name;
     out_worker.version = version;
     out_worker.binary_path = binary_path;

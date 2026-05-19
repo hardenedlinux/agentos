@@ -252,7 +252,7 @@ namespace agentos
     // We create a temporary PUSH socket to the adviser's known address.
     // For now, we assume the adviser is listening on a PULL socket at
     // ipc:///var/run/agentos/advisers/{client_id}.sock
-    std::string adviser_path = socket_dir_ + "/advisers/" + client_id + ".sock";
+    std::string adviser_path = socket_dir_ + "/advisers/" + client_id.value() + ".sock";
 
     zmq::socket_t req_sock (*context_, ZMQ_PUSH);
     req_sock.set (zmq::sockopt::linger, 0);

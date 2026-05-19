@@ -46,7 +46,7 @@ void ForgeDatabase::insert_job(const ForgeJob& job) {
         spdlog::error("[forge_db] insert_job prepare: {}", sqlite3_errmsg(sqlite));
         return;
     }
-    sqlite3_bind_text(stmt, 1, job.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 1, job.id.value().c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, job.method.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, job.requirement.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 4, job.attempt);
@@ -82,7 +82,7 @@ void ForgeDatabase::update_job(const ForgeJob& job) {
     sqlite3_bind_text(stmt, 6, job.last_code.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, job.last_feedback.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 8, job.updated_at);
-    sqlite3_bind_text(stmt, 9, job.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, job.id.value().c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         spdlog::error("[forge_db] update_job step: {}", sqlite3_errmsg(sqlite));
     }
@@ -101,7 +101,7 @@ std::optional<ForgeJob> ForgeDatabase::get_job(const std::string& id) {
     sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         ForgeJob job;
-        job.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        job.id = ForgeJobId(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
         job.method = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         job.requirement = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         job.attempt = sqlite3_column_int(stmt, 3);
@@ -131,7 +131,7 @@ std::vector<ForgeJob> ForgeDatabase::get_jobs_by_phase(const std::string& phase)
     sqlite3_bind_text(stmt, 1, phase.c_str(), -1, SQLITE_TRANSIENT);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         ForgeJob job;
-        job.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        job.id = ForgeJobId(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
         job.method = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         job.requirement = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         job.attempt = sqlite3_column_int(stmt, 3);
@@ -159,7 +159,7 @@ std::vector<ForgeJob> ForgeDatabase::get_all_jobs() {
     }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         ForgeJob job;
-        job.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        job.id = ForgeJobId(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
         job.method = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         job.requirement = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         job.attempt = sqlite3_column_int(stmt, 3);

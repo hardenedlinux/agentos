@@ -6,7 +6,6 @@
  * No dependencies on other agentos headers.
  */
 
-#include <expected>
 #include <functional>
 #include <optional>
 #include <string>
@@ -37,7 +36,15 @@ namespace agentos
   using Error = std::string;
 
   template<typename T>
-  using Result = std::expected<T, Error>;
+  struct Result {
+      T value;
+      Error error;
+      bool ok = false;
+
+      Result() = default;
+      Result(T val) : value(std::move(val)), ok(true) {}
+      Result(Error err) : error(std::move(err)), ok(false) {}
+  };
 
   // Executor command schema
   // Self-described by the worker at registration time.

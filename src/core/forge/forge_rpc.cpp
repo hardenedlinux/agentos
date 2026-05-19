@@ -21,7 +21,7 @@ std::string ForgeRpc::handle_request(const std::string& method,
         w.StartArray();
         for (const auto& job : jobs) {
             w.StartObject();
-            w.Key("id"); w.String(job.id.c_str());
+            w.Key("id"); w.String(job.id.value().c_str());
             w.Key("method"); w.String(job.method.c_str());
             w.Key("phase"); w.String(job.phase.c_str());
             w.Key("attempt"); w.Int(job.attempt);
@@ -37,7 +37,7 @@ std::string ForgeRpc::handle_request(const std::string& method,
         w.StartArray();
         for (const auto& job : jobs) {
             w.StartObject();
-            w.Key("id"); w.String(job.id.c_str());
+            w.Key("id"); w.String(job.id.value().c_str());
             w.Key("method"); w.String(job.method.c_str());
             w.Key("phase"); w.String(job.phase.c_str());
             w.Key("attempt"); w.Int(job.attempt);
@@ -61,7 +61,7 @@ std::string ForgeRpc::handle_request(const std::string& method,
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
-        w.Key("id"); w.String(job.id.c_str());
+        w.Key("id"); w.String(job.id.value().c_str());
         w.Key("method"); w.String(job.method.c_str());
         w.Key("requirement"); w.String(job.requirement.c_str());
         w.Key("phase"); w.String(job.phase.c_str());

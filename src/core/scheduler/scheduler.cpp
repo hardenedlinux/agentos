@@ -66,7 +66,7 @@ namespace agentos
       rapidjson::StringBuffer buf;
       rapidjson::Writer<rapidjson::StringBuffer> w(buf);
       w.StartObject();
-      w.Key("job_id");   w.String(plan.task_id.c_str());
+      w.Key("job_id");   w.String(plan.task_id.value().c_str());
       w.Key("task_id");  w.String(step.id.c_str());
       w.Key("method");   w.String(step.command.c_str());
       w.Key("params");

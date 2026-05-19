@@ -13,14 +13,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-add_executable(agentos_tests
-  test_registry.cpp
-  test_verifier.cpp
-  test_dispatcher.cpp
-  test_rpc.cpp
-  test_obs_bus.cpp
-  test_database.cpp
+# Automatically discover all test source files in this directory.
+# Any .cpp file placed here will be compiled into the test executable.
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
+
+add_executable(agentos_tests ${TEST_SOURCES})
 
 target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include

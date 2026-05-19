@@ -25,6 +25,7 @@ public:
                       HumanReviewCallback humanReview);
 
     void process(ForgeJob& job);
+    // Future: use EnforceLayer for deterministic state transitions
 
 private:
     DraftCallback draft_;

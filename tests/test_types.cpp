@@ -124,7 +124,7 @@ TEST(ResultTest, ValueConstructor) {
 }
 
 TEST(ResultTest, ErrorConstructor) {
-    Result<int> r(std::string("something went wrong"));
+    Result<int> r(std::string("something went wrong"), ErrorTag{});
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.value, 0);
     EXPECT_EQ(r.error, "something went wrong");
@@ -138,7 +138,7 @@ TEST(ResultTest, StringResult) {
 }
 
 TEST(ResultTest, StringError) {
-    Result<std::string> r(std::string("fail"));
+    Result<std::string> r(std::string("fail"), ErrorTag{});
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.value, "");
     EXPECT_EQ(r.error, "fail");

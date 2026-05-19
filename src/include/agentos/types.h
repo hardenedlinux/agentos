@@ -35,6 +35,9 @@ namespace agentos
 
   using Error = std::string;
 
+  // Tag to disambiguate error constructor when T == Error
+  struct ErrorTag {};
+
   template<typename T>
   struct Result {
       T value;
@@ -43,7 +46,7 @@ namespace agentos
 
       Result() = default;
       Result(T val) : value(std::move(val)), ok(true) {}
-      Result(Error err) : error(std::move(err)), ok(false) {}
+      Result(Error err, ErrorTag) : error(std::move(err)), ok(false) {}
   };
 
   // Executor command schema

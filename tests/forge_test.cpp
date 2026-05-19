@@ -59,7 +59,7 @@ TEST(ForgeJobTest, CustomValues) {
     job.created_at = 1000;
     job.updated_at = 2000;
 
-    EXPECT_EQ(job.id, "test_id");
+    EXPECT_EQ(job.id.value(), "test_id");
     EXPECT_EQ(job.method, "test_method");
     EXPECT_EQ(job.requirement, "test_requirement");
     EXPECT_EQ(job.attempt, 2);
@@ -106,7 +106,7 @@ TEST_F(ForgeDatabaseTest, InsertAndGetJob) {
 
     auto opt = forgeDb.get_job("job1");
     ASSERT_TRUE(opt.has_value());
-    EXPECT_EQ(opt->id, "job1");
+    EXPECT_EQ(opt->id.value(), "job1");
     EXPECT_EQ(opt->method, "method1");
     EXPECT_EQ(opt->requirement, "req1");
     EXPECT_EQ(opt->attempt, 0);
@@ -379,7 +379,7 @@ TEST_F(ForgeManagerTest, ListHumanReviewJobs) {
 
     auto humanJobs = forgeManager.list_human_review_jobs();
     EXPECT_EQ(humanJobs.size(), 1);
-    EXPECT_EQ(humanJobs[0].id, id);
+    EXPECT_EQ(humanJobs[0].id.value(), id);
 }
 
 TEST_F(ForgeManagerTest, ApproveHumanReview) {

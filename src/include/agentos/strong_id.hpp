@@ -38,6 +38,12 @@ public:
     bool operator!=(const StrongId& other) const noexcept { return value_ != other.value_; }
     bool operator<(const StrongId& other) const noexcept { return value_ < other.value_; }
 
+    // Comparison with std::string and const char*
+    bool operator==(const std::string& s) const noexcept { return value_ == s; }
+    bool operator!=(const std::string& s) const noexcept { return value_ != s; }
+    bool operator==(const char* s) const noexcept { return value_ == s; }
+    bool operator!=(const char* s) const noexcept { return value_ != s; }
+
     // Implicit conversion to std::string_view for formatting
     operator std::string_view() const noexcept { return value_; }
 

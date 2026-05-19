@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "agentos/registry.h"
+#include "database/database.hpp"
 
 using namespace agentos;
 
@@ -79,6 +80,7 @@ class RegistryTest : public ::testing::Test
 {
 protected:
   std::string db_path_;
+  Database *db_ = nullptr;
 
   void SetUp() override
   {
@@ -91,7 +93,20 @@ protected:
 
   void TearDown() override
   {
+    if (db_)
+    {
+      db_->close();
+      delete db_;
+    }
     std::remove(db_path_.c_str());
+  }
+
+  // Helper to create a Database object and open it
+  Database& open_db()
+  {
+    db_ = new Database(db_path_);
+    EXPECT_TRUE(db_->open());
+    return *db_;
   }
 };
 
@@ -110,8 +125,9 @@ TEST_F(RegistryTest, RegisterAndFindExecutor)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
 
   auto ex = reg.find_worker_for_command("web.search");
   ASSERT_TRUE(ex.has_value());
@@ -121,7 +137,8 @@ TEST_F(RegistryTest, RegisterAndFindExecutor)
 TEST_F(RegistryTest, UnknownCommandReturnsNullopt)
 {
   create_test_db(db_path_, {});
-  Registry reg(db_path_);
+  Database &db = open_db();
+  Registry reg(db);
   EXPECT_FALSE(reg.find_worker_for_command("nonexistent.cmd").has_value());
 }
 
@@ -136,8 +153,9 @@ TEST_F(RegistryTest, RegisterAndFindAgent)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
 
   auto ag = reg.find_adviser("research");
   ASSERT_TRUE(ag.has_value());
@@ -147,7 +165,8 @@ TEST_F(RegistryTest, RegisterAndFindAgent)
 TEST_F(RegistryTest, UnknownDomainReturnsNullopt)
 {
   create_test_db(db_path_, {});
-  Registry reg(db_path_);
+  Database &db = open_db();
+  Registry reg(db);
   EXPECT_FALSE(reg.find_adviser("coding").has_value());
 }
 
@@ -162,8 +181,9 @@ TEST_F(RegistryTest, RemoveExecutorUnregistersCommands)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
 
   ASSERT_TRUE(reg.find_worker_for_command("web.search").has_value());
 
@@ -190,8 +210,9 @@ TEST_F(RegistryTest, AllCommandSchemas)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
 
   auto schemas = reg.all_command_schemas();
   EXPECT_EQ(schemas.size(), 4u);
@@ -214,8 +235,9 @@ TEST_F(RegistryTest, Counts)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.adviser_count(), 1u);
   EXPECT_EQ(reg.worker_count(), 1u);
 }

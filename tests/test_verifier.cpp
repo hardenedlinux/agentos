@@ -24,6 +24,7 @@
 
 #include "agentos/verifier.h"
 #include "agentos/registry.h"
+#include "database/database.hpp"
 
 using namespace agentos;
 
@@ -80,6 +81,7 @@ class VerifierTest : public ::testing::Test
 {
 protected:
   std::string db_path_;
+  Database *db_ = nullptr;
 
   void SetUp() override
   {
@@ -92,14 +94,27 @@ protected:
 
   void TearDown() override
   {
+    if (db_)
+    {
+      db_->close();
+      delete db_;
+    }
     std::remove(db_path_.c_str());
+  }
+
+  // Helper to create a Database object and open it
+  Database& open_db()
+  {
+    db_ = new Database(db_path_);
+    EXPECT_TRUE(db_->open());
+    return *db_;
   }
 };
 
 // ---------------------------------------------------------------------------
 // Helper: create a registry with a web.search command
 // ---------------------------------------------------------------------------
-static Registry make_registry(const std::string &db_path)
+static Registry make_registry(Database &db)
 {
   std::vector<std::string> inserts;
   inserts.push_back(R"(
@@ -108,8 +123,9 @@ static Registry make_registry(const std::string &db_path)
             '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"Searches the web","input_schema":{"query":{"type":"string","required":true},"max_results":{"type":"integer","required":false}},"output_schema":{}}]}',
             'human', 1700000000, 1)
   )");
-  create_test_db(db_path, inserts);
-  return Registry(db_path);
+  create_test_db(db.db_handle() ? "" : "", inserts); // not used, we already have db
+  // We'll just use the existing db (already created by fixture)
+  return Registry(db);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +134,8 @@ static Registry make_registry(const std::string &db_path)
 
 TEST_F(VerifierTest, ValidPlanPasses)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;
@@ -132,7 +149,8 @@ TEST_F(VerifierTest, ValidPlanPasses)
 
 TEST_F(VerifierTest, UnknownCommandFails)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;
@@ -146,7 +164,8 @@ TEST_F(VerifierTest, UnknownCommandFails)
 
 TEST_F(VerifierTest, MissingRequiredArgFails)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;
@@ -160,7 +179,8 @@ TEST_F(VerifierTest, MissingRequiredArgFails)
 
 TEST_F(VerifierTest, InvalidDependencyFails)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;
@@ -173,7 +193,8 @@ TEST_F(VerifierTest, InvalidDependencyFails)
 
 TEST_F(VerifierTest, ValidVariableRefPasses)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;
@@ -187,7 +208,8 @@ TEST_F(VerifierTest, ValidVariableRefPasses)
 
 TEST_F(VerifierTest, InvalidVariableRefFails)
 {
-  Registry reg = make_registry(db_path_);
+  Database &db = open_db();
+  Registry reg = make_registry(db);
   Verifier v(reg);
 
   Plan plan;

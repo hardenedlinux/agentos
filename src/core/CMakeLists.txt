@@ -27,10 +27,16 @@ target_compile_options(agentos_core PRIVATE
   $<$<CONFIG:Debug>:-O0>
 )
 
+# Force static SQLite3 library
+set(_saved_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 find_package(SQLite3 REQUIRED)
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${_saved_suffixes})
+
+target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_INCLUDE_DIRS})
 
 target_link_libraries(agentos_core PUBLIC
   pthread
   dl
-  SQLite::SQLite3
+  ${SQLITE3_LIBRARIES}
 )

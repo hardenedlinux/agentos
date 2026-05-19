@@ -86,6 +86,7 @@ set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
 
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)
+  enable_testing()
   FetchContent_Declare(googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
   )
@@ -96,6 +97,7 @@ if(AGENTOS_BUILD_TESTS)
   if(NOT TARGET GTest::gtest)
     message(FATAL_ERROR "Failed to fetch googletest")
   endif()
+  add_subdirectory(tests)
 endif()
 
 add_subdirectory(src)

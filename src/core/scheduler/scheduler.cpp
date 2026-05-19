@@ -40,6 +40,13 @@ namespace agentos
 
     for (const auto &step : plan.steps)
     {
+      // ADR-006 Layer 2: validate capabilities for generated code
+      if (!validate_step_capabilities(step))
+      {
+        return TaskResult{plan.task_id, false, "",
+                          "capability validation failed for step " + step.id};
+      }
+
       spdlog::info ("[scheduler] executing step '{}' command '{}'", step.id,
                     step.command);
 
@@ -97,6 +104,30 @@ namespace agentos
     // Assemble final output — last step's result is the task output
     std::string output = results.empty () ? "{}" : results.begin ()->second;
     return TaskResult{plan.task_id, true, output, ""};
+  }
+
+  bool Scheduler::validate_step_capabilities(const PlanStep &step)
+  {
+    // If the command is pre‑approved, no capability check needed.
+    auto worker = registry_.find_worker_for_command(step.command);
+    if (worker.has_value()) {
+      return true;
+    }
+
+    if (!step.capabilities.has_value()) {
+      spdlog::error("[scheduler] step '{}' command '{}' missing capability declaration",
+                    step.id, step.command);
+      return false;
+    }
+
+    const auto &cap = step.capabilities.value();
+    if (!validate_capability(cap, "")) {
+      spdlog::error("[scheduler] step '{}' command '{}' capability validation failed",
+                    step.id, step.command);
+      return false;
+    }
+
+    return true;
   }
 
   std::string Scheduler::interpolate_args (const std::string &args_template,

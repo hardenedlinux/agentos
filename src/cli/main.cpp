@@ -123,7 +123,7 @@ static void verify_architecture ()
   // Verify the Verifier with a trivial plan (no commands registered = should
   // fail with helpful error)
   agentos::Plan plan;
-  plan.task_id = TaskId("test-task-001");
+  plan.task_id = agentos::TaskId("test-task-001");
   plan.steps.push_back ({"step_1", "web.search", {{"query", "test"}}, {}});
 
   auto result = verifier.verify (plan);

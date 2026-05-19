@@ -77,6 +77,12 @@ namespace agentos
     ConnectHandler connect_handler_;
     DisconnectHandler disconnect_handler_;
     bool running_;
+
+    // Pending requests: request_id -> callback
+    std::unordered_map<std::string,
+                       std::function<void (const std::string &,
+                                           const std::string &)>>
+      pending_requests_;
   };
 
 } // namespace agentos

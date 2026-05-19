@@ -15,8 +15,8 @@ struct ForgeJob {
     std::string phase; // Drafting, Reviewing, SandboxProbe, Approved, Promoted, HumanReview
     std::string last_code;
     std::string last_feedback;
-    int64_t created_at;
-    int64_t updated_at;
+    int64_t created_at = 0;
+    int64_t updated_at = 0;
 };
 
 } // namespace agentos

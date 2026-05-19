@@ -4,7 +4,7 @@
 
 namespace agentos {
 
-static long long now_ms() {
+[[maybe_unused]] static long long now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }

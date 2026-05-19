@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.25)
 project(agentos_superbuild NONE)
 
+# Use all available CPU cores for parallel builds
+if(NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
+  include(ProcessorCount)
+  ProcessorCount(N)
+  if(N GREATER 0)
+    set(CMAKE_BUILD_PARALLEL_LEVEL ${N})
+  endif()
+endif()
+
 option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
 option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)

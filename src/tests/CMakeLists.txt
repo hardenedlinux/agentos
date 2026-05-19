@@ -16,6 +16,10 @@
 add_executable(agentos_tests
   test_registry.cpp
   test_verifier.cpp
+  test_dispatcher.cpp
+  test_rpc.cpp
+  test_obs_bus.cpp
+  test_database.cpp
 )
 
 target_include_directories(agentos_tests PRIVATE

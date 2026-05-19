@@ -1,6 +1,6 @@
 #include "agentos/enforce_layer.h"
 #include "agentos/registry.h"
-#include "agentos/database.hpp"
+#include "database/database.hpp"
 #include <fstream>
 #include <sstream>
 #include <cstring>

@@ -1,6 +1,6 @@
 #include "agentos/mind_layer.h"
 #include "agentos/registry.h"
-#include "agentos/database.hpp"
+#include "database/database.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>

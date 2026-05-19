@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "agentos/enforce_layer.h"
 #include "agentos/registry.h"
-#include "agentos/database.hpp"
+#include "database/database.hpp"
 
 namespace agentos {
 namespace {

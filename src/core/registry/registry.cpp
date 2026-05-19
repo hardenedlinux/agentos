@@ -1,88 +1,301 @@
 #include "agentos/registry.h"
 #include <spdlog/spdlog.h>
+#include <sqlite3.h>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <algorithm>
+#include <filesystem>
+#include <unordered_map>
+#include <vector>
 
 namespace agentos
 {
 
-  Registry::Registry (Registry &&other) noexcept
+  struct Registry::Impl
   {
-    std::unique_lock lock (other.mutex_);
+    sqlite3 *db = nullptr;
 
-    advisers_ = std::move (other.advisers_);
-    workers_ = std::move (other.workers_);
-    command_index_ = std::move (other.command_index_);
+    // In-memory copies of the static catalog
+    std::unordered_map<std::string, RegisteredAdviser> advisers; // key = id
+    std::unordered_map<std::string, RegisteredExecutor> workers; // key = id
+    // command -> worker id
+    std::unordered_map<std::string, std::string> command_to_worker;
+    // command -> schema
+    std::unordered_map<std::string, CommandSchema> command_schemas;
+  };
+
+  // -----------------------------------------------------------------------
+  // Helper: parse a JSON object into unordered_map<string, ArgSchema>
+  // -----------------------------------------------------------------------
+  static std::unordered_map<std::string, ArgSchema>
+  parse_arg_schema (const rapidjson::Value &obj)
+  {
+    std::unordered_map<std::string, ArgSchema> result;
+    if (!obj.IsObject ())
+      return result;
+    for (auto it = obj.MemberBegin (); it != obj.MemberEnd (); ++it)
+    {
+      ArgSchema arg;
+      arg.type = it->value.GetString (); // e.g. "string", "path", "int"
+      arg.description = "";
+      arg.required = true;
+      result[it->name.GetString ()] = std::move (arg);
+    }
+    return result;
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: parse a manifest JSON string into a RegisteredAdviser or
+  // RegisteredExecutor
+  // -----------------------------------------------------------------------
+  static bool parse_manifest (const std::string &manifest_json,
+                              const std::string &agent_id,
+                              const std::string &role,
+                              const std::string &binary_path,
+                              RegisteredAdviser &out_adviser,
+                              RegisteredExecutor &out_worker)
+  {
+    rapidjson::Document doc;
+    doc.Parse (manifest_json.c_str ());
+    if (doc.HasParseError () || !doc.IsObject ())
+    {
+      spdlog::error ("[registry] invalid manifest for agent '{}'", agent_id);
+      return false;
+    }
+
+    // Common fields
+    std::string name = agent_id;
+    std::string version = "1.0";
+    if (doc.HasMember ("name") && doc["name"].IsString ())
+      name = doc["name"].GetString ();
+    if (doc.HasMember ("version") && doc["version"].IsString ())
+      version = doc["version"].GetString ();
+
+    std::vector<std::string> domains;
+    if (doc.HasMember ("domains") && doc["domains"].IsArray ())
+    {
+      for (const auto &d : doc["domains"].GetArray ())
+        if (d.IsString ())
+          domains.push_back (d.GetString ());
+    }
+
+    if (role == "adviser")
+    {
+      out_adviser.id = agent_id;
+      out_adviser.name = name;
+      out_adviser.version = version;
+      out_adviser.binary_path = binary_path;
+      out_adviser.domains = std::move (domains);
+      return true;
+    }
+
+    // role == "worker"
+    out_worker.id = agent_id;
+    out_worker.name = name;
+    out_worker.version = version;
+    out_worker.binary_path = binary_path;
+
+    if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())
+    {
+      spdlog::warn ("[registry] worker '{}' has no capabilities", agent_id);
+      return true; // still valid, just no commands
+    }
+
+    for (const auto &cap : doc["capabilities"].GetArray ())
+    {
+      if (!cap.IsObject ())
+        continue;
+      CommandSchema schema;
+      if (cap.HasMember ("method") && cap["method"].IsString ())
+        schema.name = cap["method"].GetString ();
+      else
+        continue; // skip entries without a method name
+
+      if (cap.HasMember ("description") && cap["description"].IsString ())
+        schema.description = cap["description"].GetString ();
+
+      if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
+        schema.input = parse_arg_schema (cap["input_schema"]);
+
+      if (cap.HasMember ("output_schema") && cap["output_schema"].IsObject ())
+        schema.output = parse_arg_schema (cap["output_schema"]);
+
+      // resource_hints -> limits (optional)
+      if (cap.HasMember ("resource_hints") && cap["resource_hints"].IsObject ())
+      {
+        const auto &hints = cap["resource_hints"];
+        if (hints.HasMember ("timeout_ms") && hints["timeout_ms"].IsInt ())
+          schema.limits.timeout_ms = hints["timeout_ms"].GetInt ();
+        if (hints.HasMember ("max_input_len") && hints["max_input_len"].IsInt ())
+          schema.limits.max_input_len = hints["max_input_len"].GetInt ();
+      }
+
+      out_worker.commands.push_back (std::move (schema));
+    }
+    return true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Registry implementation
+  // -----------------------------------------------------------------------
+
+  Registry::Registry ()
+    : impl_ (std::make_unique<Impl> ())
+  {
+  }
+
+  Registry::Registry (const std::string &db_path)
+    : impl_ (std::make_unique<Impl> ())
+  {
+    load_from_db (db_path);
+  }
+
+  Registry::Registry (Registry &&other) noexcept
+    : impl_ (std::move (other.impl_))
+  {
   }
 
   Registry &Registry::operator= (Registry &&other) noexcept
   {
-    if (this == &other)
-      return *this;
-
-    std::unique_lock lock1 (mutex_, std::defer_lock);
-    std::unique_lock lock2 (other.mutex_, std::defer_lock);
-
-    std::lock (lock1, lock2);
-
-    advisers_ = std::move (other.advisers_);
-    workers_ = std::move (other.workers_);
-    command_index_ = std::move (other.command_index_);
-
+    if (this != &other)
+      impl_ = std::move (other.impl_);
     return *this;
   }
 
-  void Registry::register_adviser (const RegisteredAdviser &adviser)
+  Registry::~Registry ()
   {
-    std::unique_lock lock (mutex_);
-    advisers_[adviser.id] = adviser;
-    spdlog::info ("[registry] adviser registered: {} ({}) domains=[{}]",
-                  adviser.name, adviser.id,
-                  [&]
-                  {
-                    std::string s;
-                    for (auto &d : adviser.domains)
-                      s += d + ",";
-                    return s;
-                  }());
+    if (impl_ && impl_->db)
+      sqlite3_close (impl_->db);
   }
 
-  void Registry::register_worker (const RegisteredExecutor &worker)
+  void Registry::load_from_db (const std::string &db_path)
   {
-    std::unique_lock lock (mutex_);
-    workers_[worker.id] = worker;
-    for (const auto &cmd : worker.commands)
+    if (impl_->db)
     {
-      command_index_[cmd.name] = worker.id;
-      spdlog::info ("[registry] command registered: {} → worker:{}", cmd.name,
-                    worker.id);
-    }
-    spdlog::info ("[registry] worker registered: {} ({}) commands={}",
-                  worker.name, worker.id, worker.commands.size ());
-  }
-
-  void Registry::remove (const ClientId &id)
-  {
-    std::unique_lock lock (mutex_);
-    if (advisers_.erase (id))
-    {
-      spdlog::info ("[registry] adviser disconnected: {}", id);
+      spdlog::warn ("[registry] already loaded, ignoring");
       return;
     }
-    auto it = workers_.find (id);
-    if (it != workers_.end ())
+
+    int rc = sqlite3_open (db_path.c_str (), &impl_->db);
+    if (rc != SQLITE_OK)
     {
-      for (const auto &cmd : it->second.commands)
-        command_index_.erase (cmd.name);
-      workers_.erase (it);
-      spdlog::info ("[registry] worker disconnected: {}", id);
+      spdlog::error ("[registry] open db '{}' failed: {}", db_path,
+                     sqlite3_errmsg (impl_->db));
+      return;
     }
+
+    // Create tables if they don't exist (idempotent)
+    const char *create_sql = R"(
+      CREATE TABLE IF NOT EXISTS agents (
+          id          TEXT PRIMARY KEY,
+          role        TEXT NOT NULL,
+          binary_path TEXT NOT NULL,
+          manifest    TEXT NOT NULL,
+          approved_by TEXT NOT NULL,
+          approved_at INTEGER NOT NULL,
+          enabled     INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS capabilities (
+          agent_id     TEXT NOT NULL REFERENCES agents(id),
+          method       TEXT NOT NULL,
+          description  TEXT NOT NULL,
+          input_schema TEXT NOT NULL,
+          cpu_weight   INTEGER,
+          memory_mb    INTEGER,
+          PRIMARY KEY (agent_id, method)
+      );
+    )";
+    char *err = nullptr;
+    rc = sqlite3_exec (impl_->db, create_sql, nullptr, nullptr, &err);
+    if (rc != SQLITE_OK)
+    {
+      spdlog::error ("[registry] create tables: {}", err);
+      sqlite3_free (err);
+      return;
+    }
+
+    // Query enabled agents
+    const char *query = R"(
+      SELECT id, role, binary_path, manifest
+      FROM agents
+      WHERE enabled = 1
+    )";
+    sqlite3_stmt *stmt = nullptr;
+    rc = sqlite3_prepare_v2 (impl_->db, query, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK)
+    {
+      spdlog::error ("[registry] prepare query: {}", sqlite3_errmsg (impl_->db));
+      return;
+    }
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      std::string id = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0));
+      std::string role = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1));
+      std::string binary_path = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2));
+      std::string manifest = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 3));
+
+      if (role == "adviser")
+      {
+        RegisteredAdviser adviser;
+        RegisteredExecutor dummy;
+        if (parse_manifest (manifest, id, role, binary_path, adviser, dummy))
+        {
+          impl_->advisers[id] = std::move (adviser);
+        }
+      }
+      else if (role == "worker")
+      {
+        RegisteredAdviser dummy;
+        RegisteredExecutor worker;
+        if (parse_manifest (manifest, id, role, binary_path, dummy, worker))
+        {
+          impl_->workers[id] = worker;
+          for (const auto &cmd : worker.commands)
+          {
+            impl_->command_to_worker[cmd.name] = id;
+            impl_->command_schemas[cmd.name] = cmd;
+          }
+        }
+      }
+      else
+      {
+        spdlog::warn ("[registry] unknown role '{}' for agent '{}'", role, id);
+      }
+    }
+
+    sqlite3_finalize (stmt);
+    spdlog::info ("[registry] loaded {} advisers, {} workers",
+                  impl_->advisers.size (), impl_->workers.size ());
+  }
+
+  void Registry::register_adviser (const RegisteredAdviser & /*adviser*/)
+  {
+    spdlog::warn ("[registry] register_adviser is deprecated (static catalog)");
+  }
+
+  void Registry::register_worker (const RegisteredExecutor & /*worker*/)
+  {
+    spdlog::warn ("[registry] register_worker is deprecated (static catalog)");
+  }
+
+  void Registry::remove (const ClientId & /*id*/)
+  {
+    spdlog::warn ("[registry] remove is deprecated (static catalog)");
   }
 
   std::optional<RegisteredAdviser>
   Registry::find_adviser (const std::string &domain) const
   {
-    std::shared_lock lock (mutex_);
-    for (const auto &[id, adviser] : advisers_)
+    if (!impl_)
+      return std::nullopt;
+    // Return the first adviser whose domains list contains the requested
+    // domain (or any adviser if domain is empty)
+    for (const auto &[id, adviser] : impl_->advisers)
     {
+      if (domain.empty ())
+        return adviser;
       for (const auto &d : adviser.domains)
       {
         if (d == domain)
@@ -95,51 +308,51 @@ namespace agentos
   std::optional<RegisteredExecutor>
   Registry::find_worker_for_command (const std::string &command) const
   {
-    std::shared_lock lock (mutex_);
-    auto it = command_index_.find (command);
-    if (it == command_index_.end ())
+    if (!impl_)
       return std::nullopt;
-    auto ex = workers_.find (it->second);
-    if (ex == workers_.end ())
+    auto it = impl_->command_to_worker.find (command);
+    if (it == impl_->command_to_worker.end ())
       return std::nullopt;
-    return ex->second;
+    auto wit = impl_->workers.find (it->second);
+    if (wit == impl_->workers.end ())
+      return std::nullopt;
+    return wit->second;
   }
 
   std::optional<CommandSchema>
   Registry::get_command_schema (const std::string &command) const
   {
-    std::shared_lock lock (mutex_);
-    auto it = command_index_.find (command);
-    if (it == command_index_.end ())
+    if (!impl_)
       return std::nullopt;
-    auto ex = workers_.find (it->second);
-    if (ex == workers_.end ())
+    auto it = impl_->command_schemas.find (command);
+    if (it == impl_->command_schemas.end ())
       return std::nullopt;
-    for (const auto &cmd : ex->second.commands)
-      if (cmd.name == command)
-        return cmd;
-    return std::nullopt;
+    return it->second;
   }
 
   std::vector<CommandSchema> Registry::all_command_schemas () const
   {
-    std::shared_lock lock (mutex_);
+    if (!impl_)
+      return {};
     std::vector<CommandSchema> result;
-    for (const auto &[id, ex] : workers_)
-      for (const auto &cmd : ex.commands)
-        result.push_back (cmd);
+    result.reserve (impl_->command_schemas.size ());
+    for (const auto &[name, schema] : impl_->command_schemas)
+      result.push_back (schema);
     return result;
   }
 
   size_t Registry::adviser_count () const
   {
-    std::shared_lock l (mutex_);
-    return advisers_.size ();
+    if (!impl_)
+      return 0;
+    return impl_->advisers.size ();
   }
+
   size_t Registry::worker_count () const
   {
-    std::shared_lock l (mutex_);
-    return workers_.size ();
+    if (!impl_)
+      return 0;
+    return impl_->workers.size ();
   }
 
 } // namespace agentos

@@ -2,13 +2,12 @@
 /**
  * agentos/registry.h
  *
- * Registry — thread-safe store of all connected advisers and workers.
+ * Registry — static catalog of agents loaded from SQLite database (ADR-007).
  *
  * Responsibilities:
- *   - Store RegisteredAdviser and RegisteredExecutor on handshake
- *   - Index worker commands by name for O(1) lookup
- *   - Remove entries on disconnect
- *   - Provide command schema to Verifier and Orchestrator
+ *   - Load agents and capabilities from a pre‑populated SQLite database
+ *   - Provide read‑only lookup of advisers and workers
+ *   - Runtime registration is deprecated (no‑op)
  *
  * The Registry never touches the network. It is pure in-memory state.
  */
@@ -16,7 +15,6 @@
 #include <memory>
 #include "agentos/types.h"
 #include <optional>
-#include <shared_mutex>
 
 namespace agentos
 {
@@ -25,6 +23,7 @@ namespace agentos
   {
   public:
     Registry () = default;
+    explicit Registry (const std::string &db_path);
 
     Registry (const Registry &) = delete;
     Registry &operator= (const Registry &) = delete;
@@ -32,11 +31,14 @@ namespace agentos
     Registry (Registry &&other) noexcept;
     Registry &operator= (Registry &&other) noexcept;
 
-    // Registration
+    // Load static catalog from SQLite database (ADR-007)
+    void load_from_db (const std::string &db_path);
+
+    // Runtime registration is deprecated; these are no-ops.
     void register_adviser (const RegisteredAdviser &agent);
     void register_worker (const RegisteredExecutor &worker);
 
-    // Deregistration (on disconnect)
+    // Deregistration is deprecated (static catalog); this is a no-op.
     void remove (const ClientId &id);
 
     // Lookup
@@ -62,13 +64,8 @@ namespace agentos
     size_t worker_count () const;
 
   private:
-    mutable std::shared_mutex mutex_;
-
-    std::unordered_map<ClientId, RegisteredAdviser> advisers_;
-    std::unordered_map<ClientId, RegisteredExecutor> workers_;
-
-    // Secondary index: command name → worker client id
-    std::unordered_map<std::string, ClientId> command_index_;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
   };
 
 } // namespace agentos

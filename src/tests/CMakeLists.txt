@@ -24,6 +24,7 @@ add_executable(agentos_tests
 
 target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src/core
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
   ${GTEST_INC}

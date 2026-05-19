@@ -42,7 +42,7 @@ TEST(ObsBusTest, StepCompleted) {
 TEST(ObsBusTest, ClientConnected) {
     ObsBus bus;
     EXPECT_NO_THROW(bus.client_connected("client1", ClientType::Adviser));
-    EXPECT_NO_THROW(bus.client_connected("client2", ClientType::Worker));
+    EXPECT_NO_THROW(bus.client_connected("client2", ClientType::Executor));
 }
 
 TEST(ObsBusTest, ClientDisconnected) {

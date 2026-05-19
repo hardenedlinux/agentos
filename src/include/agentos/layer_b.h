@@ -1,6 +1,7 @@
 #ifndef AGENTOS_LAYER_B_H
 #define AGENTOS_LAYER_B_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <optional>

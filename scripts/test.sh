@@ -25,6 +25,7 @@ for arg in "$@"; do
     --debug)     BUILD_TYPE="Debug"  ;;
     --musl)      USE_MUSL=ON         ;;
     --clean)     CLEAN=true          ;;
+    --coverage)  AGENTOS_COVERAGE=ON ;;
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
@@ -42,7 +43,8 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
   -DAGENTOS_MUSL="$USE_MUSL"         \
   -DAGENTOS_BUILD_TESTS=ON           \
   -DAGENTOS_STATIC=ON                \
-  -DAGENTOS_STRIP=ON
+  -DAGENTOS_STRIP=ON                 \
+  -DAGENTOS_COVERAGE="${AGENTOS_COVERAGE:-OFF}"
 
 echo "→ Building all ($JOBS jobs)"
 cmake --build "$BUILD_DIR" --parallel "$JOBS"

@@ -14,6 +14,7 @@ option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
 option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      OFF)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
+option(AGENTOS_COVERAGE    "Enable code coverage (gcov/lcov)"      OFF)
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
@@ -97,6 +98,27 @@ if(AGENTOS_BUILD_TESTS)
   if(NOT TARGET GTest::gtest)
     message(FATAL_ERROR "Failed to fetch googletest")
   endif()
+endif()
+
+# Code coverage
+if(AGENTOS_COVERAGE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage")
+  set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   --coverage -fprofile-arcs -ftest-coverage")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+
+  find_program(LCOV lcov REQUIRED)
+  find_program(GENHTML genhtml REQUIRED)
+  add_custom_target(coverage
+    COMMAND ${CMAKE_COMMAND} -E echo "Running tests for coverage..."
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    COMMAND ${LCOV} --capture --directory ${CMAKE_BINARY_DIR} --output-file ${CMAKE_BINARY_DIR}/coverage.info
+    COMMAND ${LCOV} --remove ${CMAKE_BINARY_DIR}/coverage.info '/usr/*' '*/deps-src/*' '*/googletest*' '*/test*' --output-file ${CMAKE_BINARY_DIR}/coverage_filtered.info
+    COMMAND ${GENHTML} ${CMAKE_BINARY_DIR}/coverage_filtered.info --output-directory ${CMAKE_BINARY_DIR}/coverage_report
+    COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated at ${CMAKE_BINARY_DIR}/coverage_report/index.html"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Generating code coverage report"
+  )
 endif()
 
 add_subdirectory(src)

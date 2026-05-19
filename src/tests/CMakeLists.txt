@@ -48,5 +48,10 @@ if(AGENTOS_STATIC)
   target_link_options(agentos_tests PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
+if(AGENTOS_COVERAGE)
+  target_compile_options(agentos_tests PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+  target_link_options(agentos_tests PRIVATE --coverage)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(agentos_tests)

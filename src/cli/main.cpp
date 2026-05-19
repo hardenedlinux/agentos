@@ -21,6 +21,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <zmq.hpp>
+#include <sqlite3.h>
 
 #include "agentos/dispatcher.h"
 #include "agentos/obs_bus.h"
@@ -59,6 +60,9 @@ static void verify_deps ()
   // ZeroMQ
   auto [major, minor, patch] = zmq::version ();
   spdlog::info ("ZeroMQ {}.{}.{}  ✓", major, minor, patch);
+
+  // SQLite3
+  spdlog::info ("SQLite3 {}  ✓", sqlite3_libversion ());
 
   // RapidJSON — build a sample worker.register handshake
   std::string payload = R"({

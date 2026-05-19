@@ -6,14 +6,16 @@
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <filesystem>
 
 namespace agentos
 {
 
-  Dispatcher::Dispatcher (const std::string &socket_path)
-    : socket_path_ (socket_path),
+  Dispatcher::Dispatcher (const std::string &socket_dir)
+    : socket_dir_ (socket_dir),
       context_ (nullptr),
-      socket_ (nullptr),
+      pull_socket_ (nullptr),
+      pub_socket_ (nullptr),
       running_ (false)
   {
   }
@@ -23,55 +25,60 @@ namespace agentos
     stop ();
   }
 
-  void Dispatcher::on_method (const std::string &method, MethodHandler handler)
+  bool Dispatcher::bind ()
   {
-    method_handlers_[method] = std::move (handler);
-  }
+    spdlog::info ("[dispatcher] bind() — socket dir: {}", socket_dir_);
 
-  void Dispatcher::on_connect (ConnectHandler handler)
-  {
-    connect_handler_ = std::move (handler);
-  }
+    context_ = new zmq::context_t (1);
 
-  void Dispatcher::on_disconnect (DisconnectHandler handler)
-  {
-    disconnect_handler_ = std::move (handler);
+    // PULL socket for results
+    pull_socket_ = new zmq::socket_t (*context_, ZMQ_PULL);
+    pull_socket_->set (zmq::sockopt::linger, 0);
+    std::string pull_path = socket_dir_ + "/results.sock";
+    try
+    {
+      pull_socket_->bind ("ipc://" + pull_path);
+    }
+    catch (const zmq::error_t &e)
+    {
+      spdlog::error ("[dispatcher] bind PULL failed: {}", e.what ());
+      return false;
+    }
+
+    // PUB socket for events
+    pub_socket_ = new zmq::socket_t (*context_, ZMQ_PUB);
+    pub_socket_->set (zmq::sockopt::linger, 0);
+    std::string pub_path = socket_dir_ + "/events.sock";
+    try
+    {
+      pub_socket_->bind ("ipc://" + pub_path);
+    }
+    catch (const zmq::error_t &e)
+    {
+      spdlog::error ("[dispatcher] bind PUB failed: {}", e.what ());
+      return false;
+    }
+
+    spdlog::info ("[dispatcher] bound PULL at {} and PUB at {}", pull_path, pub_path);
+    return true;
   }
 
   bool Dispatcher::listen ()
   {
-    spdlog::info ("[dispatcher] listen() — socket: {}", socket_path_);
-
-    context_ = new zmq::context_t (1);
-    socket_ = new zmq::socket_t (*context_, ZMQ_STREAM);
-    socket_->set (zmq::sockopt::linger, 0);
-
-    try
+    if (!pull_socket_)
     {
-      socket_->bind (socket_path_);
-    }
-    catch (const zmq::error_t &e)
-    {
-      spdlog::error ("[dispatcher] bind failed: {}", e.what ());
+      spdlog::error ("[dispatcher] listen() called before bind()");
       return false;
     }
 
     running_ = true;
 
-    // Buffer for incoming data
-    std::unordered_map<zmq::message_t *, std::string> partial_buffers;
-
     while (running_)
     {
-      zmq::message_t identity;
       zmq::message_t msg;
-
       try
       {
-        // ZMQ_STREAM delivers identity frame then data frame
-        if (!socket_->recv (identity, zmq::recv_flags::none))
-          continue;
-        if (!socket_->recv (msg, zmq::recv_flags::none))
+        if (!pull_socket_->recv (msg, zmq::recv_flags::none))
           continue;
       }
       catch (const zmq::error_t &e)
@@ -81,107 +88,159 @@ namespace agentos
         break;
       }
 
-      // Identity is the client's routing id (binary)
-      std::string client_id (static_cast<const char *> (identity.data ()),
-                             identity.size ());
+      std::string payload (static_cast<const char *> (msg.data ()), msg.size ());
 
-      // Data frame may be partial; accumulate
-      std::string &buf = partial_buffers[&identity];
-      buf.append (static_cast<const char *> (msg.data ()), msg.size ());
-
-      // Try to parse a complete message (length-prefixed)
-      while (buf.size () >= 4)
+      // Parse JSON-RPC response (result from agent)
+      rapidjson::Document doc;
+      doc.Parse (payload.c_str ());
+      if (doc.HasParseError ())
       {
-        uint32_t len;
-        std::memcpy (&len, buf.data (), sizeof (len));
-        if (buf.size () < 4 + len)
-          break; // incomplete
-
-        std::string payload = buf.substr (4, len);
-        buf.erase (0, 4 + len);
-
-        // Parse JSON-RPC
-        rapidjson::Document doc;
-        doc.Parse (payload.c_str ());
-        if (doc.HasParseError ())
-        {
-          spdlog::warn ("[dispatcher] parse error from client {}", client_id);
-          continue;
-        }
-
-        std::string method;
-        if (doc.HasMember ("method") && doc["method"].IsString ())
-          method = doc["method"].GetString ();
-
-        std::string params_json;
-        if (doc.HasMember ("params"))
-        {
-          rapidjson::StringBuffer sb;
-          rapidjson::Writer<rapidjson::StringBuffer> w (sb);
-          doc["params"].Accept (w);
-          params_json = sb.GetString ();
-        }
-
-        // Check for response (has "id" and "result" or "error")
-        if (doc.HasMember ("id") && (doc.HasMember ("result") || doc.HasMember ("error")))
-        {
-          std::string id = doc["id"].GetString ();
-          auto it = pending_requests_.find (id);
-          if (it != pending_requests_.end ())
-          {
-            std::string result_json;
-            std::string error_json;
-            if (doc.HasMember ("result"))
-            {
-              rapidjson::StringBuffer sb;
-              rapidjson::Writer<rapidjson::StringBuffer> w (sb);
-              doc["result"].Accept (w);
-              result_json = sb.GetString ();
-            }
-            if (doc.HasMember ("error"))
-            {
-              rapidjson::StringBuffer sb;
-              rapidjson::Writer<rapidjson::StringBuffer> w (sb);
-              doc["error"].Accept (w);
-              error_json = sb.GetString ();
-            }
-            it->second (result_json, error_json);
-            pending_requests_.erase (it);
-          }
-          continue;
-        }
-
-        // It's a request or notification
-        auto handler_it = method_handlers_.find (method);
-        if (handler_it != method_handlers_.end ())
-        {
-          std::string response = handler_it->second (client_id, method, params_json);
-          if (!response.empty ())
-          {
-            // Send response back
-            std::string response_msg = response;
-            uint32_t resp_len = static_cast<uint32_t> (response_msg.size ());
-            std::string frame;
-            frame.append (reinterpret_cast<const char *> (&resp_len), sizeof (resp_len));
-            frame.append (response_msg);
-
-            zmq::message_t resp_identity (identity.data (), identity.size ());
-            zmq::message_t resp_frame (frame.data (), frame.size ());
-            socket_->send (resp_identity, zmq::send_flags::sndmore);
-            socket_->send (resp_frame, zmq::send_flags::none);
-          }
-        }
-        else
-        {
-          spdlog::warn ("[dispatcher] unhandled method '{}' from client {}", method, client_id);
-        }
+        spdlog::warn ("[dispatcher] parse error on result");
+        continue;
       }
 
-      // Clean up partial buffer when identity is no longer needed
-      // (We keep it for the lifetime of the connection)
+      // Check for response (has "id" and "result" or "error")
+      if (doc.HasMember ("id") && (doc.HasMember ("result") || doc.HasMember ("error")))
+      {
+        std::string id = doc["id"].GetString ();
+        auto it = pending_requests_.find (id);
+        if (it != pending_requests_.end ())
+        {
+          std::string result_json;
+          std::string error_json;
+          if (doc.HasMember ("result"))
+          {
+            rapidjson::StringBuffer sb;
+            rapidjson::Writer<rapidjson::StringBuffer> w (sb);
+            doc["result"].Accept (w);
+            result_json = sb.GetString ();
+          }
+          if (doc.HasMember ("error"))
+          {
+            rapidjson::StringBuffer sb;
+            rapidjson::Writer<rapidjson::StringBuffer> w (sb);
+            doc["error"].Accept (w);
+            error_json = sb.GetString ();
+          }
+          it->second (result_json, error_json);
+          pending_requests_.erase (it);
+        }
+      }
+      else
+      {
+        spdlog::warn ("[dispatcher] received message without id/result/error");
+      }
     }
 
     return true;
+  }
+
+  std::string Dispatcher::create_task_push (const std::string &task_id)
+  {
+    std::string path = socket_dir_ + "/tasks/" + task_id + ".sock";
+    // Ensure directory exists
+    std::filesystem::create_directories (socket_dir_ + "/tasks");
+
+    zmq::socket_t *push_sock = new zmq::socket_t (*context_, ZMQ_PUSH);
+    push_sock->set (zmq::sockopt::linger, 0);
+    try
+    {
+      push_sock->bind ("ipc://" + path);
+    }
+    catch (const zmq::error_t &e)
+    {
+      spdlog::error ("[dispatcher] bind PUSH for task {} failed: {}", task_id, e.what ());
+      delete push_sock;
+      return "";
+    }
+
+    task_push_sockets_[task_id] = push_sock;
+    spdlog::info ("[dispatcher] created PUSH socket for task {} at {}", task_id, path);
+    return path;
+  }
+
+  void Dispatcher::close_task_push (const std::string &task_id)
+  {
+    auto it = task_push_sockets_.find (task_id);
+    if (it == task_push_sockets_.end ())
+    {
+      spdlog::warn ("[dispatcher] close_task_push: unknown task {}", task_id);
+      return;
+    }
+
+    it->second->close ();
+    delete it->second;
+    task_push_sockets_.erase (it);
+    spdlog::info ("[dispatcher] closed PUSH socket for task {}", task_id);
+  }
+
+  void Dispatcher::send_task (const std::string &task_id, const std::string &task_json)
+  {
+    auto it = task_push_sockets_.find (task_id);
+    if (it == task_push_sockets_.end ())
+    {
+      spdlog::error ("[dispatcher] send_task: no PUSH socket for task {}", task_id);
+      return;
+    }
+
+    // Frame: length-prefixed JSON
+    uint32_t len = static_cast<uint32_t> (task_json.size ());
+    std::string frame;
+    frame.append (reinterpret_cast<const char *> (&len), sizeof (len));
+    frame.append (task_json);
+
+    zmq::message_t msg (frame.data (), frame.size ());
+    it->second->send (msg, zmq::send_flags::none);
+    spdlog::debug ("[dispatcher] sent task {} ({} bytes)", task_id, task_json.size ());
+  }
+
+  std::string Dispatcher::receive_result ()
+  {
+    if (!pull_socket_)
+    {
+      spdlog::error ("[dispatcher] receive_result() called before bind()");
+      return "";
+    }
+
+    zmq::message_t msg;
+    try
+    {
+      if (!pull_socket_->recv (msg, zmq::recv_flags::none))
+        return "";
+    }
+    catch (const zmq::error_t &e)
+    {
+      spdlog::error ("[dispatcher] receive_result error: {}", e.what ());
+      return "";
+    }
+
+    std::string payload (static_cast<const char *> (msg.data ()), msg.size ());
+    // Expect length-prefixed JSON
+    if (payload.size () < 4)
+      return "";
+    uint32_t len;
+    std::memcpy (&len, payload.data (), sizeof (len));
+    if (payload.size () < 4 + len)
+      return "";
+    return payload.substr (4, len);
+  }
+
+  void Dispatcher::broadcast_event (const std::string &event_json)
+  {
+    if (!pub_socket_)
+    {
+      spdlog::error ("[dispatcher] broadcast_event() called before bind()");
+      return;
+    }
+
+    uint32_t len = static_cast<uint32_t> (event_json.size ());
+    std::string frame;
+    frame.append (reinterpret_cast<const char *> (&len), sizeof (len));
+    frame.append (event_json);
+
+    zmq::message_t msg (frame.data (), frame.size ());
+    pub_socket_->send (msg, zmq::send_flags::none);
+    spdlog::debug ("[dispatcher] broadcast event ({} bytes)", event_json.size ());
   }
 
   void Dispatcher::send_request (
@@ -189,6 +248,24 @@ namespace agentos
     const std::string &params_json,
     std::function<void (const std::string &, const std::string &)> callback)
   {
+    // For adviser communication, we use a simple approach:
+    // We create a temporary PUSH socket to the adviser's known address.
+    // For now, we assume the adviser is listening on a PULL socket at
+    // ipc:///var/run/agentos/advisers/{client_id}.sock
+    std::string adviser_path = socket_dir_ + "/advisers/" + client_id + ".sock";
+
+    zmq::socket_t req_sock (*context_, ZMQ_PUSH);
+    req_sock.set (zmq::sockopt::linger, 0);
+    try
+    {
+      req_sock.connect ("ipc://" + adviser_path);
+    }
+    catch (const zmq::error_t &e)
+    {
+      spdlog::error ("[dispatcher] send_request connect to adviser {} failed: {}", client_id, e.what ());
+      return;
+    }
+
     std::string request_id = gen_new_uuid ();
 
     // Build JSON-RPC request
@@ -208,44 +285,13 @@ namespace agentos
     frame.append (reinterpret_cast<const char *> (&len), sizeof (len));
     frame.append (payload);
 
+    zmq::message_t msg (frame.data (), frame.size ());
+    req_sock.send (msg, zmq::send_flags::none);
+
     // Store callback
     pending_requests_[request_id] = std::move (callback);
 
-    // Send to client (identity is the client_id string)
-    zmq::message_t identity (client_id.data (), client_id.size ());
-    zmq::message_t msg (frame.data (), frame.size ());
-    socket_->send (identity, zmq::send_flags::sndmore);
-    socket_->send (msg, zmq::send_flags::none);
-
     spdlog::debug ("[dispatcher] send_request id={} client={} method={}", request_id, client_id, method);
-  }
-
-  void Dispatcher::send_notification (const ClientId &client_id,
-                                      const std::string &method,
-                                      const std::string &params_json)
-  {
-    // Build JSON-RPC notification (no id)
-    rapidjson::StringBuffer sb;
-    rapidjson::Writer<rapidjson::StringBuffer> w (sb);
-    w.StartObject ();
-    w.Key ("jsonrpc"); w.String ("2.0");
-    w.Key ("method");  w.String (method.c_str ());
-    w.Key ("params");
-    w.RawValue (params_json.c_str (), params_json.size (), rapidjson::kObjectType);
-    w.EndObject ();
-
-    std::string payload = sb.GetString ();
-    uint32_t len = static_cast<uint32_t> (payload.size ());
-    std::string frame;
-    frame.append (reinterpret_cast<const char *> (&len), sizeof (len));
-    frame.append (payload);
-
-    zmq::message_t identity (client_id.data (), client_id.size ());
-    zmq::message_t msg (frame.data (), frame.size ());
-    socket_->send (identity, zmq::send_flags::sndmore);
-    socket_->send (msg, zmq::send_flags::none);
-
-    spdlog::debug ("[dispatcher] send_notification client={} method={}", client_id, method);
   }
 
   void Dispatcher::stop ()
@@ -255,11 +301,25 @@ namespace agentos
 
     running_ = false;
 
-    if (socket_)
+    // Close all task push sockets
+    for (auto &[task_id, sock] : task_push_sockets_)
     {
-      socket_->close ();
-      delete socket_;
-      socket_ = nullptr;
+      sock->close ();
+      delete sock;
+    }
+    task_push_sockets_.clear ();
+
+    if (pull_socket_)
+    {
+      pull_socket_->close ();
+      delete pull_socket_;
+      pull_socket_ = nullptr;
+    }
+    if (pub_socket_)
+    {
+      pub_socket_->close ();
+      delete pub_socket_;
+      pub_socket_ = nullptr;
     }
     if (context_)
     {

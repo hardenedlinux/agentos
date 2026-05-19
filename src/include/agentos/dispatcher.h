@@ -2,16 +2,17 @@
 /**
  * agentos/dispatcher.h
  *
- * Dispatcher — owns the ZeroMQ socket server.
+ * Dispatcher — owns the ZeroMQ sockets per ADR-003.
  *
- * Responsibilities (single):
- *   - Accept incoming connections from agents and executors
- *   - Frame / deframe length-prefixed JSON-RPC messages
- *   - Route inbound messages to registered method handlers
- *   - Send outbound requests and match responses by id
+ * Socket layout:
+ *   PULL  ipc:///var/run/agentos/results.sock   ← all agents push results here
+ *   PUB   ipc:///var/run/agentos/events.sock    ← daemon broadcasts state events
+ *   PUSH  ipc:///var/run/agentos/tasks/{task_id}.sock ← one per dispatched task,
+ *                                                         created on demand,
+ *                                                         torn down after agent exits
  *
  * The Dispatcher knows nothing about agents, executors, plans, or tasks.
- * It only speaks JSON-RPC 2.0 over a ZeroMQ socket.
+ * It only manages ZMQ sockets and message framing.
  *
  * Message framing:
  *   [ 4 bytes: uint32 little-endian payload length ][ UTF-8 JSON payload ]
@@ -27,58 +28,55 @@
 namespace agentos
 {
 
-  // Called when a JSON-RPC request/notification arrives from a client.
-  // Returns a non-empty string to send as the result; empty string = no
-  // response (notification).
-  using MethodHandler = std::function<std::string (
-                                                   const ClientId &client_id, const std::string &method,
-                                                   const std::string &params_json)>;
-
-  // Called when a new client connects (before registration).
-  using ConnectHandler = std::function<void (const ClientId &client_id)>;
-
-  // Called when a client disconnects.
-  using DisconnectHandler = std::function<void (const ClientId &client_id)>;
-
   class Dispatcher
   {
   public:
-    explicit Dispatcher (const std::string &socket_path);
+    explicit Dispatcher (const std::string &socket_dir);
     ~Dispatcher ();
 
-    // Register a handler for a JSON-RPC method name (e.g. "executor.register")
-    void on_method (const std::string &method, MethodHandler handler);
-    void on_connect (ConnectHandler handler);
-    void on_disconnect (DisconnectHandler handler);
+    // Bind the PULL and PUB sockets (called once at startup)
+    bool bind ();
 
-    // Start the event loop (blocks until stop() is called)
+    // Start the event loop for the PULL socket (blocks until stop() is called)
     bool listen ();
 
-    // Send a JSON-RPC request to a specific client; invoke callback with
-    // response
+    // Create a per-task PUSH socket, bind it, and return its path.
+    // The caller should pass the path to the agent via environment variable.
+    std::string create_task_push (const std::string &task_id);
+
+    // Close and destroy a per-task PUSH socket (after agent exits)
+    void close_task_push (const std::string &task_id);
+
+    // Send a task JSON to a worker via the per-task PUSH socket.
+    void send_task (const std::string &task_id, const std::string &task_json);
+
+    // Receive a result JSON from the PULL socket (blocks).
+    // Returns empty string on error or stop.
+    std::string receive_result ();
+
+    // Broadcast an event JSON via the PUB socket.
+    void broadcast_event (const std::string &event_json);
+
+    // Send a JSON-RPC request to a specific client (adviser) and invoke
+    // callback with response. This is used for adviser communication.
+    // For now, we use a simple synchronous approach.
     void send_request (const ClientId &client_id, const std::string &method,
                        const std::string &params_json,
                        std::function<void (const std::string &result_json,
                                            const std::string &error_json)>
                          callback);
 
-    // Send a JSON-RPC notification (no response expected)
-    void send_notification (const ClientId &client_id,
-                            const std::string &method,
-                            const std::string &params_json);
-
     void stop ();
 
   private:
-    std::string socket_path_;
+    std::string socket_dir_;
     zmq::context_t *context_;
-    zmq::socket_t *socket_;
-    std::unordered_map<std::string, MethodHandler> method_handlers_;
-    ConnectHandler connect_handler_;
-    DisconnectHandler disconnect_handler_;
+    zmq::socket_t *pull_socket_;
+    zmq::socket_t *pub_socket_;
+    std::unordered_map<std::string, zmq::socket_t *> task_push_sockets_;
     bool running_;
 
-    // Pending requests: request_id -> callback
+    // Pending requests: request_id -> callback (for adviser communication)
     std::unordered_map<std::string,
                        std::function<void (const std::string &,
                                            const std::string &)>>

@@ -22,8 +22,9 @@ namespace agentos
   class Registry
   {
   public:
-    Registry () = default;
+    Registry ();
     explicit Registry (const std::string &db_path);
+    ~Registry ();
 
     Registry (const Registry &) = delete;
     Registry &operator= (const Registry &) = delete;

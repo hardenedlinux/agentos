@@ -1,9 +1,9 @@
 #include "forge_manager.hpp"
 #include "database.hpp"
-#include "registry.hpp"
-#include "dispatcher.hpp"
-#include "orchestrator.hpp"
-#include "obs_bus.hpp"
+#include "agentos/registry.h"
+#include "agentos/dispatcher.h"
+#include "agentos/orchestrator.h"
+#include "agentos/obs_bus.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <random>

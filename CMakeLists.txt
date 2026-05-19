@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.25)
 project(agentos_superbuild C CXX)
 
+option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
+option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
+option(AGENTOS_BUILD_TESTS "Build unit tests"                      OFF)
+option(AGENTOS_STRIP       "Strip release binary"                  ON)
+option(AGENTOS_COVERAGE    "Enable code coverage (gcov/lcov)"      OFF)
+
+if(AGENTOS_STATIC)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+endif()
+
 # Use all available CPU cores for parallel builds
 if(NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
   include(ProcessorCount)
@@ -9,12 +19,6 @@ if(NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
     set(CMAKE_BUILD_PARALLEL_LEVEL ${N})
   endif()
 endif()
-
-option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
-option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
-option(AGENTOS_BUILD_TESTS "Build unit tests"                      OFF)
-option(AGENTOS_STRIP       "Strip release binary"                  ON)
-option(AGENTOS_COVERAGE    "Enable code coverage (gcov/lcov)"      OFF)
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 

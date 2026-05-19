@@ -34,12 +34,11 @@ target_compile_options(agentos_tests PRIVATE
 
 target_link_libraries(agentos_tests PRIVATE
   agentos_core
-  ${GTEST_MAIN}
-  ${GTEST_LIB}
-  ${GMOCK_LIB}
-  ${LIBUV_LIB}
-  pthread
-  dl
+  GTest::gtest
+  GTest::gtest_main
+  GTest::gmock
+  spdlog::spdlog
+  ${ZMQ_LIB}
 )
 
 if(AGENTOS_STATIC)

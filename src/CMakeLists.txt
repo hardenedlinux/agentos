@@ -41,9 +41,6 @@ target_link_libraries(agentos PRIVATE spdlog::spdlog ${ZMQ_LIB})
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
-
-  # Link test dependencies
-  target_link_libraries(agentos_tests PRIVATE spdlog::spdlog ${ZMQ_LIB} GTest::gtest GTest::gtest_main GTest::gmock)
 endif()
 
 install(TARGETS agentos RUNTIME DESTINATION dist/bin)

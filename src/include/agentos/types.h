@@ -44,7 +44,7 @@ namespace agentos
       Error error;
       bool ok = false;
 
-      Result() = default;
+      Result() : value{}, ok(false) {}
       Result(T val) : value(std::move(val)), ok(true) {}
       Result(Error err, ErrorTag) : error(std::move(err)), ok(false) {}
   };

@@ -44,6 +44,7 @@ static void print_banner ()
 
   Core:    Single-binary Agent Runtime  |  C++23
   Plugins: Unix Sockets + JSON-RPC 2.0  |  Language-agnostic clients
+  Subsystems: Dispatcher, Registry, Verifier, Scheduler, Orchestrator, ObsBus
 )" << "\n";
 }
 

@@ -80,22 +80,27 @@ else
   cmake --build "$BUILD_DIR" --parallel "$JOBS"
 fi
 
-BINARY="$DIST_DIR/bin/agentos"
+BINARY="$BUILD_DIR/src/agentos"
 echo ""
 echo "─────────────────────────────────────────────────────────────"
 echo " Binary : $BINARY"
-echo " Size   : $(ls -lh "$BINARY" | awk '{print $5}')"
-echo "─────────────────────────────────────────────────────────────"
+if [ -f "$BINARY" ]; then
+  echo " Size   : $(ls -lh "$BINARY" | awk '{print $5}')"
+  echo "─────────────────────────────────────────────────────────────"
 
-if command -v ldd &>/dev/null; then
-  echo " ldd output:"
-  ldd "$BINARY" 2>&1 | sed 's/^/   /'
+  if command -v ldd &>/dev/null; then
+    echo " ldd output:"
+    ldd "$BINARY" 2>&1 | sed 's/^/   /'
+  fi
+  echo "─────────────────────────────────────────────────────────────"
+
+  echo ""
+  echo "→ Running binary:"
+  "$BINARY"
+else
+  echo " (binary not found – skipping size/ldd/run)"
 fi
 echo "─────────────────────────────────────────────────────────────"
-
-echo ""
-echo "→ Running binary:"
-"$BINARY"
 
 echo ""
 echo "✓ Build complete. Binary at: $BINARY"

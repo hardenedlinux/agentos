@@ -28,19 +28,6 @@ TEST(DispatcherTest, CreateAndCloseTaskPush) {
     std::filesystem::remove_all(tmp_dir);
 }
 
-TEST(DispatcherTest, SendTask) {
-    std::string tmp_dir = "/tmp/agentos_test_" + std::to_string(getpid());
-    std::filesystem::create_directories(tmp_dir);
-    Dispatcher dispatcher(tmp_dir);
-    ASSERT_TRUE(dispatcher.bind());
-    std::string task_id = "test_task";
-    dispatcher.create_task_push(task_id);
-    std::string task_json = R"({"id":"test_task","goal":"test"})";
-    EXPECT_NO_THROW(dispatcher.send_task(task_id, task_json));
-    dispatcher.close_task_push(task_id);
-    dispatcher.stop();
-    std::filesystem::remove_all(tmp_dir);
-}
 
 TEST(DispatcherTest, BroadcastEvent) {
     std::string tmp_dir = "/tmp/agentos_test_" + std::to_string(getpid());

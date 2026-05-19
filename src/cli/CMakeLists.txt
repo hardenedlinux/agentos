@@ -2,6 +2,11 @@ add_executable(agentos main.cpp)
 
 target_link_libraries(agentos PRIVATE agentos_core)
 
+if(AGENTOS_COVERAGE)
+  target_compile_options(agentos PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+  target_link_options(agentos PRIVATE --coverage)
+endif()
+
 if(AGENTOS_STATIC AND NOT AGENTOS_MUSL)
   target_link_options(agentos PRIVATE
     -static-libgcc

@@ -23,9 +23,11 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include <sqlite3.h>
+#include <memory>
 
 namespace agentos {
+
+class Database; // forward declaration
 
 class Orchestrator {
 public:
@@ -45,12 +47,10 @@ private:
     Verifier&   verifier_;
     Scheduler&  scheduler_;
     Dispatcher& dispatcher_;
-    sqlite3*    db_;
+    std::unique_ptr<Database> db_;
     std::string db_path_;
 
     // Database helpers
-    bool init_db();
-    void close_db();
     void store_job(const Task& task);
     void update_job_phase(const TaskId& id, const std::string& phase);
     void update_job_plan(const TaskId& id, const std::string& plan_json);

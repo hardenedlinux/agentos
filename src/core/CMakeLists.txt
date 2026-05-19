@@ -7,6 +7,7 @@ set(AGENTOS_CORE_SOURCES
   master/master.cpp
   orchestrator/orchestrator.cpp
   obs_bus/obs_bus.cpp
+  database/database.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
@@ -30,6 +31,8 @@ target_include_directories(agentos_core PUBLIC
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
 )
+
+target_include_directories(agentos_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
 

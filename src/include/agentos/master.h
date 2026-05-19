@@ -18,6 +18,7 @@
 #include "agentos/verifier.h"
 #include "agentos/scheduler.h"
 #include "agentos/orchestrator.h"
+#include <string>
 
 namespace agentos {
 
@@ -26,7 +27,8 @@ public:
     Master(Dispatcher&  dispatcher,
            Registry&    registry,
            Verifier&    verifier,
-           Scheduler&   scheduler);
+           Scheduler&   scheduler,
+           const std::string& db_path = "");
 
     // Submit a task for execution. Blocking — returns when complete.
     TaskResult submit(const Task& task);

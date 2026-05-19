@@ -6,8 +6,9 @@ namespace agentos {
 Master::Master(Dispatcher&  dispatcher,
                Registry&    registry,
                Verifier&    verifier,
-               Scheduler&   scheduler)
-    : orchestrator_(registry, verifier, scheduler, dispatcher)
+               Scheduler&   scheduler,
+               const std::string& db_path)
+    : orchestrator_(registry, verifier, scheduler, dispatcher, db_path)
 {}
 
 TaskResult Master::submit(const Task& task) {

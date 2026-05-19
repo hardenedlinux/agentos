@@ -105,7 +105,7 @@ static void verify_architecture ()
   agentos::Scheduler scheduler (registry, dispatcher);
 
   agentos::Master master (dispatcher, registry, verifier,
-                          scheduler);
+                          scheduler, "/tmp/agentos_test.db");
 
   spdlog::info ("Dispatcher    ✓");
   spdlog::info ("Registry      ✓");

@@ -21,6 +21,9 @@
 #include "agentos/scheduler.h"
 #include "agentos/dispatcher.h"
 #include <optional>
+#include <string>
+#include <vector>
+#include <sqlite3.h>
 
 namespace agentos {
 
@@ -29,7 +32,10 @@ public:
     Orchestrator(Registry&    registry,
                  Verifier&    verifier,
                  Scheduler&   scheduler,
-                 Dispatcher&  dispatcher);
+                 Dispatcher&  dispatcher,
+                 const std::string& db_path = "");
+
+    ~Orchestrator();
 
     // Submit a task for execution. Blocking — returns when complete.
     TaskResult submit(const Task& task);
@@ -39,6 +45,21 @@ private:
     Verifier&   verifier_;
     Scheduler&  scheduler_;
     Dispatcher& dispatcher_;
+    sqlite3*    db_;
+    std::string db_path_;
+
+    // Database helpers
+    bool init_db();
+    void close_db();
+    void store_job(const Task& task);
+    void update_job_phase(const TaskId& id, const std::string& phase);
+    void update_job_plan(const TaskId& id, const std::string& plan_json);
+    void store_task(const TaskId& job_id, const PlanStep& step);
+    void update_task_result(const TaskId& task_id, const std::string& result, const std::string& status);
+    std::vector<Task> load_in_flight_jobs();
+    void resume_in_flight();
+    std::string load_plan_json(const TaskId& job_id);
+    std::string serialize_plan(const Plan& plan) const;
 
     // Ask the chosen adviser to produce a Plan for this task.
     std::optional<Plan> request_plan(const RegisteredAdviser& adviser,

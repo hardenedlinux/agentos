@@ -27,7 +27,10 @@ target_compile_options(agentos_core PRIVATE
   $<$<CONFIG:Debug>:-O0>
 )
 
+find_package(SQLite3 REQUIRED)
+
 target_link_libraries(agentos_core PUBLIC
   pthread
   dl
+  SQLite::SQLite3
 )

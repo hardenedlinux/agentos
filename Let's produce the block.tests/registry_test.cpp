@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "agentos/database.h"
 #include "agentos/registry.h"
 #include "agentos/types.h"
 
@@ -68,6 +69,7 @@ class RegistryTest : public ::testing::Test
 {
 protected:
   std::string db_path_;
+  Database *db_ = nullptr;
 
   void SetUp() override
   {
@@ -81,7 +83,20 @@ protected:
 
   void TearDown() override
   {
+    if (db_)
+    {
+      db_->close();
+      delete db_;
+    }
     std::remove(db_path_.c_str());
+  }
+
+  // Helper to create a Database object and open it
+  Database& open_db()
+  {
+    db_ = new Database(db_path_);
+    EXPECT_TRUE(db_->open());
+    return *db_;
   }
 };
 
@@ -93,8 +108,9 @@ TEST_F(RegistryTest, EmptyDatabase)
 {
   // Create an empty database (no agents)
   create_test_db(db_path_, {});
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.adviser_count(), 0);
   EXPECT_EQ(reg.worker_count(), 0);
   EXPECT_FALSE(reg.find_adviser("research").has_value());
@@ -113,8 +129,9 @@ TEST_F(RegistryTest, SingleAdviser)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.adviser_count(), 1);
   EXPECT_EQ(reg.worker_count(), 0);
 
@@ -143,8 +160,9 @@ TEST_F(RegistryTest, SingleWorker)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.adviser_count(), 0);
   EXPECT_EQ(reg.worker_count(), 1);
 
@@ -199,8 +217,9 @@ TEST_F(RegistryTest, MultipleAgents)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.adviser_count(), 1);
   EXPECT_EQ(reg.worker_count(), 2);
 
@@ -249,8 +268,9 @@ TEST_F(RegistryTest, DisabledAgentIgnored)
   )");
 
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.worker_count(), 0);
   EXPECT_FALSE(reg.find_worker_for_command("web.search").has_value());
 }
@@ -308,11 +328,12 @@ TEST_F(RegistryTest, LoadFromDbAfterDefaultConstructor)
             'human', 1700000000, 1)
   )");
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
   Registry reg;
   EXPECT_EQ(reg.worker_count(), 0);
 
-  reg.load_from_db(db_path_);
+  reg.load_from_db(db);
   EXPECT_EQ(reg.worker_count(), 1);
   EXPECT_TRUE(reg.find_worker_for_command("web.search").has_value());
 }
@@ -327,11 +348,12 @@ TEST_F(RegistryTest, LoadFromDbTwiceIgnored)
             'human', 1700000000, 1)
   )");
   create_test_db(db_path_, inserts);
+  Database &db = open_db();
 
-  Registry reg(db_path_);
+  Registry reg(db);
   EXPECT_EQ(reg.worker_count(), 1);
 
   // Second load should be ignored (warning logged)
-  reg.load_from_db(db_path_);
+  reg.load_from_db(db);
   EXPECT_EQ(reg.worker_count(), 1);
 }

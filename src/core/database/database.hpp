@@ -23,6 +23,9 @@ public:
     void close();
     bool is_open() const;
 
+    // Expose the underlying sqlite3 handle for use by Registry (static catalog)
+    sqlite3* db_handle() const;
+
     // Store/update jobs
     void store_job(const Task& task);
     void update_job_phase(const TaskId& id, const std::string& phase);

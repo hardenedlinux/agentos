@@ -1,4 +1,5 @@
 #include "agentos/registry.h"
+#include "agentos/database.h"
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <rapidjson/document.h>
@@ -169,10 +170,10 @@ namespace agentos
   {
   }
 
-  Registry::Registry (const std::string &db_path)
+  Registry::Registry (Database &db)
     : impl_ (std::make_unique<Impl> ())
   {
-    load_from_db (db_path);
+    load_from_db (db);
   }
 
   Registry::Registry (Registry &&other) noexcept
@@ -189,11 +190,11 @@ namespace agentos
 
   Registry::~Registry ()
   {
-    if (impl_ && impl_->db)
-      sqlite3_close (impl_->db);
+    // Do not close the database; it is owned by the Database object.
+    impl_->db = nullptr;
   }
 
-  void Registry::load_from_db (const std::string &db_path)
+  void Registry::load_from_db (Database &db)
   {
     if (impl_->db)
     {
@@ -201,11 +202,10 @@ namespace agentos
       return;
     }
 
-    int rc = sqlite3_open (db_path.c_str (), &impl_->db);
-    if (rc != SQLITE_OK)
+    impl_->db = db.db_handle ();
+    if (!impl_->db)
     {
-      spdlog::error ("[registry] open db '{}' failed: {}", db_path,
-                     sqlite3_errmsg (impl_->db));
+      spdlog::error ("[registry] database not open");
       return;
     }
 
@@ -231,7 +231,7 @@ namespace agentos
       );
     )";
     char *err = nullptr;
-    rc = sqlite3_exec (impl_->db, create_sql, nullptr, nullptr, &err);
+    int rc = sqlite3_exec (impl_->db, create_sql, nullptr, nullptr, &err);
     if (rc != SQLITE_OK)
     {
       spdlog::error ("[registry] create tables: {}", err);

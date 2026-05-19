@@ -77,6 +77,10 @@ bool Database::is_open() const {
     return impl_->db != nullptr;
 }
 
+sqlite3* Database::db_handle() const {
+    return impl_->db;
+}
+
 void Database::store_job(const Task& task) {
     if (!impl_->db) return;
     const char* sql = R"(

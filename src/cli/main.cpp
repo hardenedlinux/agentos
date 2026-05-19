@@ -101,7 +101,9 @@ static void verify_architecture ()
 
   // Instantiate all subsystems and verify they wire together
   agentos::Dispatcher dispatcher ("/run/agentos");
-  agentos::Registry registry ("/tmp/agentos_test.db");
+  agentos::Database database ("/tmp/agentos_test.db");
+  database.open ();
+  agentos::Registry registry (database);
   agentos::ObsBus obs;
 
   agentos::Verifier verifier (registry);

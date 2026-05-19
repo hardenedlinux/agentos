@@ -23,7 +23,7 @@ namespace agentos
   {
   public:
     Registry ();
-    explicit Registry (const std::string &db_path);
+    explicit Registry (Database &db);
     ~Registry ();
 
     Registry (const Registry &) = delete;
@@ -33,7 +33,7 @@ namespace agentos
     Registry &operator= (Registry &&other) noexcept;
 
     // Load static catalog from SQLite database (ADR-007)
-    void load_from_db (const std::string &db_path);
+    void load_from_db (Database &db);
 
     // Runtime registration is deprecated; these are no-ops.
     void register_adviser (const RegisteredAdviser &agent);

@@ -30,6 +30,11 @@ target_include_directories(agentos_tests PRIVATE
   ${CPPZMQ_INC}
 )
 
+if(AGENTOS_COVERAGE)
+  target_compile_options(agentos_tests PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+  target_link_options(agentos_tests PRIVATE --coverage)
+endif()
+
 # Register with CTest
 include(GoogleTest)
 gtest_discover_tests(agentos_tests)

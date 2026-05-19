@@ -161,11 +161,11 @@ TEST_F(ForgeDatabaseTest, GetJobsByPhase) {
 
     auto draftingJobs = forgeDb.get_jobs_by_phase("Drafting");
     EXPECT_EQ(draftingJobs.size(), 1);
-    EXPECT_EQ(draftingJobs[0].id, "j1");
+    EXPECT_EQ(draftingJobs[0].id.value(), "j1");
 
     auto humanReviewJobs = forgeDb.get_jobs_by_phase("HumanReview");
     EXPECT_EQ(humanReviewJobs.size(), 1);
-    EXPECT_EQ(humanReviewJobs[0].id, "j2");
+    EXPECT_EQ(humanReviewJobs[0].id.value(), "j2");
 
     auto approvedJobs = forgeDb.get_jobs_by_phase("Approved");
     EXPECT_TRUE(approvedJobs.empty());

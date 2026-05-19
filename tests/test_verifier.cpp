@@ -105,7 +105,7 @@ static Registry make_registry(const std::string &db_path)
   inserts.push_back(R"(
     INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
     VALUES ('ex-1', 'worker', '/usr/bin/worker1',
-            '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"Searches the web","input_schema":{"query":{"type":"string"},"max_results":{"type":"integer"}},"output_schema":{}}]}',
+            '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"Searches the web","input_schema":{"query":{"type":"string","required":true},"max_results":{"type":"integer","required":false}},"output_schema":{}}]}',
             'human', 1700000000, 1)
   )");
   create_test_db(db_path, inserts);

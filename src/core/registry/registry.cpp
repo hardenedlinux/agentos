@@ -37,9 +37,33 @@ namespace agentos
     for (auto it = obj.MemberBegin (); it != obj.MemberEnd (); ++it)
     {
       ArgSchema arg;
-      arg.type = it->value.GetString (); // e.g. "string", "path", "int"
-      arg.description = "";
-      arg.required = true;
+      // The value can be a simple string (type) or an object with "type" and
+      // optional "required" fields.
+      if (it->value.IsString ())
+      {
+        arg.type = it->value.GetString ();
+        arg.required = true;
+      }
+      else if (it->value.IsObject ())
+      {
+        const auto &val = it->value;
+        if (val.HasMember ("type") && val["type"].IsString ())
+          arg.type = val["type"].GetString ();
+        else
+          arg.type = "string";
+        if (val.HasMember ("required") && val["required"].IsBool ())
+          arg.required = val["required"].GetBool ();
+        else
+          arg.required = true;
+        if (val.HasMember ("description") && val["description"].IsString ())
+          arg.description = val["description"].GetString ();
+      }
+      else
+      {
+        // fallback
+        arg.type = "string";
+        arg.required = true;
+      }
       result[it->name.GetString ()] = std::move (arg);
     }
     return result;

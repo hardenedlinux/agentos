@@ -46,6 +46,9 @@ namespace agentos
     // failure.
     TaskResult run (const Plan &plan);
 
+    // Validate capability declaration for a step (ADR-006 Layer 2)
+    bool validate_step_capabilities(const PlanStep &step);
+
   private:
     const Registry &registry_;
     Dispatcher &dispatcher_;

@@ -1,4 +1,5 @@
 #include "agentos/scheduler.h"
+#include "agentos/capability.h"
 #include "agentos/registry.h"
 #include <regex>
 #include <spdlog/spdlog.h>

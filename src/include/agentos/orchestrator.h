@@ -28,6 +28,7 @@
 #include "agentos/registry.h"
 #include "agentos/verifier.h"
 #include "agentos/scheduler.h"
+#include "agentos/master.h"
 
 namespace agentos {
 

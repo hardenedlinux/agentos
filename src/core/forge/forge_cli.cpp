@@ -70,7 +70,8 @@ void ForgeCli::list_jobs() {
 
     // Receive response
     zmq::message_t reply;
-    sock.recv(reply, zmq::recv_flags::none);
+    auto recv_res = sock.recv(reply, zmq::recv_flags::none);
+    (void)recv_res;
     std::string response(static_cast<char*>(reply.data()), reply.size());
 
     // Parse and display
@@ -99,7 +100,8 @@ void ForgeCli::show_job(const std::string& id) {
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;
-    sock.recv(reply, zmq::recv_flags::none);
+    auto recv_res = sock.recv(reply, zmq::recv_flags::none);
+    (void)recv_res;
     std::string response(static_cast<char*>(reply.data()), reply.size());
 
     rapidjson::Document doc;
@@ -127,7 +129,8 @@ void ForgeCli::approve_job(const std::string& id) {
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;
-    sock.recv(reply, zmq::recv_flags::none);
+    auto recv_res = sock.recv(reply, zmq::recv_flags::none);
+    (void)recv_res;
     std::string response(static_cast<char*>(reply.data()), reply.size());
     std::cout << response << std::endl;
 }
@@ -142,7 +145,8 @@ void ForgeCli::reject_job(const std::string& id, const std::string& reason) {
     sock.send(request, zmq::send_flags::none);
 
     zmq::message_t reply;
-    sock.recv(reply, zmq::recv_flags::none);
+    auto recv_res = sock.recv(reply, zmq::recv_flags::none);
+    (void)recv_res;
     std::string response(static_cast<char*>(reply.data()), reply.size());
     std::cout << response << std::endl;
 }

@@ -95,20 +95,13 @@ static void verify_architecture ()
   spdlog::info ("--- architecture check ---");
 
   // Instantiate all subsystems and verify they wire together
-  agentos::Dispatcher dispatcher ("/run/agentos/agentos.sock");
+  agentos::Dispatcher dispatcher ("/run/agentos");
   agentos::Registry registry;
   agentos::ObsBus obs;
 
   agentos::Verifier verifier (registry);
 
-  agentos::Scheduler scheduler (
-    registry,
-    [&] (const agentos::ClientId &eid, const std::string &cmd,
-         const std::string &args) -> std::string
-    {
-      spdlog::debug ("execute stub: executor={} cmd={}", eid, cmd);
-      return R"({"result":"stub"})";
-    });
+  agentos::Scheduler scheduler (registry, dispatcher);
 
   agentos::Master master (dispatcher, registry, verifier,
                           scheduler);

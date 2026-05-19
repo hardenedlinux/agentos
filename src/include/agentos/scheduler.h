@@ -13,10 +13,11 @@
  *   - Collect all step results into a StepResultMap
  *
  * The Scheduler does not know about agents or LLMs.
- * It receives a validated Plan and a send function, and drives execution.
+ * It receives a validated Plan and a Dispatcher, and drives execution.
  */
 
 #include "agentos/types.h"
+#include "agentos/dispatcher.h"
 #include <functional>
 #include <unordered_map>
 
@@ -28,12 +29,6 @@ namespace agentos
   // Values are raw JSON strings from the executor.
   using StepResultMap = std::unordered_map<std::string, std::string>;
 
-  // Function the Scheduler calls to actually send a command to an executor.
-  // Provided by the Orchestrator (which holds the Dispatcher).
-  using ExecuteFn = std::function<std::string (const ClientId &executor_id,
-                                               const std::string &command,
-                                               const std::string &args_json)>;
-
   struct SchedulerConfig
   {
     int max_retries = 2;
@@ -43,7 +38,7 @@ namespace agentos
   class Scheduler
   {
   public:
-    explicit Scheduler (const Registry &registry, ExecuteFn execute_fn,
+    explicit Scheduler (const Registry &registry, Dispatcher &dispatcher,
                         const SchedulerConfig &config = {});
 
     // Execute a validated plan. Blocks until all steps complete or fail.
@@ -53,7 +48,7 @@ namespace agentos
 
   private:
     const Registry &registry_;
-    ExecuteFn execute_fn_;
+    Dispatcher &dispatcher_;
     SchedulerConfig config_;
 
     std::string interpolate_args (const std::string &args_template_json,

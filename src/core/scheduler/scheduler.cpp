@@ -2,13 +2,16 @@
 #include "agentos/registry.h"
 #include <regex>
 #include <spdlog/spdlog.h>
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
 
 namespace agentos
 {
 
-  Scheduler::Scheduler (const Registry &registry, ExecuteFn execute_fn,
+  Scheduler::Scheduler (const Registry &registry, Dispatcher &dispatcher,
                         const SchedulerConfig &config)
-    : registry_ (registry), execute_fn_ (std::move (execute_fn)),
+    : registry_ (registry), dispatcher_ (dispatcher),
       config_ (config)
   {
   }
@@ -51,15 +54,40 @@ namespace agentos
       = "{}"; // TODO: serialise step.args with interpolation
       // args_json = interpolate_args(step.args_json, results);
 
+      // Build task JSON for the worker
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+      w.StartObject();
+      w.Key("job_id");   w.String(plan.task_id.c_str());
+      w.Key("task_id");  w.String(step.id.c_str());
+      w.Key("method");   w.String(step.command.c_str());
+      w.Key("params");
+      w.RawValue(args_json.c_str(), args_json.size(), rapidjson::kObjectType);
+      w.EndObject();
+      std::string task_json = buf.GetString();
+
+      // Create per-task PUSH socket and send task
+      std::string push_path = dispatcher_.create_task_push(step.id);
+      if (push_path.empty())
+      {
+        return TaskResult{plan.task_id, false, "",
+                          "failed to create PUSH socket for step " + step.id};
+      }
+
       std::string result_json;
       for (int attempt = 0; attempt <= config_.max_retries; ++attempt)
-        {
-          result_json = execute_fn_ (executor->id, step.command, args_json);
-          if (!result_json.empty ())
-            break;
-          spdlog::warn ("[scheduler] step '{}' attempt {} failed, retrying",
-                        step.id, attempt + 1);
-        }
+      {
+        dispatcher_.send_task(step.id, task_json);
+        // Wait for result (blocking)
+        result_json = dispatcher_.receive_result();
+        if (!result_json.empty())
+          break;
+        spdlog::warn ("[scheduler] step '{}' attempt {} failed, retrying",
+                      step.id, attempt + 1);
+      }
+
+      // Close per-task PUSH socket
+      dispatcher_.close_task_push(step.id);
 
       results[step.id] = result_json;
       spdlog::info ("[scheduler] step '{}' done", step.id);

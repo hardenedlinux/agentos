@@ -5,6 +5,7 @@ set(AGENTOS_CORE_SOURCES
   verifier/verifier.cpp
   scheduler/scheduler.cpp
   master/master.cpp
+  orchestrator/orchestrator.cpp
   obs_bus/obs_bus.cpp
 )
 

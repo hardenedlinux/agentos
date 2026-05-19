@@ -116,15 +116,46 @@ protected:
 // ---------------------------------------------------------------------------
 static Registry make_registry(Database &db)
 {
-  std::vector<std::string> inserts;
-  inserts.push_back(R"(
+  sqlite3 *handle = db.db_handle();
+  ASSERT_NE(handle, nullptr);
+
+  // Create tables if they don't exist
+  const char *create_sql = R"(
+    CREATE TABLE IF NOT EXISTS agents (
+        id          TEXT PRIMARY KEY,
+        role        TEXT NOT NULL,
+        binary_path TEXT NOT NULL,
+        manifest    TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS capabilities (
+        agent_id     TEXT NOT NULL REFERENCES agents(id),
+        method       TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        input_schema TEXT NOT NULL,
+        cpu_weight   INTEGER,
+        memory_mb    INTEGER,
+        PRIMARY KEY (agent_id, method)
+    );
+  )";
+  char *err = nullptr;
+  int rc = sqlite3_exec(handle, create_sql, nullptr, nullptr, &err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Create tables failed: " << err;
+  sqlite3_free(err);
+
+  // Insert the worker
+  const char *insert_sql = R"(
     INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
     VALUES ('ex-1', 'worker', '/usr/bin/worker1',
             '{"name":"web-search","version":"1.0","capabilities":[{"method":"web.search","description":"Searches the web","input_schema":{"query":{"type":"string","required":true},"max_results":{"type":"integer","required":false}},"output_schema":{}}]}',
             'human', 1700000000, 1)
-  )");
-  create_test_db(db.db_handle() ? "" : "", inserts); // not used, we already have db
-  // We'll just use the existing db (already created by fixture)
+  )";
+  rc = sqlite3_exec(handle, insert_sql, nullptr, nullptr, &err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Insert failed: " << err;
+  sqlite3_free(err);
+
   return Registry(db);
 }
 

@@ -51,21 +51,16 @@ if(NOT ZMQ_LIB)
   message(FATAL_ERROR "Could not find libzmq.a in build tree")
 endif()
 
-# SQLite3 (static)
-FetchContent_Declare(sqlite3
+# SQLite3 (amalgamation) — compile sqlite3.c directly into agentos_core
+FetchContent_Declare(sqlite3_amalgamation
   URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
 )
-set(SQLITE3_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(SQLITE3_BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(SQLITE3_ENABLE_JSON1 ON CACHE BOOL "" FORCE)
-set(SQLITE3_ENABLE_FTS5 ON CACHE BOOL "" FORCE)
-set(SQLITE3_ENABLE_RTREE ON CACHE BOOL "" FORCE)
-set(SQLITE3_OMIT_LOAD_EXTENSION ON CACHE BOOL "" FORCE)
-message(STATUS "Downloading sqlite3...")
-FetchContent_MakeAvailable(sqlite3)
-if(NOT TARGET sqlite3)
-  message(FATAL_ERROR "Failed to fetch sqlite3")
+message(STATUS "Downloading sqlite3 amalgamation...")
+FetchContent_MakeAvailable(sqlite3_amalgamation)
+if(NOT sqlite3_amalgamation_POPULATED)
+  message(FATAL_ERROR "Failed to fetch sqlite3 amalgamation")
 endif()
+set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3 source directory")
 
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 FetchContent_Declare(cppzmq

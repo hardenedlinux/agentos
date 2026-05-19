@@ -7,6 +7,7 @@ set(AGENTOS_CORE_SOURCES
   master/master.cpp
   orchestrator/orchestrator.cpp
   obs_bus/obs_bus.cpp
+  ${SQLITE3_SRC_DIR}/sqlite3.c
 )
 
 add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
@@ -20,6 +21,15 @@ target_include_directories(agentos_core PUBLIC
   ${SPDLOG_INC}
 )
 
+target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
+
+target_compile_definitions(agentos_core PRIVATE
+  SQLITE_ENABLE_JSON1
+  SQLITE_ENABLE_FTS5
+  SQLITE_ENABLE_RTREE
+  SQLITE_OMIT_LOAD_EXTENSION
+)
+
 target_compile_options(agentos_core PRIVATE
   -Wall -Wextra -Wpedantic -Wno-unused-parameter
   $<$<CONFIG:Release>:-O2>
@@ -30,5 +40,4 @@ target_compile_options(agentos_core PRIVATE
 target_link_libraries(agentos_core PUBLIC
   pthread
   dl
-  sqlite3
 )

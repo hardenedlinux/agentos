@@ -57,7 +57,7 @@ std::optional<Plan> Orchestrator::request_plan(const RegisteredAdviser& adviser,
     //   "input": {...},
     //   "available_commands": [ { name, description, input, output, limits }, ... ]
     // }
-    // The adviser uses available_commands to know what executors exist and what they do.
+    // The adviser uses available_commands to know what workers exist and what they do.
     // It must respond with a Plan JSON.
 
     rapidjson::StringBuffer buf;

@@ -42,11 +42,11 @@ namespace agentos
       spdlog::info ("[scheduler] executing step '{}' command '{}'", step.id,
                     step.command);
 
-      auto executor = registry_.find_executor_for_command (step.command);
-      if (!executor)
+      auto worker = registry_.find_worker_for_command (step.command);
+      if (!worker)
       {
         return TaskResult{plan.task_id, false, "",
-                          "no executor for command: " + step.command};
+                          "no worker for command: " + step.command};
       }
 
       // Interpolate {{step.field}} variable references

@@ -2,7 +2,7 @@
 /**
  * agentos/scheduler.h
  *
- * Scheduler — executes a validated Plan against the registered executors.
+ * Scheduler — executes a validated Plan against the registered workers.
  *
  * Responsibilities:
  *   - Topological sort of plan steps by depends_on
@@ -26,7 +26,7 @@ namespace agentos
   class Registry;
 
   // Results from each step, keyed by step id.
-  // Values are raw JSON strings from the executor.
+  // Values are raw JSON strings from the worker.
   using StepResultMap = std::unordered_map<std::string, std::string>;
 
   struct SchedulerConfig

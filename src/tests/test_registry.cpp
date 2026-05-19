@@ -3,7 +3,7 @@
 
 using namespace agentos;
 
-static RegisteredExecutor make_executor(const std::string& id, const std::string& name,
+static RegisteredExecutor make_worker(const std::string& id, const std::string& name,
                                          std::vector<std::string> cmds) {
     RegisteredExecutor ex;
     ex.id   = id;
@@ -28,16 +28,16 @@ static RegisteredAdviser make_adviser(const std::string& id, const std::string& 
 
 TEST(Registry, RegisterAndFindExecutor) {
     Registry reg;
-    reg.register_executor(make_executor("ex-1", "web-search", {"web.search", "web.fetch"}));
+    reg.register_worker(make_worker("ex-1", "web-search", {"web.search", "web.fetch"}));
 
-    auto ex = reg.find_executor_for_command("web.search");
+    auto ex = reg.find_worker_for_command("web.search");
     ASSERT_TRUE(ex.has_value());
     EXPECT_EQ(ex->id, "ex-1");
 }
 
 TEST(Registry, UnknownCommandReturnsNullopt) {
     Registry reg;
-    EXPECT_FALSE(reg.find_executor_for_command("nonexistent.cmd").has_value());
+    EXPECT_FALSE(reg.find_worker_for_command("nonexistent.cmd").has_value());
 }
 
 TEST(Registry, RegisterAndFindAgent) {
@@ -56,17 +56,17 @@ TEST(Registry, UnknownDomainReturnsNullopt) {
 
 TEST(Registry, RemoveExecutorUnregistersCommands) {
     Registry reg;
-    reg.register_executor(make_executor("ex-1", "web-search", {"web.search"}));
-    ASSERT_TRUE(reg.find_executor_for_command("web.search").has_value());
+    reg.register_worker(make_worker("ex-1", "web-search", {"web.search"}));
+    ASSERT_TRUE(reg.find_worker_for_command("web.search").has_value());
 
     reg.remove("ex-1");
-    EXPECT_FALSE(reg.find_executor_for_command("web.search").has_value());
+    EXPECT_FALSE(reg.find_worker_for_command("web.search").has_value());
 }
 
 TEST(Registry, AllCommandSchemas) {
     Registry reg;
-    reg.register_executor(make_executor("ex-1", "web",  {"web.search", "web.fetch"}));
-    reg.register_executor(make_executor("ex-2", "file", {"file.write", "file.read"}));
+    reg.register_worker(make_worker("ex-1", "web",  {"web.search", "web.fetch"}));
+    reg.register_worker(make_worker("ex-2", "file", {"file.write", "file.read"}));
 
     auto schemas = reg.all_command_schemas();
     EXPECT_EQ(schemas.size(), 4u);
@@ -75,7 +75,7 @@ TEST(Registry, AllCommandSchemas) {
 TEST(Registry, Counts) {
     Registry reg;
     reg.register_adviser(make_adviser("ag-1", "adviser", {"general"}));
-    reg.register_executor(make_executor("ex-1", "exec", {"cmd.run"}));
+    reg.register_worker(make_worker("ex-1", "exec", {"cmd.run"}));
     EXPECT_EQ(reg.adviser_count(),    1u);
-    EXPECT_EQ(reg.executor_count(), 1u);
+    EXPECT_EQ(reg.worker_count(), 1u);
 }

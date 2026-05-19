@@ -60,10 +60,10 @@ static void verify_deps ()
   auto [major, minor, patch] = zmq::version ();
   spdlog::info ("ZeroMQ {}.{}.{}  ✓", major, minor, patch);
 
-  // RapidJSON — build a sample executor.register handshake
+  // RapidJSON — build a sample worker.register handshake
   std::string payload = R"({
     "jsonrpc": "2.0",
-    "method": "executor.register",
+    "method": "worker.register",
     "params": {
         "name": "web-search",
         "version": "1.0.0",
@@ -85,7 +85,7 @@ static void verify_deps ()
   rapidjson::Document doc;
   doc.Parse (payload.data ());
 
-  spdlog::info ("RapidJSON  ✓  sample executor.register: {} bytes",
+  spdlog::info ("RapidJSON  ✓  sample worker.register: {} bytes",
                 payload.size ());
 
   spdlog::info ("--- end dependency check ---");
@@ -136,14 +136,14 @@ static void help ()
   spdlog::info ("");
   spdlog::info ("Core subsystems:");
   spdlog::info ("  Dispatcher   — Unix socket server, JSON-RPC 2.0 framing");
-  spdlog::info ("  Registry     — adviser + executor tables, command index");
+  spdlog::info ("  Registry     — adviser + worker tables, command index");
   spdlog::info ("  Verifier     — plan validation against registered commands");
   spdlog::info ("  Scheduler    — topological execution, parallelism, retries");
   spdlog::info (
-                "  Master       — task lifecycle coordinator (adviser → core → executor)");
+                "  Master       — task lifecycle coordinator (adviser → core → worker)");
   spdlog::info ("  ObsBus       — structured logs, metrics, task events");
   spdlog::info ("");
-  spdlog::info ("Ready. Waiting for advisers and executors to connect.");
+  spdlog::info ("Ready. Waiting for advisers and workers to connect.");
 }
 
 static void start (int argc, char *argv[])

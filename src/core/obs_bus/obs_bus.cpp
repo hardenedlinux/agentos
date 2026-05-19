@@ -40,7 +40,7 @@ void ObsBus::step_completed(const TaskId& task_id, const std::string& step_id, b
 
 void ObsBus::client_connected(const ClientId& id, ClientType type) {
     spdlog::info("[obs] client_connected id={} type={}", id,
-        type == ClientType::Adviser ? "adviser" : "executor");
+        type == ClientType::Adviser ? "adviser" : "worker");
 }
 
 void ObsBus::client_disconnected(const ClientId& id) {

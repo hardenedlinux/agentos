@@ -21,7 +21,7 @@ namespace agentos
   using TaskId = std::string;   // UUID assigned per task.submit
 
   // Executor command schema
-  // Self-described by the executor at registration time.
+  // Self-described by the worker at registration time.
   // The core uses this to validate agent plans before execution.
 
   struct ArgSchema

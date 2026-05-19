@@ -20,7 +20,7 @@ static Registry make_registry() {
     cs.input["max_results"] = n;
     ex.commands.push_back(cs);
 
-    reg.register_executor(ex);
+    reg.register_worker(ex);
     return reg;
 }
 

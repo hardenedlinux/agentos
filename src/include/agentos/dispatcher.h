@@ -11,7 +11,7 @@
  *                                                         created on demand,
  *                                                         torn down after agent exits
  *
- * The Dispatcher knows nothing about agents, executors, plans, or tasks.
+ * The Dispatcher knows nothing about agents, workers, plans, or tasks.
  * It only manages ZMQ sockets and message framing.
  *
  * Message framing:

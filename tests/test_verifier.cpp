@@ -117,7 +117,7 @@ protected:
 static Registry make_registry(Database &db)
 {
   sqlite3 *handle = db.db_handle();
-  ASSERT_NE(handle, nullptr);
+  EXPECT_NE(handle, nullptr);
 
   // Create tables if they don't exist
   const char *create_sql = R"(
@@ -142,7 +142,7 @@ static Registry make_registry(Database &db)
   )";
   char *err = nullptr;
   int rc = sqlite3_exec(handle, create_sql, nullptr, nullptr, &err);
-  ASSERT_EQ(rc, SQLITE_OK) << "Create tables failed: " << err;
+  EXPECT_EQ(rc, SQLITE_OK) << "Create tables failed: " << err;
   sqlite3_free(err);
 
   // Insert the worker
@@ -153,7 +153,7 @@ static Registry make_registry(Database &db)
             'human', 1700000000, 1)
   )";
   rc = sqlite3_exec(handle, insert_sql, nullptr, nullptr, &err);
-  ASSERT_EQ(rc, SQLITE_OK) << "Insert failed: " << err;
+  EXPECT_EQ(rc, SQLITE_OK) << "Insert failed: " << err;
   sqlite3_free(err);
 
   return Registry(db);

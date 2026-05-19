@@ -8,6 +8,7 @@ set(AGENTOS_CORE_SOURCES
   orchestrator/orchestrator.cpp
   obs_bus/obs_bus.cpp
   database/database.cpp
+  capability/capability.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)

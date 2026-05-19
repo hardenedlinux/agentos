@@ -72,6 +72,24 @@ namespace agentos
     std::vector<CommandSchema> commands; // self-described at registration
   };
 
+  // Sandbox tiers (ADR-006)
+
+  enum class SandboxTier
+  {
+    Tier0, // pre‑approved catalog workers
+    Tier1  // generated workers
+  };
+
+  // Capability declaration (ADR-006 Layer 2)
+
+  struct CapabilityDeclaration
+  {
+    bool network = false;
+    bool exec = false;
+    std::vector<std::string> fs_read;
+    std::vector<std::string> fs_write;
+  };
+
   // Plan (produced by Adviser, validated by Verifier)
 
   struct PlanStep
@@ -81,6 +99,7 @@ namespace agentos
     std::unordered_map<std::string, std::string>
       args;                              // key → value or "{{step_id.field}}"
     std::vector<std::string> depends_on; // other step ids
+    std::optional<CapabilityDeclaration> capabilities; // ADR-006 Layer 2
   };
 
   struct Plan

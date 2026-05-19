@@ -2,7 +2,10 @@ add_subdirectory(core)
 
 add_executable(agentos cli/main.cpp)
 target_link_libraries(agentos PRIVATE agentos_core)
-target_include_directories(agentos PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
+target_include_directories(agentos PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/include
+  ${CMAKE_SOURCE_DIR}/src/core
+)
 
 if(AGENTOS_COVERAGE)
   target_compile_options(agentos PRIVATE --coverage -fprofile-arcs -ftest-coverage)

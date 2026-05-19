@@ -323,8 +323,8 @@ protected:
     MockDatabase mockDb;
     Registry registry{mockDb};
     Verifier verifier{registry};
-    Scheduler scheduler{registry, dispatcher};
     Dispatcher dispatcher{"/tmp/forge_test"};
+    Scheduler scheduler{registry, dispatcher};
     Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, ""};
     ObsBus obsBus;
     ForgeManager forgeManager{mockDb, registry, dispatcher, orchestrator, obsBus};

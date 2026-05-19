@@ -55,5 +55,23 @@ cd "$BUILD_DIR"
 ctest --output-on-failure -j "$JOBS"
 cd "$ROOT_DIR"
 
+if [ "${AGENTOS_COVERAGE:-OFF}" = "ON" ]; then
+  echo ""
+  echo "→ Generating coverage report..."
+  mkdir -p "$BUILD_DIR/coverage"
+  if command -v gcovr &>/dev/null; then
+    gcovr --root "$ROOT_DIR" \
+          --filter "$ROOT_DIR/src/" \
+          --exclude "$ROOT_DIR/src/core/deps/" \
+          --html-details "$BUILD_DIR/coverage/index.html" \
+          --xml "$BUILD_DIR/coverage/coverage.xml" \
+          --print-summary
+    echo "Coverage report: $BUILD_DIR/coverage/index.html"
+  else
+    echo "gcovr not found, skipping coverage report generation."
+    echo "Install with: pip install gcovr"
+  fi
+fi
+
 echo ""
 echo "✓ Tests complete."

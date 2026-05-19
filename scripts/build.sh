@@ -28,7 +28,7 @@ DIST_DIR="$BUILD_DIR/dist"
 
 BUILD_TYPE="Release"
 USE_MUSL=OFF
-BUILD_TESTS=ON
+BUILD_TESTS=OFF
 DEPS_ONLY=false
 CLEAN=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)

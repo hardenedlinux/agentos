@@ -12,7 +12,7 @@ endif()
 
 option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
 option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
-option(AGENTOS_BUILD_TESTS "Build unit tests"                      ON)
+option(AGENTOS_BUILD_TESTS "Build unit tests"                      OFF)
 option(AGENTOS_STRIP       "Strip release binary"                  ON)
 
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")

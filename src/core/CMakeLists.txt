@@ -57,3 +57,8 @@ target_link_libraries(agentos_core PUBLIC
 )
 
 target_link_libraries(agentos_core PRIVATE sqlite3)
+
+if(AGENTOS_COVERAGE)
+  target_compile_options(agentos_core PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+  target_link_options(agentos_core PRIVATE --coverage)
+endif()

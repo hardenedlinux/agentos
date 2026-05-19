@@ -29,11 +29,6 @@ if(AGENTOS_STATIC)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
 endif()
 
-if(AGENTOS_COVERAGE)
-  target_compile_options(agentos_core PRIVATE --coverage -fprofile-arcs -ftest-coverage)
-  target_link_options(agentos_core PRIVATE --coverage)
-endif()
-
 # Add project include directory
 include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

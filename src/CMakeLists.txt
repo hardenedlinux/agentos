@@ -35,9 +35,6 @@ include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_subdirectory(core)
 add_subdirectory(cli)
 
-# Link dependencies using imported targets from FetchContent
-target_link_libraries(agentos PRIVATE spdlog::spdlog ${ZMQ_LIB})
-
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

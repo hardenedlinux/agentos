@@ -37,8 +37,6 @@ target_link_libraries(agentos_tests PRIVATE
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
-  spdlog::spdlog
-  ${ZMQ_LIB}
 )
 
 if(AGENTOS_STATIC)

@@ -42,4 +42,6 @@ target_compile_options(agentos_core PRIVATE
 target_link_libraries(agentos_core PUBLIC
   pthread
   dl
+  spdlog::spdlog
+  ${ZMQ_LIB}
 )

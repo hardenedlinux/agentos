@@ -40,3 +40,19 @@ endif()
 # Register with CTest
 include(GoogleTest)
 gtest_discover_tests(agentos_tests)
+if(AGENTOS_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(test_types test_types.cpp)
+  target_link_libraries(test_types PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+    agentos_core
+    agentos_forge
+  )
+  target_include_directories(test_types PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/src/core
+  )
+  gtest_discover_tests(test_types)
+endif()

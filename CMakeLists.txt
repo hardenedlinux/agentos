@@ -51,6 +51,22 @@ if(NOT ZMQ_LIB)
   message(FATAL_ERROR "Could not find libzmq.a in build tree")
 endif()
 
+# SQLite3 (static)
+FetchContent_Declare(sqlite3
+  URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+)
+set(SQLITE3_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(SQLITE3_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(SQLITE3_ENABLE_JSON1 ON CACHE BOOL "" FORCE)
+set(SQLITE3_ENABLE_FTS5 ON CACHE BOOL "" FORCE)
+set(SQLITE3_ENABLE_RTREE ON CACHE BOOL "" FORCE)
+set(SQLITE3_OMIT_LOAD_EXTENSION ON CACHE BOOL "" FORCE)
+message(STATUS "Downloading sqlite3...")
+FetchContent_MakeAvailable(sqlite3)
+if(NOT TARGET sqlite3)
+  message(FATAL_ERROR "Failed to fetch sqlite3")
+endif()
+
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 FetchContent_Declare(cppzmq
   URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz

@@ -15,6 +15,8 @@
  * Verifier, and Scheduler.
  */
 
+#include <optional>
+
 #include "agentos/types.h"
 #include "agentos/dispatcher.h"
 #include "agentos/registry.h"

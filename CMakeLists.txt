@@ -62,13 +62,12 @@ ExternalProject_Add(httplib_ext
   DOWNLOAD_NAME "httplib-v0.18.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/httplib
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "cpp-httplib-0.18.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
 )
-set(HTTPLIB_INC "${CMAKE_SOURCE_DIR}/deps-src/httplib-src" CACHE INTERNAL "cpp-httplib include path")
+set(HTTPLIB_INC "${DEPS_BUILD_DIR}/httplib/src/httplib_ext/cpp-httplib-0.18.0" CACHE INTERNAL "cpp-httplib include path")
 
 # rapidjson (header-only JSON library)
 set(RAPIDJSON_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/rapidjson")
@@ -77,13 +76,12 @@ ExternalProject_Add(rapidjson_ext
   DOWNLOAD_NAME "rapidjson-v1.1.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/rapidjson
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "rapidjson-1.1.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
 )
-set(RAPIDJSON_INC "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src/include" CACHE INTERNAL "rapidjson include path")
+set(RAPIDJSON_INC "${DEPS_BUILD_DIR}/rapidjson/src/rapidjson_ext/rapidjson-1.1.0/include" CACHE INTERNAL "rapidjson include path")
 
 # libzmq (ZeroMQ core library)
 set(LIBZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libzmq")
@@ -92,7 +90,6 @@ ExternalProject_Add(libzmq_ext
   DOWNLOAD_NAME "libzmq-v4.3.5.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libzmq
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "libzmq-4.3.5"
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
     -DBUILD_SHARED=OFF
@@ -131,13 +128,12 @@ ExternalProject_Add(cppzmq_ext
   DOWNLOAD_NAME "cppzmq-v4.10.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/cppzmq
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "cppzmq-4.10.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
 )
-set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src" CACHE INTERNAL "cppzmq include path")
+set(CPPZMQ_INC "${DEPS_BUILD_DIR}/cppzmq/src/cppzmq_ext/cppzmq-4.10.0" CACHE INTERNAL "cppzmq include path")
 
 # libseccomp (static)
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
@@ -146,7 +142,6 @@ ExternalProject_Add(libseccomp_ext
   DOWNLOAD_NAME "libseccomp-v2.5.5.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
   BUILD_COMMAND make
@@ -166,7 +161,6 @@ ExternalProject_Add(libcap_ext
   DOWNLOAD_NAME "libcap-v2.69.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libcap
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>
   INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
@@ -190,7 +184,6 @@ if(AGENTOS_BUILD_TESTS)
     DOWNLOAD_NAME "googletest-v1.14.0.tar.gz"
     PREFIX ${DEPS_BUILD_DIR}/googletest
     DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-    SOURCE_SUBDIR "googletest-1.14.0"
     CMAKE_ARGS
       -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
       -DBUILD_SHARED_LIBS=OFF

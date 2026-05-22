@@ -37,6 +37,7 @@ target_include_directories(agentos_core PUBLIC
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
   ${HTTPLIB_INC}
+  ${CPPZMQ_INC}
 )
 
 target_include_directories(agentos_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

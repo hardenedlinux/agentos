@@ -172,7 +172,7 @@ static bool apply_landlock(const std::vector<std::string>& allowed_read_paths,
                            const std::vector<int>& allowed_tcp_ports) {
     // Create ruleset
     struct landlock_ruleset_attr rs_attr = {
-        .handled_access_fs =
+        /*handled_access_fs=*/
             LANDLOCK_ACCESS_FS_READ_FILE |
             LANDLOCK_ACCESS_FS_WRITE_FILE |
             LANDLOCK_ACCESS_FS_READ_DIR |
@@ -185,7 +185,7 @@ static bool apply_landlock(const std::vector<std::string>& allowed_read_paths,
             LANDLOCK_ACCESS_FS_MAKE_FIFO |
             LANDLOCK_ACCESS_FS_MAKE_BLOCK |
             LANDLOCK_ACCESS_FS_MAKE_SYM,
-        .handled_access_net =
+        /*handled_access_net=*/
             LANDLOCK_ACCESS_NET_BIND_TCP |
             LANDLOCK_ACCESS_NET_CONNECT_TCP,
     };
@@ -198,9 +198,8 @@ static bool apply_landlock(const std::vector<std::string>& allowed_read_paths,
 
     // Add allowed read paths
     for (const auto& path : allowed_read_paths) {
-        struct landlock_path_beneath_attr path_attr = {
-            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
-        };
+        struct landlock_path_beneath_attr path_attr = {};
+        path_attr.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
         path_attr.parent_fd = open(path.c_str(), O_PATH | O_CLOEXEC);
         if (path_attr.parent_fd < 0) {
             spdlog::warn("[sandbox] open {} for landlock failed: {}", path, strerror(errno));
@@ -215,12 +214,11 @@ static bool apply_landlock(const std::vector<std::string>& allowed_read_paths,
 
     // Add allowed write paths
     for (const auto& path : allowed_write_paths) {
-        struct landlock_path_beneath_attr path_attr = {
-            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE |
-                              LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-                              LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
-                              LANDLOCK_ACCESS_FS_MAKE_DIR,
-        };
+        struct landlock_path_beneath_attr path_attr = {};
+        path_attr.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE |
+                                   LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                                   LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+                                   LANDLOCK_ACCESS_FS_MAKE_DIR;
         path_attr.parent_fd = open(path.c_str(), O_PATH | O_CLOEXEC);
         if (path_attr.parent_fd < 0) {
             spdlog::warn("[sandbox] open {} for landlock failed: {}", path, strerror(errno));
@@ -235,10 +233,9 @@ static bool apply_landlock(const std::vector<std::string>& allowed_read_paths,
 
     // Add allowed TCP ports
     for (int port : allowed_tcp_ports) {
-        struct landlock_net_port_attr net_attr = {
-            .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP,
-            .port = static_cast<uint64_t>(port),
-        };
+        struct landlock_net_port_attr net_attr = {};
+        net_attr.allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
+        net_attr.port = static_cast<uint64_t>(port);
         if (syscall(SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_NET_PORT,
                     &net_attr, 0) != 0) {
             spdlog::warn("[sandbox] landlock_add_rule for port {} failed: {}", port, strerror(errno));

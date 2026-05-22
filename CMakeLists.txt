@@ -42,7 +42,6 @@ ExternalProject_Add(spdlog_ext
   DOWNLOAD_NAME "spdlog-v1.12.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/spdlog
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_SUBDIR "spdlog-1.12.0"
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
     -DSPDLOG_BUILD_SHARED=OFF

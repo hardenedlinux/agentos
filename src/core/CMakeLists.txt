@@ -11,6 +11,7 @@ set(AGENTOS_CORE_SOURCES
   capability/capability.cpp
   enforce_layer.cpp
   mind_layer.cpp
+  sandbox/sandbox.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)

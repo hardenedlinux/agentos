@@ -27,6 +27,7 @@ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
 # Store downloaded dependency sources outside the build directory
 set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
+set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
 include(ExternalProject)
 set(FETCHCONTENT_QUIET OFF)
@@ -122,7 +123,7 @@ set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
-  PREFIX ${SECCOMP_PREFIX}
+  PREFIX ${DEPS_BUILD_DIR}/libseccomp
   SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
@@ -140,7 +141,7 @@ set(SECCOMP_INCLUDE_DIR "${SECCOMP_INSTALL_DIR}/include" CACHE INTERNAL "libsecc
 set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
-  PREFIX ${CAP_PREFIX}
+  PREFIX ${DEPS_BUILD_DIR}/libcap
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>

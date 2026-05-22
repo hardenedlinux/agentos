@@ -2,7 +2,7 @@
 #define AGENTOS_LLM_CLIENT_H
 
 #include <string>
-#include <string_view>
+#include <string_view> // C++17
 #include "agentos/types.h"
 
 namespace agentos {

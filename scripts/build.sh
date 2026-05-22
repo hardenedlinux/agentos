@@ -78,12 +78,6 @@ else
     -DAGENTOS_COVERAGE="${AGENTOS_COVERAGE:-OFF}"
 fi
 
-if $DEPS_ONLY; then
-  echo "→ Building deps only"
-  cmake --build "$BUILD_DIR" --target deps --parallel "$JOBS"
-  echo "✓ Deps installed to $BUILD_DIR/deps/install"
-  exit 0
-fi
 
 if [ -n "${TARGET:-}" ]; then
   echo "→ Building target '$TARGET' ($JOBS jobs)"
@@ -100,7 +94,7 @@ else
   fi
 fi
 
-BINARY="$BUILD_DIR/src/agentos"
+BINARY="$DEPS_BUILD_DIR/build/agentos"
 echo ""
 echo "─────────────────────────────────────────────────────────────"
 echo " Binary : $BINARY"

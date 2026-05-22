@@ -129,6 +129,7 @@ ExternalProject_Add(libseccomp_ext
   BUILD_COMMAND make
   INSTALL_COMMAND make install
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libseccomp.a
+  LOG_DOWNLOAD ON
 )
 ExternalProject_Get_Property(libseccomp_ext INSTALL_DIR)
 set(SECCOMP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libseccomp install dir")

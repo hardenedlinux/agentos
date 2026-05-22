@@ -19,4 +19,8 @@ target_include_directories(agentos_forge PUBLIC
     ${CMAKE_SOURCE_DIR}/src/core/obs_bus
     ${CPPZMQ_INC}
     ${SQLITE3_SRC_DIR}
+    ${SECCOMP_INCLUDE_DIR}
+    ${CAP_INCLUDE_DIR}
 )
+
+add_dependencies(agentos_forge libseccomp_ext libcap_ext)

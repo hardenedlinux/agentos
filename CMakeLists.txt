@@ -25,6 +25,7 @@ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 # Store downloaded dependency sources outside the build directory
 set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
 include(FetchContent)
+include(ExternalProject)
 set(FETCHCONTENT_QUIET OFF)
 
 # spdlog (uses bundled fmt)
@@ -88,6 +89,36 @@ if(NOT cppzmq_POPULATED)
   FetchContent_Populate(cppzmq)
 endif()
 set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
+
+# libseccomp (static)
+set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
+ExternalProject_Add(libseccomp_ext
+  URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
+  PREFIX ${SECCOMP_PREFIX}
+  CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
+  BUILD_COMMAND $(MAKE)
+  INSTALL_COMMAND $(MAKE) install
+  BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libseccomp.a
+)
+ExternalProject_Get_Property(libseccomp_ext INSTALL_DIR)
+set(SECCOMP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libseccomp install dir")
+set(SECCOMP_LIB "${SECCOMP_INSTALL_DIR}/lib/libseccomp.a" CACHE INTERNAL "libseccomp static library")
+set(SECCOMP_INCLUDE_DIR "${SECCOMP_INSTALL_DIR}/include" CACHE INTERNAL "libseccomp include dir")
+
+# libcap (static)
+set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
+ExternalProject_Add(libcap_ext
+  URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
+  PREFIX ${CAP_PREFIX}
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND $(MAKE) -C <SOURCE_DIR> libcap.a
+  INSTALL_COMMAND $(MAKE) -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
+  BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libcap.a
+)
+ExternalProject_Get_Property(libcap_ext INSTALL_DIR)
+set(CAP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libcap install dir")
+set(CAP_LIB "${CAP_INSTALL_DIR}/lib/libcap.a" CACHE INTERNAL "libcap static library")
+set(CAP_INCLUDE_DIR "${CAP_INSTALL_DIR}/include" CACHE INTERNAL "libcap include dir")
 
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)

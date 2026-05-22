@@ -62,6 +62,13 @@ target_link_libraries(agentos_core PUBLIC
   ${CAP_LIB}
 )
 
+target_include_directories(agentos_core PUBLIC
+  ${SECCOMP_INCLUDE_DIR}
+  ${CAP_INCLUDE_DIR}
+)
+
+add_dependencies(agentos_core libseccomp_ext libcap_ext)
+
 target_link_libraries(agentos_core PRIVATE sqlite3)
 
 if(AGENTOS_COVERAGE)

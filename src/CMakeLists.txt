@@ -1,47 +1,5 @@
-# Locate system libraries for sandbox (seccomp, libcap)
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(SECCOMP libseccomp)
-    pkg_check_modules(CAP libcap)
-endif()
-if(NOT SECCOMP_FOUND)
-    find_library(SECCOMP_LIB seccomp
-        PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu
-    )
-    if(SECCOMP_LIB)
-        set(SECCOMP_LIBRARIES "${SECCOMP_LIB}")
-    endif()
-else()
-    set(SECCOMP_LIBRARIES "${SECCOMP_LIBRARIES}")
-endif()
-if(NOT CAP_FOUND)
-    find_library(CAP_LIB cap
-        PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu
-    )
-    if(CAP_LIB)
-        set(CAP_LIBRARIES "${CAP_LIB}")
-    endif()
-else()
-    set(CAP_LIBRARIES "${CAP_LIBRARIES}")
-endif()
-if(SECCOMP_LIBRARIES)
-    message(STATUS "Found seccomp: ${SECCOMP_LIBRARIES}")
-endif()
-if(CAP_LIBRARIES)
-    message(STATUS "Found cap: ${CAP_LIBRARIES}")
-endif()
-if(NOT SECCOMP_LIBRARIES)
-    message(FATAL_ERROR "libseccomp not found (install libseccomp-dev)")
-endif()
-if(NOT CAP_LIBRARIES)
-    message(FATAL_ERROR "libcap not found (install libcap-dev)")
-endif()
-# Make them visible in subdirectories
-set(SECCOMP_LIB "${SECCOMP_LIBRARIES}" CACHE INTERNAL "seccomp library path")
-set(CAP_LIB "${CAP_LIBRARIES}" CACHE INTERNAL "cap library path")
-# Make them visible in subdirectories
-set(SECCOMP_LIB "${SECCOMP_LIB}" CACHE INTERNAL "seccomp library path")
-set(CAP_LIB "${CAP_LIB}" CACHE INTERNAL "cap library path")
+# SECCOMP_LIB and CAP_LIB are set by the top-level CMakeLists.txt via ExternalProject
+# No need to locate them here.
 
 add_subdirectory(core)
 add_subdirectory(core/forge)

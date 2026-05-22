@@ -38,11 +38,19 @@ include(FetchContent)
 # spdlog (uses bundled fmt)
 set(SPDLOG_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/spdlog")
 set(SPDLOG_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
+set(SPDLOG_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/spdlog-v1.12.0.tar.gz")
+if(EXISTS "${SPDLOG_TARBALL}")
+  set(SPDLOG_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(SPDLOG_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(spdlog_ext
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
+  DOWNLOAD_NAME "spdlog-v1.12.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/spdlog
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${SPDLOG_SRC_DIR}
+  ${SPDLOG_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "spdlog-1.12.0"
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
@@ -60,11 +68,19 @@ set(SPDLOG_LIB "${INSTALL_DIR}/lib/libspdlog.a" CACHE INTERNAL "spdlog static li
 # cpp-httplib (header-only HTTP client)
 set(HTTPLIB_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/httplib")
 set(HTTPLIB_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
+set(HTTPLIB_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/httplib-v0.18.0.tar.gz")
+if(EXISTS "${HTTPLIB_TARBALL}")
+  set(HTTPLIB_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(HTTPLIB_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(httplib_ext
   URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
+  DOWNLOAD_NAME "httplib-v0.18.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/httplib
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${HTTPLIB_SRC_DIR}
+  ${HTTPLIB_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "cpp-httplib-0.18.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
@@ -76,11 +92,19 @@ set(HTTPLIB_INC "${CMAKE_SOURCE_DIR}/deps-src/httplib-src" CACHE INTERNAL "cpp-h
 # rapidjson (header-only JSON library)
 set(RAPIDJSON_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/rapidjson")
 set(RAPIDJSON_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
+set(RAPIDJSON_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/rapidjson-v1.1.0.tar.gz")
+if(EXISTS "${RAPIDJSON_TARBALL}")
+  set(RAPIDJSON_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(RAPIDJSON_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(rapidjson_ext
   URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+  DOWNLOAD_NAME "rapidjson-v1.1.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/rapidjson
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${RAPIDJSON_SRC_DIR}
+  ${RAPIDJSON_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "rapidjson-1.1.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
@@ -92,11 +116,19 @@ set(RAPIDJSON_INC "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src/include" CACHE INT
 # libzmq (ZeroMQ core library)
 set(LIBZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libzmq")
 set(LIBZMQ_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
+set(LIBZMQ_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/libzmq-v4.3.5.tar.gz")
+if(EXISTS "${LIBZMQ_TARBALL}")
+  set(LIBZMQ_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(LIBZMQ_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(libzmq_ext
   URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
+  DOWNLOAD_NAME "libzmq-v4.3.5.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libzmq
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${LIBZMQ_SRC_DIR}
+  ${LIBZMQ_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "libzmq-4.3.5"
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
@@ -132,11 +164,19 @@ set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 set(CPPZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/cppzmq")
 set(CPPZMQ_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
+set(CPPZMQ_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/cppzmq-v4.10.0.tar.gz")
+if(EXISTS "${CPPZMQ_TARBALL}")
+  set(CPPZMQ_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(CPPZMQ_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(cppzmq_ext
   URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
+  DOWNLOAD_NAME "cppzmq-v4.10.0.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/cppzmq
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${CPPZMQ_SRC_DIR}
+  ${CPPZMQ_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "cppzmq-4.10.0"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
@@ -148,11 +188,19 @@ set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src" CACHE INTERNAL "cppzmq 
 # libseccomp (static)
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
 set(SECCOMP_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libseccomp-src")
+set(SECCOMP_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/libseccomp-v2.5.5.tar.gz")
+if(EXISTS "${SECCOMP_TARBALL}")
+  set(SECCOMP_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(SECCOMP_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
+  DOWNLOAD_NAME "libseccomp-v2.5.5.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${SECCOMP_SRC_DIR}
+  ${SECCOMP_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
@@ -169,11 +217,19 @@ set(SECCOMP_INCLUDE_DIR "${SECCOMP_INSTALL_DIR}/include" CACHE INTERNAL "libsecc
 # libcap (static)
 set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
 set(CAP_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libcap-src")
+set(CAP_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/libcap-v2.69.tar.gz")
+if(EXISTS "${CAP_TARBALL}")
+  set(CAP_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+else()
+  set(CAP_DOWNLOAD_ARGS "")
+endif()
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
+  DOWNLOAD_NAME "libcap-v2.69.tar.gz"
   PREFIX ${DEPS_BUILD_DIR}/libcap
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${CAP_SRC_DIR}
+  ${CAP_DOWNLOAD_ARGS}
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>
@@ -194,11 +250,19 @@ if(AGENTOS_BUILD_TESTS)
   enable_testing()
   set(GOOGLETEST_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/googletest")
   set(GOOGLETEST_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
+  set(GOOGLETEST_TARBALL "${CMAKE_SOURCE_DIR}/deps-src/downloads/googletest-v1.14.0.tar.gz")
+  if(EXISTS "${GOOGLETEST_TARBALL}")
+    set(GOOGLETEST_DOWNLOAD_ARGS DOWNLOAD_COMMAND "")
+  else()
+    set(GOOGLETEST_DOWNLOAD_ARGS "")
+  endif()
   ExternalProject_Add(googletest_ext
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+    DOWNLOAD_NAME "googletest-v1.14.0.tar.gz"
     PREFIX ${DEPS_BUILD_DIR}/googletest
     DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
     SOURCE_DIR ${GOOGLETEST_SRC_DIR}
+    ${GOOGLETEST_DOWNLOAD_ARGS}
     SOURCE_SUBDIR "googletest-1.14.0"
     CMAKE_ARGS
       -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>

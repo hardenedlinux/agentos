@@ -50,6 +50,7 @@ ExternalProject_Add(spdlog_ext
     -DSPDLOG_FMT_EXTERNAL=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libspdlog.a
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 ExternalProject_Get_Property(spdlog_ext INSTALL_DIR)
 set(SPDLOG_INC "${INSTALL_DIR}/include" CACHE INTERNAL "spdlog include path")
@@ -66,6 +67,7 @@ ExternalProject_Add(httplib_ext
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 set(HTTPLIB_INC "${DEPS_BUILD_DIR}/httplib/src/httplib_ext/cpp-httplib-0.18.0" CACHE INTERNAL "cpp-httplib include path")
 
@@ -80,6 +82,7 @@ ExternalProject_Add(rapidjson_ext
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 set(RAPIDJSON_INC "${DEPS_BUILD_DIR}/rapidjson/src/rapidjson_ext/rapidjson-1.1.0/include" CACHE INTERNAL "rapidjson include path")
 
@@ -104,6 +107,7 @@ ExternalProject_Add(libzmq_ext
     -DENABLE_DRAFTS=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libzmq.a
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 ExternalProject_Get_Property(libzmq_ext INSTALL_DIR)
 set(ZMQ_LIB "${INSTALL_DIR}/lib/libzmq.a" CACHE INTERNAL "libzmq static library")
@@ -132,6 +136,7 @@ ExternalProject_Add(cppzmq_ext
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 set(CPPZMQ_INC "${DEPS_BUILD_DIR}/cppzmq/src/cppzmq_ext/cppzmq-4.10.0" CACHE INTERNAL "cppzmq include path")
 
@@ -148,6 +153,7 @@ ExternalProject_Add(libseccomp_ext
   INSTALL_COMMAND make install
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libseccomp.a
   LOG_DOWNLOAD ON
+  BUILD_IN_SOURCE TRUE
 )
 ExternalProject_Get_Property(libseccomp_ext INSTALL_DIR)
 set(SECCOMP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libseccomp install dir")
@@ -165,6 +171,7 @@ ExternalProject_Add(libcap_ext
   BUILD_COMMAND make -C <SOURCE_DIR>
   INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libcap.a
+  BUILD_IN_SOURCE TRUE
 )
 ExternalProject_Get_Property(libcap_ext INSTALL_DIR)
 set(CAP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libcap install dir")
@@ -190,6 +197,7 @@ if(AGENTOS_BUILD_TESTS)
       -DINSTALL_GTEST=ON
     BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a
     LOG_DOWNLOAD ON
+    BUILD_IN_SOURCE TRUE
   )
   ExternalProject_Get_Property(googletest_ext INSTALL_DIR)
   set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")

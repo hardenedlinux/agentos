@@ -94,7 +94,7 @@ else
   fi
 fi
 
-BINARY="$DEPS_BUILD_DIR/build/agentos"
+BINARY="$BUILD_DIR/agentos"
 echo ""
 echo "─────────────────────────────────────────────────────────────"
 echo " Binary : $BINARY"

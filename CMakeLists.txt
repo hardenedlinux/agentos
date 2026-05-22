@@ -26,13 +26,14 @@ endif()
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
 # Store downloaded dependency sources outside the build directory
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-build")
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 # Store ExternalProject stamp and download files outside the build directory
 set(CMAKE_EP_STAMP_DIR "${DEPS_BUILD_DIR}/stamps")
 set(CMAKE_EP_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
 
 include(ExternalProject)
+include(FetchContent)
 
 # spdlog (uses bundled fmt)
 set(SPDLOG_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/spdlog")
@@ -144,27 +145,17 @@ ExternalProject_Get_Property(libzmq_ext INSTALL_DIR)
 set(ZMQ_LIB "${INSTALL_DIR}/lib/libzmq.a" CACHE INTERNAL "libzmq static library")
 
 # SQLite3 (amalgamation) — compile sqlite3.c directly into agentos_core
-set(SQLITE3_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation")
-if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
-  set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
-  set(SQLITE3_DOWNLOAD_COMMAND "")
-else()
-  set(SQLITE3_SRC_DIR "")
-  set(SQLITE3_DOWNLOAD_COMMAND "")
-endif()
-ExternalProject_Add(sqlite3_amalgamation_ext
+FetchContent_Declare(sqlite3_amalgamation
   URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
-  PREFIX ${DEPS_BUILD_DIR}/sqlite3_amalgamation
-  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  SOURCE_DIR ${SQLITE3_SRC_DIR}
-  DOWNLOAD_COMMAND ${SQLITE3_DOWNLOAD_COMMAND}
-  SOURCE_SUBDIR "sqlite-amalgamation-3460000"
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND ""
-  INSTALL_COMMAND ""
-  LOG_DOWNLOAD ON
+  SOURCE_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src"
 )
-set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src" CACHE INTERNAL "sqlite3 source directory")
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+message(STATUS "Downloading sqlite3 amalgamation...")
+FetchContent_MakeAvailable(sqlite3_amalgamation)
+if(NOT sqlite3_amalgamation_POPULATED)
+  message(FATAL_ERROR "Failed to fetch sqlite3 amalgamation")
+endif()
+set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3 source directory")
 
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 set(CPPZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/cppzmq")

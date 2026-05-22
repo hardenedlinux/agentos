@@ -75,7 +75,7 @@ target_include_directories(agentos_core PUBLIC
   ${CAP_INCLUDE_DIR}
 )
 
-add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext sqlite3_amalgamation_ext cppzmq_ext)
+add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext)
 
 target_link_libraries(agentos_core PRIVATE sqlite3)
 

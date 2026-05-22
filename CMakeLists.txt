@@ -114,7 +114,7 @@ ExternalProject_Add(libcap_ext
   PREFIX ${CAP_PREFIX}
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
-  BUILD_COMMAND make -C <SOURCE_DIR> libcap.a
+  BUILD_COMMAND make -C <SOURCE_DIR>
   INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libcap.a
 )

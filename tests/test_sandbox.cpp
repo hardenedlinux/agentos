@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "agentos/sandbox.h"
@@ -23,9 +24,9 @@ TEST(SandboxTest, ApplySandboxFailsWithoutCgroup) {
     int status;
     waitpid(pid, &status, 0);
 
-    // Child should have exited normally with code 1 (sandbox failed)
-    EXPECT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(WEXITSTATUS(status), 1);
+    // Child should have been killed by SIGSYS (signal 31)
+    EXPECT_TRUE(WIFSIGNALED(status));
+    EXPECT_EQ(WTERMSIG(status), SIGSYS);
 }
 
 } // namespace agentos

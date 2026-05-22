@@ -29,13 +29,14 @@ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
-include(ExternalProject)
 set(FETCHCONTENT_QUIET OFF)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # Store ExternalProject stamp and download files outside the build directory
 set(CMAKE_EP_STAMP_DIR "${DEPS_BUILD_DIR}/stamps")
 set(CMAKE_EP_DOWNLOAD_DIR "${DEPS_BUILD_DIR}/downloads")
+
+include(ExternalProject)
 
 # spdlog (uses bundled fmt)
 FetchContent_Declare(spdlog
@@ -129,8 +130,6 @@ set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
-  DOWNLOAD_DIR ${DEPS_BUILD_DIR}/downloads
-  STAMP_DIR ${DEPS_BUILD_DIR}/stamps
   SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
@@ -149,8 +148,6 @@ set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libcap
-  DOWNLOAD_DIR ${DEPS_BUILD_DIR}/downloads
-  STAMP_DIR ${DEPS_BUILD_DIR}/stamps
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>

@@ -41,6 +41,7 @@ include(FetchContent)
 
 # spdlog (uses bundled fmt)
 set(SPDLOG_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/spdlog")
+set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/spdlog/build")
 ExternalProject_Add(spdlog_ext
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
   DOWNLOAD_NAME "spdlog-v1.12.0.tar.gz"
@@ -54,11 +55,11 @@ ExternalProject_Add(spdlog_ext
     -DSPDLOG_FMT_EXTERNAL=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libspdlog.a
   LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
   COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"spdlog\",\"version\":\"1.12.0\"}" > ${DEPS_BUILD_DIR}/spdlog/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "spdlog 1.12.0" > ${DEPS_BUILD_DIR}/spdlog/Labels.txt
 )
+unset(CMAKE_EP_BUILD_DIR)
 ExternalProject_Get_Property(spdlog_ext INSTALL_DIR)
 set(SPDLOG_INC "${INSTALL_DIR}/include" CACHE INTERNAL "spdlog include path")
 set(SPDLOG_LIB "${INSTALL_DIR}/lib/libspdlog.a" CACHE INTERNAL "spdlog static library")
@@ -99,6 +100,7 @@ set(RAPIDJSON_INC "${DEPS_BUILD_DIR}/rapidjson/src/rapidjson_ext/rapidjson-1.1.0
 
 # libzmq (ZeroMQ core library)
 set(LIBZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libzmq")
+set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/libzmq/build")
 ExternalProject_Add(libzmq_ext
   URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
   DOWNLOAD_NAME "libzmq-v4.3.5.tar.gz"
@@ -118,11 +120,11 @@ ExternalProject_Add(libzmq_ext
     -DENABLE_DRAFTS=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libzmq.a
   LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
   COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libzmq\",\"version\":\"4.3.5\"}" > ${DEPS_BUILD_DIR}/libzmq/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "libzmq 4.3.5" > ${DEPS_BUILD_DIR}/libzmq/Labels.txt
 )
+unset(CMAKE_EP_BUILD_DIR)
 ExternalProject_Get_Property(libzmq_ext INSTALL_DIR)
 set(ZMQ_LIB "${INSTALL_DIR}/lib/libzmq.a" CACHE INTERNAL "libzmq static library")
 
@@ -206,6 +208,7 @@ find_package(OpenSSL REQUIRED)
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   set(GOOGLETEST_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/googletest")
+  set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/googletest/build")
   ExternalProject_Add(googletest_ext
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
     DOWNLOAD_NAME "googletest-v1.14.0.tar.gz"
@@ -217,11 +220,11 @@ if(AGENTOS_BUILD_TESTS)
       -DINSTALL_GTEST=ON
     BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a
     LOG_DOWNLOAD ON
-    BUILD_IN_SOURCE TRUE
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
     COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"googletest\",\"version\":\"1.14.0\"}" > ${DEPS_BUILD_DIR}/googletest/Labels.json
     COMMAND ${CMAKE_COMMAND} -E echo "googletest 1.14.0" > ${DEPS_BUILD_DIR}/googletest/Labels.txt
   )
+  unset(CMAKE_EP_BUILD_DIR)
   ExternalProject_Get_Property(googletest_ext INSTALL_DIR)
   set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")
   set(GTEST_LIB "${INSTALL_DIR}/lib/libgtest.a" CACHE INTERNAL "googletest static library")

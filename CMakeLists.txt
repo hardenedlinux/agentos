@@ -34,7 +34,7 @@ set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # Store ExternalProject stamp and download files outside the build directory
 set(CMAKE_EP_STAMP_DIR "${DEPS_BUILD_DIR}/stamps")
-set(CMAKE_EP_DOWNLOAD_DIR "${DEPS_BUILD_DIR}/downloads")
+set(CMAKE_EP_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
 
 include(ExternalProject)
 

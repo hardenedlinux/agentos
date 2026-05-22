@@ -96,6 +96,7 @@ ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${SECCOMP_PREFIX}
   SOURCE_SUBDIR "libseccomp-2.5.5"
+  PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
   BUILD_COMMAND make
   INSTALL_COMMAND make install

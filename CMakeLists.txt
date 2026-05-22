@@ -28,10 +28,6 @@ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 # Store downloaded dependency sources outside the build directory
 set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
-include(FetchContent)
-set(FETCHCONTENT_QUIET OFF)
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
-
 # Store ExternalProject stamp and download files outside the build directory
 set(CMAKE_EP_STAMP_DIR "${DEPS_BUILD_DIR}/stamps")
 set(CMAKE_EP_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
@@ -39,108 +35,158 @@ set(CMAKE_EP_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
 include(ExternalProject)
 
 # spdlog (uses bundled fmt)
-FetchContent_Declare(spdlog
-  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
-)
+set(SPDLOG_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/spdlog")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
-  set(FETCHCONTENT_SOURCE_DIR_spdlog "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
+  set(SPDLOG_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
+  set(SPDLOG_DOWNLOAD_COMMAND "")
+else()
+  set(SPDLOG_SRC_DIR "")
+  set(SPDLOG_DOWNLOAD_COMMAND "")
 endif()
-set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
-set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
-message(STATUS "Downloading spdlog...")
-FetchContent_MakeAvailable(spdlog)
-if(NOT TARGET spdlog::spdlog)
-  message(FATAL_ERROR "Failed to fetch spdlog")
-endif()
+ExternalProject_Add(spdlog_ext
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
+  PREFIX ${DEPS_BUILD_DIR}/spdlog
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${SPDLOG_SRC_DIR}
+  DOWNLOAD_COMMAND ${SPDLOG_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "spdlog-1.12.0"
+  CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+    -DSPDLOG_BUILD_SHARED=OFF
+    -DSPDLOG_BUILD_EXAMPLE=OFF
+    -DSPDLOG_BUILD_TESTS=OFF
+    -DSPDLOG_FMT_EXTERNAL=OFF
+  BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libspdlog.a
+  LOG_DOWNLOAD ON
+)
+ExternalProject_Get_Property(spdlog_ext INSTALL_DIR)
+set(SPDLOG_INC "${INSTALL_DIR}/include" CACHE INTERNAL "spdlog include path")
+set(SPDLOG_LIB "${INSTALL_DIR}/lib/libspdlog.a" CACHE INTERNAL "spdlog static library")
 
 # cpp-httplib (header-only HTTP client)
-FetchContent_Declare(httplib
-  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
-)
+set(HTTPLIB_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/httplib")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
-  set(FETCHCONTENT_SOURCE_DIR_httplib "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
+  set(HTTPLIB_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
+  set(HTTPLIB_DOWNLOAD_COMMAND "")
+else()
+  set(HTTPLIB_SRC_DIR "")
+  set(HTTPLIB_DOWNLOAD_COMMAND "")
 endif()
-message(STATUS "Downloading cpp-httplib...")
-FetchContent_MakeAvailable(httplib)
-if(NOT httplib_POPULATED)
-  message(FATAL_ERROR "Failed to fetch cpp-httplib")
-endif()
+ExternalProject_Add(httplib_ext
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
+  PREFIX ${DEPS_BUILD_DIR}/httplib
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${HTTPLIB_SRC_DIR}
+  DOWNLOAD_COMMAND ${HTTPLIB_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "cpp-httplib-0.18.0"
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND ""
+  LOG_DOWNLOAD ON
+)
 set(HTTPLIB_INC "${CMAKE_SOURCE_DIR}/deps-src/httplib-src" CACHE INTERNAL "cpp-httplib include path")
 
 # rapidjson (header-only JSON library)
-FetchContent_Declare(rapidjson
-  URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
-)
+set(RAPIDJSON_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/rapidjson")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
-  set(FETCHCONTENT_SOURCE_DIR_rapidjson "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
+  set(RAPIDJSON_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
+  set(RAPIDJSON_DOWNLOAD_COMMAND "")
+else()
+  set(RAPIDJSON_SRC_DIR "")
+  set(RAPIDJSON_DOWNLOAD_COMMAND "")
 endif()
-set(RAPIDJSON_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(RAPIDJSON_BUILD_DOC OFF CACHE BOOL "" FORCE)
-message(STATUS "Downloading rapidjson...")
-FetchContent_MakeAvailable(rapidjson)
-if(NOT rapidjson_POPULATED)
-  message(FATAL_ERROR "Failed to fetch rapidjson")
-endif()
+ExternalProject_Add(rapidjson_ext
+  URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+  PREFIX ${DEPS_BUILD_DIR}/rapidjson
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${RAPIDJSON_SRC_DIR}
+  DOWNLOAD_COMMAND ${RAPIDJSON_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "rapidjson-1.1.0"
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND ""
+  LOG_DOWNLOAD ON
+)
 set(RAPIDJSON_INC "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src/include" CACHE INTERNAL "rapidjson include path")
 
 # libzmq (ZeroMQ core library)
-FetchContent_Declare(libzmq
-  URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
-)
+set(LIBZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libzmq")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
-  set(FETCHCONTENT_SOURCE_DIR_libzmq "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
+  set(LIBZMQ_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
+  set(LIBZMQ_DOWNLOAD_COMMAND "")
+else()
+  set(LIBZMQ_SRC_DIR "")
+  set(LIBZMQ_DOWNLOAD_COMMAND "")
 endif()
-set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
-set(WITH_DOCS OFF CACHE BOOL "" FORCE)
-set(ENABLE_CURVE OFF CACHE BOOL "" FORCE)
-set(ENABLE_PGM OFF CACHE BOOL "" FORCE)
-set(ENABLE_NORM OFF CACHE BOOL "" FORCE)
-set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)
-set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
-message(STATUS "Downloading libzmq...")
-FetchContent_MakeAvailable(libzmq)
-if(NOT TARGET libzmq-static AND NOT TARGET libzmq)
-  message(FATAL_ERROR "Failed to fetch libzmq")
-endif()
-find_library(ZMQ_LIB NAMES zmq libzmq libzmq-static PATHS ${CMAKE_SOURCE_DIR}/deps-build/libzmq-build/lib NO_DEFAULT_PATH)
-if(NOT ZMQ_LIB)
-  message(FATAL_ERROR "Could not find libzmq.a in build tree")
-endif()
+ExternalProject_Add(libzmq_ext
+  URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
+  PREFIX ${DEPS_BUILD_DIR}/libzmq
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${LIBZMQ_SRC_DIR}
+  DOWNLOAD_COMMAND ${LIBZMQ_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "libzmq-4.3.5"
+  CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+    -DBUILD_SHARED=OFF
+    -DBUILD_STATIC=ON
+    -DZMQ_BUILD_TESTS=OFF
+    -DWITH_PERF_TOOL=OFF
+    -DWITH_DOCS=OFF
+    -DENABLE_CURVE=OFF
+    -DENABLE_PGM=OFF
+    -DENABLE_NORM=OFF
+    -DENABLE_GSSAPI=OFF
+    -DENABLE_DRAFTS=OFF
+  BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libzmq.a
+  LOG_DOWNLOAD ON
+)
+ExternalProject_Get_Property(libzmq_ext INSTALL_DIR)
+set(ZMQ_LIB "${INSTALL_DIR}/lib/libzmq.a" CACHE INTERNAL "libzmq static library")
 
 # SQLite3 (amalgamation) — compile sqlite3.c directly into agentos_core
-FetchContent_Declare(sqlite3_amalgamation
-  URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
-)
+set(SQLITE3_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
-  set(FETCHCONTENT_SOURCE_DIR_sqlite3_amalgamation "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
+  set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
+  set(SQLITE3_DOWNLOAD_COMMAND "")
+else()
+  set(SQLITE3_SRC_DIR "")
+  set(SQLITE3_DOWNLOAD_COMMAND "")
 endif()
-message(STATUS "Downloading sqlite3 amalgamation...")
-FetchContent_MakeAvailable(sqlite3_amalgamation)
-if(NOT sqlite3_amalgamation_POPULATED)
-  message(FATAL_ERROR "Failed to fetch sqlite3 amalgamation")
-endif()
+ExternalProject_Add(sqlite3_amalgamation_ext
+  URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+  PREFIX ${DEPS_BUILD_DIR}/sqlite3_amalgamation
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${SQLITE3_SRC_DIR}
+  DOWNLOAD_COMMAND ${SQLITE3_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "sqlite-amalgamation-3460000"
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND ""
+  LOG_DOWNLOAD ON
+)
 set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src" CACHE INTERNAL "sqlite3 source directory")
 
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
-FetchContent_Declare(cppzmq
-  URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
-)
+set(CPPZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/cppzmq")
 if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
-  set(FETCHCONTENT_SOURCE_DIR_cppzmq "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
+  set(CPPZMQ_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
+  set(CPPZMQ_DOWNLOAD_COMMAND "")
+else()
+  set(CPPZMQ_SRC_DIR "")
+  set(CPPZMQ_DOWNLOAD_COMMAND "")
 endif()
-set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
-message(STATUS "Downloading cppzmq...")
-FetchContent_GetProperties(cppzmq)
-if(NOT cppzmq_POPULATED)
-  FetchContent_Populate(cppzmq)
-endif()
+ExternalProject_Add(cppzmq_ext
+  URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
+  PREFIX ${DEPS_BUILD_DIR}/cppzmq
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR ${CPPZMQ_SRC_DIR}
+  DOWNLOAD_COMMAND ${CPPZMQ_DOWNLOAD_COMMAND}
+  SOURCE_SUBDIR "cppzmq-4.10.0"
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND ""
+  LOG_DOWNLOAD ON
+)
 set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src" CACHE INTERNAL "cppzmq include path")
 
 # libseccomp (static)
@@ -155,6 +201,7 @@ endif()
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${SECCOMP_SRC_DIR}
   DOWNLOAD_COMMAND ${SECCOMP_DOWNLOAD_COMMAND}
   SOURCE_SUBDIR "libseccomp-2.5.5"
@@ -182,6 +229,7 @@ endif()
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libcap
+  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR ${CAP_SRC_DIR}
   DOWNLOAD_COMMAND ${CAP_DOWNLOAD_COMMAND}
   SOURCE_SUBDIR "libcap-2.69"
@@ -202,19 +250,31 @@ find_package(OpenSSL REQUIRED)
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
-  FetchContent_Declare(googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-  )
+  set(GOOGLETEST_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/googletest")
   if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
-    set(FETCHCONTENT_SOURCE_DIR_googletest "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
+    set(GOOGLETEST_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
+    set(GOOGLETEST_DOWNLOAD_COMMAND "")
+  else()
+    set(GOOGLETEST_SRC_DIR "")
+    set(GOOGLETEST_DOWNLOAD_COMMAND "")
   endif()
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-  set(INSTALL_GTEST ON CACHE BOOL "" FORCE)
-  message(STATUS "Downloading googletest...")
-  FetchContent_MakeAvailable(googletest)
-  if(NOT TARGET GTest::gtest)
-    message(FATAL_ERROR "Failed to fetch googletest")
-  endif()
+  ExternalProject_Add(googletest_ext
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+    PREFIX ${DEPS_BUILD_DIR}/googletest
+    DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
+    SOURCE_DIR ${GOOGLETEST_SRC_DIR}
+    DOWNLOAD_COMMAND ${GOOGLETEST_DOWNLOAD_COMMAND}
+    SOURCE_SUBDIR "googletest-1.14.0"
+    CMAKE_ARGS
+      -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+      -DBUILD_SHARED_LIBS=OFF
+      -DINSTALL_GTEST=ON
+    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a
+    LOG_DOWNLOAD ON
+  )
+  ExternalProject_Get_Property(googletest_ext INSTALL_DIR)
+  set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")
+  set(GTEST_LIB "${INSTALL_DIR}/lib/libgtest.a" CACHE INTERNAL "googletest static library")
 endif()
 
 

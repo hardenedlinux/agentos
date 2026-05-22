@@ -23,6 +23,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPS_BUILD_DIR="$ROOT_DIR/deps-build"
 BUILD_DIR="$ROOT_DIR/build"
 DIST_DIR="$BUILD_DIR/dist"
 
@@ -54,14 +55,28 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-echo "→ Configuring superbuild ($BUILD_TYPE, musl=$USE_MUSL, tests=$BUILD_TESTS)"
-cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
-  -DCMAKE_BUILD_TYPE="$BUILD_TYPE"   \
-  -DAGENTOS_MUSL="$USE_MUSL"         \
-  -DAGENTOS_BUILD_TESTS="$BUILD_TESTS" \
-  -DAGENTOS_STATIC=ON                \
-  -DAGENTOS_STRIP=ON                 \
-  -DAGENTOS_COVERAGE="${AGENTOS_COVERAGE:-OFF}"
+# Check if deps are already built
+deps_built=true
+for lib in spdlog libzmq libseccomp libcap; do
+  libfile="$DEPS_BUILD_DIR/$lib/install/lib/lib$lib.a"
+  if [ ! -f "$libfile" ]; then
+    deps_built=false
+    break
+  fi
+done
+
+if $deps_built; then
+  echo "→ Dependencies already built, skipping cmake configuration"
+else
+  echo "→ Configuring superbuild ($BUILD_TYPE, musl=$USE_MUSL, tests=$BUILD_TESTS)"
+  cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"   \
+    -DAGENTOS_MUSL="$USE_MUSL"         \
+    -DAGENTOS_BUILD_TESTS="$BUILD_TESTS" \
+    -DAGENTOS_STATIC=ON                \
+    -DAGENTOS_STRIP=ON                 \
+    -DAGENTOS_COVERAGE="${AGENTOS_COVERAGE:-OFF}"
+fi
 
 if $DEPS_ONLY; then
   echo "→ Building deps only"
@@ -74,10 +89,15 @@ if [ -n "${TARGET:-}" ]; then
   echo "→ Building target '$TARGET' ($JOBS jobs)"
   cmake --build "$BUILD_DIR" --target "$TARGET" --parallel "$JOBS"
 else
-  echo "→ Building all ($JOBS jobs)"
-  echo "  Step 1/2: deps  (downloaded + built once, cached after)"
-  echo "  Step 2/2: agentos core"
-  cmake --build "$BUILD_DIR" --parallel "$JOBS"
+  if $deps_built; then
+    echo "→ Building agentos core only ($JOBS jobs)"
+    cmake --build "$BUILD_DIR" --target agentos --parallel "$JOBS"
+  else
+    echo "→ Building all ($JOBS jobs)"
+    echo "  Step 1/2: deps  (downloaded + built once, cached after)"
+    echo "  Step 2/2: agentos core"
+    cmake --build "$BUILD_DIR" --parallel "$JOBS"
+  fi
 fi
 
 BINARY="$BUILD_DIR/src/agentos"

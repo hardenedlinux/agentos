@@ -124,6 +124,8 @@ set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
+  DOWNLOAD_DIR ${DEPS_BUILD_DIR}/downloads
+  STAMP_DIR ${DEPS_BUILD_DIR}/stamps
   SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
@@ -142,6 +144,8 @@ set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libcap
+  DOWNLOAD_DIR ${DEPS_BUILD_DIR}/downloads
+  STAMP_DIR ${DEPS_BUILD_DIR}/stamps
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>

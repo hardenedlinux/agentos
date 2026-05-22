@@ -51,6 +51,9 @@ ExternalProject_Add(spdlog_ext
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libspdlog.a
   LOG_DOWNLOAD ON
   BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+  COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"spdlog\",\"version\":\"1.12.0\"}" > ${DEPS_BUILD_DIR}/spdlog/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "spdlog 1.12.0" > ${DEPS_BUILD_DIR}/spdlog/Labels.txt
 )
 ExternalProject_Get_Property(spdlog_ext INSTALL_DIR)
 set(SPDLOG_INC "${INSTALL_DIR}/include" CACHE INTERNAL "spdlog include path")
@@ -68,6 +71,8 @@ ExternalProject_Add(httplib_ext
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
   BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"cpp-httplib\",\"version\":\"0.18.0\"}" > ${DEPS_BUILD_DIR}/httplib/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "cpp-httplib 0.18.0" > ${DEPS_BUILD_DIR}/httplib/Labels.txt
 )
 set(HTTPLIB_INC "${DEPS_BUILD_DIR}/httplib/src/httplib_ext/cpp-httplib-0.18.0" CACHE INTERNAL "cpp-httplib include path")
 
@@ -83,6 +88,8 @@ ExternalProject_Add(rapidjson_ext
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
   BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"rapidjson\",\"version\":\"1.1.0\"}" > ${DEPS_BUILD_DIR}/rapidjson/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "rapidjson 1.1.0" > ${DEPS_BUILD_DIR}/rapidjson/Labels.txt
 )
 set(RAPIDJSON_INC "${DEPS_BUILD_DIR}/rapidjson/src/rapidjson_ext/rapidjson-1.1.0/include" CACHE INTERNAL "rapidjson include path")
 
@@ -108,6 +115,9 @@ ExternalProject_Add(libzmq_ext
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libzmq.a
   LOG_DOWNLOAD ON
   BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+  COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libzmq\",\"version\":\"4.3.5\"}" > ${DEPS_BUILD_DIR}/libzmq/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "libzmq 4.3.5" > ${DEPS_BUILD_DIR}/libzmq/Labels.txt
 )
 ExternalProject_Get_Property(libzmq_ext INSTALL_DIR)
 set(ZMQ_LIB "${INSTALL_DIR}/lib/libzmq.a" CACHE INTERNAL "libzmq static library")
@@ -137,6 +147,8 @@ ExternalProject_Add(cppzmq_ext
   INSTALL_COMMAND ""
   LOG_DOWNLOAD ON
   BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"cppzmq\",\"version\":\"4.10.0\"}" > ${DEPS_BUILD_DIR}/cppzmq/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "cppzmq 4.10.0" > ${DEPS_BUILD_DIR}/cppzmq/Labels.txt
 )
 set(CPPZMQ_INC "${DEPS_BUILD_DIR}/cppzmq/src/cppzmq_ext/cppzmq-4.10.0" CACHE INTERNAL "cppzmq include path")
 
@@ -150,6 +162,8 @@ ExternalProject_Add(libseccomp_ext
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
   BUILD_COMMAND make
+  COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libseccomp\",\"version\":\"2.5.5\"}" > ${DEPS_BUILD_DIR}/libseccomp/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "libseccomp 2.5.5" > ${DEPS_BUILD_DIR}/libseccomp/Labels.txt
   INSTALL_COMMAND make install
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libseccomp.a
   LOG_DOWNLOAD ON
@@ -169,6 +183,8 @@ ExternalProject_Add(libcap_ext
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>
+  COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libcap\",\"version\":\"2.69\"}" > ${DEPS_BUILD_DIR}/libcap/Labels.json
+  COMMAND ${CMAKE_COMMAND} -E echo "libcap 2.69" > ${DEPS_BUILD_DIR}/libcap/Labels.txt
   INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libcap.a
   BUILD_IN_SOURCE TRUE
@@ -198,6 +214,9 @@ if(AGENTOS_BUILD_TESTS)
     BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a
     LOG_DOWNLOAD ON
     BUILD_IN_SOURCE TRUE
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
+    COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"googletest\",\"version\":\"1.14.0\"}" > ${DEPS_BUILD_DIR}/googletest/Labels.json
+    COMMAND ${CMAKE_COMMAND} -E echo "googletest 1.14.0" > ${DEPS_BUILD_DIR}/googletest/Labels.txt
   )
   ExternalProject_Get_Property(googletest_ext INSTALL_DIR)
   set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")

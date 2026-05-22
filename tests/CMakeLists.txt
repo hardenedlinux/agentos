@@ -18,8 +18,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 target_link_libraries(agentos_tests PRIVATE
   agentos_core
   agentos_forge
-  GTest::gtest
-  GTest::gtest_main
+  ${GTEST_LIB}
+  ${GTEST_MAIN_LIB}
   ${ZMQ_LIB}
 )
 
@@ -30,6 +30,7 @@ target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src/include
   ${CMAKE_SOURCE_DIR}/src/core/forge
   ${CPPZMQ_INC}
+  ${GTEST_INC}
 )
 
 if(AGENTOS_COVERAGE)
@@ -45,14 +46,15 @@ if(AGENTOS_BUILD_TESTS)
 
   add_executable(test_types test_types.cpp)
   target_link_libraries(test_types PRIVATE
-    GTest::gtest
-    GTest::gtest_main
+    ${GTEST_LIB}
+    ${GTEST_MAIN_LIB}
     agentos_core
     agentos_forge
   )
   target_include_directories(test_types PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include
     ${CMAKE_SOURCE_DIR}/src/core
+    ${GTEST_INC}
   )
   gtest_discover_tests(test_types)
 endif()

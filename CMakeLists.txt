@@ -229,6 +229,7 @@ if(AGENTOS_BUILD_TESTS)
   ExternalProject_Get_Property(googletest_ext INSTALL_DIR)
   set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")
   set(GTEST_LIB "${INSTALL_DIR}/lib/libgtest.a" CACHE INTERNAL "googletest static library")
+  set(GTEST_MAIN_LIB "${INSTALL_DIR}/lib/libgtest_main.a" CACHE INTERNAL "googletest main static library")
 endif()
 
 

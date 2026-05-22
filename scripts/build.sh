@@ -58,7 +58,7 @@ mkdir -p "$BUILD_DIR"
 # Check if deps are already built
 deps_built=true
 for lib in spdlog libzmq libseccomp libcap; do
-  libfile="$DEPS_BUILD_DIR/$lib/install/lib/lib$lib.a"
+  libfile="$DEPS_BUILD_DIR/$lib/lib/lib$lib.a"
   if [ ! -f "$libfile" ]; then
     deps_built=false
     break
@@ -66,8 +66,8 @@ for lib in spdlog libzmq libseccomp libcap; do
 done
 if $deps_built; then
   # also check googletest (library names differ)
-  if [ ! -f "$DEPS_BUILD_DIR/googletest/install/lib/libgtest.a" ] || \
-     [ ! -f "$DEPS_BUILD_DIR/googletest/install/lib/libgtest_main.a" ]; then
+  if [ ! -f "$DEPS_BUILD_DIR/googletest/lib/libgtest.a" ] || \
+     [ ! -f "$DEPS_BUILD_DIR/googletest/lib/libgtest_main.a" ]; then
     deps_built=false
   fi
 fi

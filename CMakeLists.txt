@@ -41,7 +41,7 @@ include(FetchContent)
 
 # spdlog (uses bundled fmt)
 set(SPDLOG_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/spdlog")
-set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/spdlog/build")
+set(CMAKE_EP_BUILD_DIR "${CMAKE_SOURCE_DIR}/build/deps-build/spdlog/build")
 ExternalProject_Add(spdlog_ext
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
   DOWNLOAD_NAME "spdlog-v1.12.0.tar.gz"
@@ -100,7 +100,7 @@ set(RAPIDJSON_INC "${DEPS_BUILD_DIR}/rapidjson/src/rapidjson_ext/rapidjson-1.1.0
 
 # libzmq (ZeroMQ core library)
 set(LIBZMQ_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libzmq")
-set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/libzmq/build")
+set(CMAKE_EP_BUILD_DIR "${CMAKE_SOURCE_DIR}/build/deps-build/libzmq/build")
 ExternalProject_Add(libzmq_ext
   URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
   DOWNLOAD_NAME "libzmq-v4.3.5.tar.gz"
@@ -209,7 +209,7 @@ find_package(OpenSSL REQUIRED)
 if(AGENTOS_BUILD_TESTS)
   enable_testing()
   set(GOOGLETEST_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/googletest")
-  set(CMAKE_EP_BUILD_DIR "${DEPS_BUILD_DIR}/googletest/build")
+  set(CMAKE_EP_BUILD_DIR "${CMAKE_SOURCE_DIR}/build/deps-build/googletest/build")
   ExternalProject_Add(googletest_ext
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
     DOWNLOAD_NAME "googletest-v1.14.0.tar.gz"

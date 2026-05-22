@@ -188,12 +188,13 @@ ExternalProject_Add(libcap_ext
   PREFIX ${DEPS_BUILD_DIR}/libcap
   DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
   CONFIGURE_COMMAND ""
-  BUILD_COMMAND make -C <SOURCE_DIR>
+  BUILD_COMMAND make -C <SOURCE_DIR>/libcap SHARED=no
   COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libcap\",\"version\":\"2.69\"}" > ${DEPS_BUILD_DIR}/libcap/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "libcap 2.69" > ${DEPS_BUILD_DIR}/libcap/Labels.txt
-  INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>
+  INSTALL_COMMAND make -C <SOURCE_DIR>/libcap SHARED=no install RAISE_SETFCAP=no prefix=<INSTALL_DIR> DESTDIR=
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libcap.a
   BUILD_IN_SOURCE TRUE
+  STAMP_DIR ${DEPS_BUILD_DIR}/stamps/libcap
 )
 ExternalProject_Get_Property(libcap_ext INSTALL_DIR)
 set(CAP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libcap install dir")

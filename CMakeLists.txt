@@ -57,6 +57,9 @@ set(HTTPLIB_INC "${httplib_SOURCE_DIR}" CACHE INTERNAL "cpp-httplib include path
 FetchContent_Declare(rapidjson
   URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
 )
+set(RAPIDJSON_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(RAPIDJSON_BUILD_DOC OFF CACHE BOOL "" FORCE)
 message(STATUS "Downloading rapidjson...")
 FetchContent_MakeAvailable(rapidjson)
 if(NOT rapidjson_POPULATED)

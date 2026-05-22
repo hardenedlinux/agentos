@@ -31,6 +31,7 @@ set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
 include(ExternalProject)
 set(FETCHCONTENT_QUIET OFF)
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # spdlog (uses bundled fmt)
 FetchContent_Declare(spdlog

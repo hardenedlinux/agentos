@@ -145,9 +145,18 @@ set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
 
 # libseccomp (static)
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/libseccomp-src")
+  set(SECCOMP_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libseccomp-src")
+  set(SECCOMP_DOWNLOAD_COMMAND "")
+else()
+  set(SECCOMP_SRC_DIR "")
+  set(SECCOMP_DOWNLOAD_COMMAND "")
+endif()
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libseccomp
+  SOURCE_DIR ${SECCOMP_SRC_DIR}
+  DOWNLOAD_COMMAND ${SECCOMP_DOWNLOAD_COMMAND}
   SOURCE_SUBDIR "libseccomp-2.5.5"
   PATCH_COMMAND cd <SOURCE_DIR> && autoreconf -iv
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
@@ -163,9 +172,18 @@ set(SECCOMP_INCLUDE_DIR "${SECCOMP_INSTALL_DIR}/include" CACHE INTERNAL "libsecc
 
 # libcap (static)
 set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/libcap-src")
+  set(CAP_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/libcap-src")
+  set(CAP_DOWNLOAD_COMMAND "")
+else()
+  set(CAP_SRC_DIR "")
+  set(CAP_DOWNLOAD_COMMAND "")
+endif()
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
   PREFIX ${DEPS_BUILD_DIR}/libcap
+  SOURCE_DIR ${CAP_SRC_DIR}
+  DOWNLOAD_COMMAND ${CAP_DOWNLOAD_COMMAND}
   SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR>

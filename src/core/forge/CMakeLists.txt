@@ -7,7 +7,7 @@ add_library(agentos_forge
     forge_cli.cpp
 )
 
-target_link_libraries(agentos_forge PUBLIC agentos_core)
+target_link_libraries(agentos_forge PUBLIC agentos_core ${SECCOMP_LIB} ${CAP_LIB})
 target_include_directories(agentos_forge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/include

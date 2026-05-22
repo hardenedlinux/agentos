@@ -58,6 +58,8 @@ target_link_libraries(agentos_core PUBLIC
   dl
   spdlog::spdlog
   ${ZMQ_LIB}
+  ${SECCOMP_LIB}
+  ${CAP_LIB}
 )
 
 target_link_libraries(agentos_core PRIVATE sqlite3)

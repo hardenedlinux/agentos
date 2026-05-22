@@ -26,7 +26,7 @@ endif()
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
 # Store downloaded dependency sources outside the build directory
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -42,8 +42,8 @@ include(ExternalProject)
 FetchContent_Declare(spdlog
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/spdlog-src")
-  set(FETCHCONTENT_SOURCE_DIR_spdlog "${FETCHCONTENT_BASE_DIR}/spdlog-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
+  set(FETCHCONTENT_SOURCE_DIR_spdlog "${CMAKE_SOURCE_DIR}/deps-src/spdlog-src")
 endif()
 set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
@@ -59,8 +59,8 @@ endif()
 FetchContent_Declare(httplib
   URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/httplib-src")
-  set(FETCHCONTENT_SOURCE_DIR_httplib "${FETCHCONTENT_BASE_DIR}/httplib-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
+  set(FETCHCONTENT_SOURCE_DIR_httplib "${CMAKE_SOURCE_DIR}/deps-src/httplib-src")
 endif()
 message(STATUS "Downloading cpp-httplib...")
 FetchContent_MakeAvailable(httplib)
@@ -73,8 +73,8 @@ set(HTTPLIB_INC "${httplib_SOURCE_DIR}" CACHE INTERNAL "cpp-httplib include path
 FetchContent_Declare(rapidjson
   URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/rapidjson-src")
-  set(FETCHCONTENT_SOURCE_DIR_rapidjson "${FETCHCONTENT_BASE_DIR}/rapidjson-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
+  set(FETCHCONTENT_SOURCE_DIR_rapidjson "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src")
 endif()
 set(RAPIDJSON_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -90,8 +90,8 @@ set(RAPIDJSON_INC "${rapidjson_SOURCE_DIR}/include" CACHE INTERNAL "rapidjson in
 FetchContent_Declare(libzmq
   URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/libzmq-src")
-  set(FETCHCONTENT_SOURCE_DIR_libzmq "${FETCHCONTENT_BASE_DIR}/libzmq-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
+  set(FETCHCONTENT_SOURCE_DIR_libzmq "${CMAKE_SOURCE_DIR}/deps-src/libzmq-src")
 endif()
 set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -108,7 +108,7 @@ FetchContent_MakeAvailable(libzmq)
 if(NOT TARGET libzmq-static AND NOT TARGET libzmq)
   message(FATAL_ERROR "Failed to fetch libzmq")
 endif()
-find_library(ZMQ_LIB NAMES zmq libzmq PATHS ${FETCHCONTENT_BASE_DIR}/libzmq-build/lib NO_DEFAULT_PATH)
+find_library(ZMQ_LIB NAMES zmq libzmq PATHS ${CMAKE_SOURCE_DIR}/deps-build/libzmq-build/lib NO_DEFAULT_PATH)
 if(NOT ZMQ_LIB)
   message(FATAL_ERROR "Could not find libzmq.a in build tree")
 endif()
@@ -117,8 +117,8 @@ endif()
 FetchContent_Declare(sqlite3_amalgamation
   URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/sqlite3_amalgamation-src")
-  set(FETCHCONTENT_SOURCE_DIR_sqlite3_amalgamation "${FETCHCONTENT_BASE_DIR}/sqlite3_amalgamation-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
+  set(FETCHCONTENT_SOURCE_DIR_sqlite3_amalgamation "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src")
 endif()
 message(STATUS "Downloading sqlite3 amalgamation...")
 FetchContent_MakeAvailable(sqlite3_amalgamation)
@@ -131,8 +131,8 @@ set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3
 FetchContent_Declare(cppzmq
   URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
 )
-if(EXISTS "${FETCHCONTENT_BASE_DIR}/cppzmq-src")
-  set(FETCHCONTENT_SOURCE_DIR_cppzmq "${FETCHCONTENT_BASE_DIR}/cppzmq-src")
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
+  set(FETCHCONTENT_SOURCE_DIR_cppzmq "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src")
 endif()
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CPPZMQ_CMAKE_SUPPRESS_INSTALL OFF CACHE BOOL "" FORCE)
@@ -187,8 +187,8 @@ if(AGENTOS_BUILD_TESTS)
   FetchContent_Declare(googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
   )
-  if(EXISTS "${FETCHCONTENT_BASE_DIR}/googletest-src")
-    set(FETCHCONTENT_SOURCE_DIR_googletest "${FETCHCONTENT_BASE_DIR}/googletest-src")
+  if(EXISTS "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
+    set(FETCHCONTENT_SOURCE_DIR_googletest "${CMAKE_SOURCE_DIR}/deps-src/googletest-src")
   endif()
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(INSTALL_GTEST ON CACHE BOOL "" FORCE)

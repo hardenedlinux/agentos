@@ -29,7 +29,7 @@ DIST_DIR="$BUILD_DIR/dist"
 
 BUILD_TYPE="Release"
 USE_MUSL=OFF
-BUILD_TESTS=OFF
+BUILD_TESTS=ON
 DEPS_ONLY=false
 CLEAN=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -57,7 +57,7 @@ mkdir -p "$BUILD_DIR"
 
 # Check if deps are already built
 deps_built=true
-for lib in spdlog libzmq libseccomp libcap; do
+for lib in spdlog libzmq libseccomp libcap googletest; do
   libfile="$DEPS_BUILD_DIR/$lib/install/lib/lib$lib.a"
   if [ ! -f "$libfile" ]; then
     deps_built=false

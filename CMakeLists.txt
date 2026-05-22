@@ -95,6 +95,7 @@ set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")
 ExternalProject_Add(libseccomp_ext
   URL https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
   PREFIX ${SECCOMP_PREFIX}
+  SOURCE_SUBDIR "libseccomp-2.5.5"
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-static --disable-shared
   BUILD_COMMAND make
   INSTALL_COMMAND make install
@@ -110,6 +111,7 @@ set(CAP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libcap")
 ExternalProject_Add(libcap_ext
   URL https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
   PREFIX ${CAP_PREFIX}
+  SOURCE_SUBDIR "libcap-2.69"
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C <SOURCE_DIR> libcap.a
   INSTALL_COMMAND make -C <SOURCE_DIR> install RAISE_SETFCAP=no lib=/lib prefix=<INSTALL_DIR>

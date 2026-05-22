@@ -26,7 +26,7 @@ endif()
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
 # Store downloaded dependency sources outside the build directory
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -67,7 +67,7 @@ FetchContent_MakeAvailable(httplib)
 if(NOT httplib_POPULATED)
   message(FATAL_ERROR "Failed to fetch cpp-httplib")
 endif()
-set(HTTPLIB_INC "${httplib_SOURCE_DIR}" CACHE INTERNAL "cpp-httplib include path")
+set(HTTPLIB_INC "${CMAKE_SOURCE_DIR}/deps-src/httplib-src" CACHE INTERNAL "cpp-httplib include path")
 
 # rapidjson (header-only JSON library)
 FetchContent_Declare(rapidjson
@@ -84,7 +84,7 @@ FetchContent_MakeAvailable(rapidjson)
 if(NOT rapidjson_POPULATED)
   message(FATAL_ERROR "Failed to fetch rapidjson")
 endif()
-set(RAPIDJSON_INC "${rapidjson_SOURCE_DIR}/include" CACHE INTERNAL "rapidjson include path")
+set(RAPIDJSON_INC "${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src/include" CACHE INTERNAL "rapidjson include path")
 
 # libzmq (ZeroMQ core library)
 FetchContent_Declare(libzmq
@@ -125,7 +125,7 @@ FetchContent_MakeAvailable(sqlite3_amalgamation)
 if(NOT sqlite3_amalgamation_POPULATED)
   message(FATAL_ERROR "Failed to fetch sqlite3 amalgamation")
 endif()
-set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3 source directory")
+set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src" CACHE INTERNAL "sqlite3 source directory")
 
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
 FetchContent_Declare(cppzmq
@@ -141,7 +141,7 @@ FetchContent_GetProperties(cppzmq)
 if(NOT cppzmq_POPULATED)
   FetchContent_Populate(cppzmq)
 endif()
-set(CPPZMQ_INC "${cppzmq_SOURCE_DIR}" CACHE INTERNAL "cppzmq include path")
+set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src" CACHE INTERNAL "cppzmq include path")
 
 # libseccomp (static)
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")

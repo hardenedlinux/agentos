@@ -33,6 +33,10 @@ include(ExternalProject)
 set(FETCHCONTENT_QUIET OFF)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
+# Store ExternalProject stamp and download files outside the build directory
+set(CMAKE_EP_STAMP_DIR "${DEPS_BUILD_DIR}/stamps")
+set(CMAKE_EP_DOWNLOAD_DIR "${DEPS_BUILD_DIR}/downloads")
+
 # spdlog (uses bundled fmt)
 FetchContent_Declare(spdlog
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz

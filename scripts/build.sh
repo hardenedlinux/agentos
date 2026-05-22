@@ -57,13 +57,20 @@ mkdir -p "$BUILD_DIR"
 
 # Check if deps are already built
 deps_built=true
-for lib in spdlog libzmq libseccomp libcap googletest; do
+for lib in spdlog libzmq libseccomp libcap; do
   libfile="$DEPS_BUILD_DIR/$lib/install/lib/lib$lib.a"
   if [ ! -f "$libfile" ]; then
     deps_built=false
     break
   fi
 done
+if $deps_built; then
+  # also check googletest (library names differ)
+  if [ ! -f "$DEPS_BUILD_DIR/googletest/install/lib/libgtest.a" ] || \
+     [ ! -f "$DEPS_BUILD_DIR/googletest/install/lib/libgtest_main.a" ]; then
+    deps_built=false
+  fi
+fi
 
 if $deps_built; then
   echo "→ Dependencies already built, skipping cmake configuration"

@@ -29,7 +29,7 @@ DIST_DIR="$BUILD_DIR/dist"
 
 BUILD_TYPE="Release"
 USE_MUSL=OFF
-BUILD_TESTS=ON
+BUILD_TESTS=OFF
 DEPS_ONLY=false
 CLEAN=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -64,7 +64,7 @@ for lib in spdlog libzmq libseccomp libcap; do
     break
   fi
 done
-if $deps_built; then
+if $deps_built && [ "$BUILD_TESTS" = "ON" ]; then
   # also check googletest (library names differ)
   if [ ! -f "$DEPS_BUILD_DIR/googletest/lib/libgtest.a" ] || \
      [ ! -f "$DEPS_BUILD_DIR/googletest/lib/libgtest_main.a" ]; then

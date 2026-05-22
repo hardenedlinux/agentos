@@ -42,6 +42,28 @@ if(NOT TARGET spdlog::spdlog)
   message(FATAL_ERROR "Failed to fetch spdlog")
 endif()
 
+# cpp-httplib (header-only HTTP client)
+FetchContent_Declare(httplib
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
+)
+message(STATUS "Downloading cpp-httplib...")
+FetchContent_MakeAvailable(httplib)
+if(NOT httplib_POPULATED)
+  message(FATAL_ERROR "Failed to fetch cpp-httplib")
+endif()
+set(HTTPLIB_INC "${httplib_SOURCE_DIR}" CACHE INTERNAL "cpp-httplib include path")
+
+# rapidjson (header-only JSON library)
+FetchContent_Declare(rapidjson
+  URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+)
+message(STATUS "Downloading rapidjson...")
+FetchContent_MakeAvailable(rapidjson)
+if(NOT rapidjson_POPULATED)
+  message(FATAL_ERROR "Failed to fetch rapidjson")
+endif()
+set(RAPIDJSON_INC "${rapidjson_SOURCE_DIR}/include" CACHE INTERNAL "rapidjson include path")
+
 # libzmq (ZeroMQ core library)
 FetchContent_Declare(libzmq
   URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
@@ -122,6 +144,9 @@ ExternalProject_Get_Property(libcap_ext INSTALL_DIR)
 set(CAP_INSTALL_DIR "${INSTALL_DIR}" CACHE INTERNAL "libcap install dir")
 set(CAP_LIB "${CAP_INSTALL_DIR}/lib/libcap.a" CACHE INTERNAL "libcap static library")
 set(CAP_INCLUDE_DIR "${CAP_INSTALL_DIR}/include" CACHE INTERNAL "libcap include dir")
+
+# OpenSSL (for HTTPS support in cpp-httplib)
+find_package(OpenSSL REQUIRED)
 
 # gtest (Google Test)
 if(AGENTOS_BUILD_TESTS)

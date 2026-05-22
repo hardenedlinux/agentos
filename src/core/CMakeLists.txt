@@ -12,6 +12,7 @@ set(AGENTOS_CORE_SOURCES
   enforce_layer.cpp
   mind_layer.cpp
   sandbox/sandbox.cpp
+  llm/llm_client.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
@@ -35,6 +36,7 @@ target_include_directories(agentos_core PUBLIC
   SYSTEM PUBLIC
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
+  ${HTTPLIB_INC}
 )
 
 target_include_directories(agentos_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -45,6 +47,7 @@ target_compile_definitions(agentos_core PRIVATE
   SQLITE_ENABLE_JSON1
   SQLITE_ENABLE_FTS5
   SQLITE_ENABLE_RTREE
+  CPPHTTPLIB_OPENSSL_SUPPORT
 )
 
 target_compile_options(agentos_core PRIVATE
@@ -61,6 +64,8 @@ target_link_libraries(agentos_core PUBLIC
   ${ZMQ_LIB}
   ${SECCOMP_LIB}
   ${CAP_LIB}
+  OpenSSL::SSL
+  OpenSSL::Crypto
 )
 
 target_include_directories(agentos_core PUBLIC

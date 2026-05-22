@@ -18,10 +18,13 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <rapidjson/rapidjson.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <zmq.hpp>
 #include <sqlite3.h>
+#include <httplib.h>
+#include <openssl/opensslv.h>
 
 #include "agentos/dispatcher.h"
 #include "agentos/obs_bus.h"
@@ -31,6 +34,7 @@
 #include "agentos/types.h"
 #include "agentos/verifier.h"
 #include "agentos/version.h"
+#include "agentos/llm_client.h"
 
 static void print_banner ()
 {
@@ -45,7 +49,7 @@ static void print_banner ()
 
   Core:    Single-binary Agent Runtime  |  C++23
   Plugins: Unix Sockets + JSON-RPC 2.0  |  Language-agnostic clients
-  Subsystems: Dispatcher, Registry, Verifier, Scheduler, Orchestrator, ObsBus
+  Subsystems: Dispatcher, Registry, Verifier, Scheduler, Orchestrator, ObsBus, LlmClient
 )" << "\n";
 }
 
@@ -63,6 +67,15 @@ static void verify_deps ()
 
   // SQLite3
   spdlog::info ("SQLite3 {}  ✓", sqlite3_libversion ());
+
+  // RapidJSON
+  spdlog::info ("RapidJSON {}  ✓", RAPIDJSON_VERSION_STRING);
+
+  // cpp-httplib
+  spdlog::info ("cpp-httplib {}  ✓", CPPHTTPLIB_VERSION);
+
+  // OpenSSL
+  spdlog::info ("OpenSSL {}  ✓", OPENSSL_VERSION_TEXT);
 
   // RapidJSON — build a sample worker.register handshake
   std::string payload = R"({
@@ -131,6 +144,10 @@ static void verify_architecture ()
                 result.ok ? "UNEXPECTED PASS" : "correctly rejected",
                 result.errors.empty () ? "none" : result.errors[0]);
 
+  // Verify LlmClient can be instantiated (no actual HTTP call)
+  agentos::LlmClient llm_client("test-api-key", "https://api.openai.com");
+  spdlog::info ("LlmClient    ✓");
+
   spdlog::info ("--- end architecture check ---");
 }
 
@@ -148,6 +165,7 @@ static void help ()
   spdlog::info (
                 "  Master       — task lifecycle coordinator (adviser → core → worker)");
   spdlog::info ("  ObsBus       — structured logs, metrics, task events");
+  spdlog::info ("  LlmClient    — HTTP client for LLM API calls (ADR-012)");
   spdlog::info ("");
   spdlog::info ("Ready. Waiting for advisers and workers to connect.");
 }

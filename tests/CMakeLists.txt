@@ -22,6 +22,7 @@ target_link_libraries(agentos_tests PRIVATE
   ${GTEST_MAIN_LIB}
   ${ZMQ_LIB}
 )
+add_dependencies(agentos_tests googletest_ext)
 
 # Provide include paths for headers that are private to agentos_core
 target_include_directories(agentos_tests PRIVATE
@@ -51,6 +52,7 @@ if(AGENTOS_BUILD_TESTS)
     agentos_core
     agentos_forge
   )
+  add_dependencies(test_types googletest_ext)
   target_include_directories(test_types PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include
     ${CMAKE_SOURCE_DIR}/src/core

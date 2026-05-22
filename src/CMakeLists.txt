@@ -9,7 +9,12 @@ target_link_libraries(agentos PRIVATE agentos_core agentos_forge ${SECCOMP_LIB} 
 target_include_directories(agentos PRIVATE
   ${CMAKE_SOURCE_DIR}/src/include
   ${CMAKE_SOURCE_DIR}/src/core
+  ${HTTPLIB_INC}
+  ${RAPIDJSON_INC}
+  ${SPDLOG_INC}
+  ${CPPZMQ_INC}
 )
+add_dependencies(agentos httplib_ext rapidjson_ext spdlog_ext cppzmq_ext)
 
 if(AGENTOS_COVERAGE)
   target_compile_options(agentos PRIVATE --coverage -fprofile-arcs -ftest-coverage)

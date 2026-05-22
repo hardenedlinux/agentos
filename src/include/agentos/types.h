@@ -46,7 +46,7 @@ namespace agentos
 
       Result() : value{}, ok(false) {}
       Result(T val) : value(std::move(val)), ok(true) {}
-      Result(Error err, ErrorTag) : error(std::move(err)), ok(false) {}
+      Result(Error err, ErrorTag) : value{}, error(std::move(err)), ok(false) {}
   };
 
   // Executor command schema

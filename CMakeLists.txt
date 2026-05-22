@@ -39,11 +39,10 @@ set(CMAKE_EP_DOWNLOAD_DIR "${DEPS_BUILD_DIR}/downloads")
 include(ExternalProject)
 
 # spdlog (uses bundled fmt)
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/spdlog-src")
-  FetchContent_Declare(spdlog
-    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
-  )
-else()
+FetchContent_Declare(spdlog
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/spdlog-src")
   set(FETCHCONTENT_SOURCE_DIR_spdlog "${FETCHCONTENT_BASE_DIR}/spdlog-src")
 endif()
 set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -57,11 +56,10 @@ if(NOT TARGET spdlog::spdlog)
 endif()
 
 # cpp-httplib (header-only HTTP client)
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/httplib-src")
-  FetchContent_Declare(httplib
-    URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
-  )
-else()
+FetchContent_Declare(httplib
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/httplib-src")
   set(FETCHCONTENT_SOURCE_DIR_httplib "${FETCHCONTENT_BASE_DIR}/httplib-src")
 endif()
 message(STATUS "Downloading cpp-httplib...")
@@ -72,11 +70,10 @@ endif()
 set(HTTPLIB_INC "${httplib_SOURCE_DIR}" CACHE INTERNAL "cpp-httplib include path")
 
 # rapidjson (header-only JSON library)
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/rapidjson-src")
-  FetchContent_Declare(rapidjson
-    URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
-  )
-else()
+FetchContent_Declare(rapidjson
+  URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/rapidjson-src")
   set(FETCHCONTENT_SOURCE_DIR_rapidjson "${FETCHCONTENT_BASE_DIR}/rapidjson-src")
 endif()
 set(RAPIDJSON_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -90,11 +87,10 @@ endif()
 set(RAPIDJSON_INC "${rapidjson_SOURCE_DIR}/include" CACHE INTERNAL "rapidjson include path")
 
 # libzmq (ZeroMQ core library)
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/libzmq-src")
-  FetchContent_Declare(libzmq
-    URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
-  )
-else()
+FetchContent_Declare(libzmq
+  URL https://github.com/zeromq/libzmq/archive/refs/tags/v4.3.5.tar.gz
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/libzmq-src")
   set(FETCHCONTENT_SOURCE_DIR_libzmq "${FETCHCONTENT_BASE_DIR}/libzmq-src")
 endif()
 set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -118,11 +114,10 @@ if(NOT ZMQ_LIB)
 endif()
 
 # SQLite3 (amalgamation) — compile sqlite3.c directly into agentos_core
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/sqlite3_amalgamation-src")
-  FetchContent_Declare(sqlite3_amalgamation
-    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
-  )
-else()
+FetchContent_Declare(sqlite3_amalgamation
+  URL https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/sqlite3_amalgamation-src")
   set(FETCHCONTENT_SOURCE_DIR_sqlite3_amalgamation "${FETCHCONTENT_BASE_DIR}/sqlite3_amalgamation-src")
 endif()
 message(STATUS "Downloading sqlite3 amalgamation...")
@@ -133,11 +128,10 @@ endif()
 set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}" CACHE INTERNAL "sqlite3 source directory")
 
 # cppzmq (C++ binding for ZeroMQ, header-only, no build needed)
-if(NOT EXISTS "${FETCHCONTENT_BASE_DIR}/cppzmq-src")
-  FetchContent_Declare(cppzmq
-    URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
-  )
-else()
+FetchContent_Declare(cppzmq
+  URL https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
+)
+if(EXISTS "${FETCHCONTENT_BASE_DIR}/cppzmq-src")
   set(FETCHCONTENT_SOURCE_DIR_cppzmq "${FETCHCONTENT_BASE_DIR}/cppzmq-src")
 endif()
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -193,6 +187,9 @@ if(AGENTOS_BUILD_TESTS)
   FetchContent_Declare(googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
   )
+  if(EXISTS "${FETCHCONTENT_BASE_DIR}/googletest-src")
+    set(FETCHCONTENT_SOURCE_DIR_googletest "${FETCHCONTENT_BASE_DIR}/googletest-src")
+  endif()
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(INSTALL_GTEST ON CACHE BOOL "" FORCE)
   message(STATUS "Downloading googletest...")

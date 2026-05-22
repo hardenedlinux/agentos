@@ -55,7 +55,8 @@ ExternalProject_Add(spdlog_ext
     -DSPDLOG_FMT_EXTERNAL=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libspdlog.a
   LOG_DOWNLOAD ON
-  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+  BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
   COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"spdlog\",\"version\":\"1.12.0\"}" > ${DEPS_BUILD_DIR}/spdlog/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "spdlog 1.12.0" > ${DEPS_BUILD_DIR}/spdlog/Labels.txt
 )
@@ -120,7 +121,8 @@ ExternalProject_Add(libzmq_ext
     -DENABLE_DRAFTS=OFF
   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libzmq.a
   LOG_DOWNLOAD ON
-  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+  BUILD_IN_SOURCE TRUE
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
   COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"libzmq\",\"version\":\"4.3.5\"}" > ${DEPS_BUILD_DIR}/libzmq/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "libzmq 4.3.5" > ${DEPS_BUILD_DIR}/libzmq/Labels.txt
 )
@@ -220,7 +222,8 @@ if(AGENTOS_BUILD_TESTS)
       -DINSTALL_GTEST=ON
     BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a
     LOG_DOWNLOAD ON
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+    BUILD_IN_SOURCE TRUE
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <SOURCE_DIR>
     COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"googletest\",\"version\":\"1.14.0\"}" > ${DEPS_BUILD_DIR}/googletest/Labels.json
     COMMAND ${CMAKE_COMMAND} -E echo "googletest 1.14.0" > ${DEPS_BUILD_DIR}/googletest/Labels.txt
   )

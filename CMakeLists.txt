@@ -152,6 +152,7 @@ set(CAP_LIB "${CAP_INSTALL_DIR}/lib/libcap.a" CACHE INTERNAL "libcap static libr
 set(CAP_INCLUDE_DIR "${CAP_INSTALL_DIR}/include" CACHE INTERNAL "libcap include dir")
 
 # OpenSSL (for HTTPS support in cpp-httplib)
+set(OPENSSL_USE_STATIC_LIBS ON)
 find_package(OpenSSL REQUIRED)
 
 # gtest (Google Test)

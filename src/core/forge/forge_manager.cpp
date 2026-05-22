@@ -50,8 +50,14 @@ void ForgeManager::setup_state_machine() {
         // SandboxProbeCallback
         [this](ForgeJob& job) {
             spdlog::info("[forge] sandbox probing job {}", job.id);
-            // TODO: run sandbox probe
-            // For now, assume probe passes
+            // Apply sandbox restrictions (ADR-011)
+            if (!apply_sandbox(job.id.value(),
+                               job.allowed_read_paths,
+                               job.allowed_write_paths,
+                               job.allowed_tcp_ports)) {
+                spdlog::error("[forge] sandbox probe failed for job {}", job.id);
+                // TODO: handle failure (e.g., set phase back to Drafting)
+            }
         },
         // ApproveCallback
         [this](ForgeJob& job) {
@@ -86,6 +92,9 @@ std::string ForgeManager::create_job(const std::string& method,
     job.phase = "Drafting";
     job.last_code.clear();
     job.last_feedback.clear();
+    job.allowed_read_paths.clear();
+    job.allowed_write_paths.clear();
+    job.allowed_tcp_ports.clear();
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
     job.created_at = now;
     job.updated_at = now;

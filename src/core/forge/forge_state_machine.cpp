@@ -1,4 +1,5 @@
 #include "forge_state_machine.hpp"
+#include "agentos/sandbox.h"
 #include <spdlog/spdlog.h>
 
 namespace agentos {

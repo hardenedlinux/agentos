@@ -1,6 +1,16 @@
 # Locate system libraries for sandbox (seccomp, libcap)
-find_library(SECCOMP_LIB seccomp)
-find_library(CAP_LIB cap)
+find_library(SECCOMP_LIB seccomp
+    PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu
+)
+find_library(CAP_LIB cap
+    PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu
+)
+if(SECCOMP_LIB)
+    message(STATUS "Found seccomp: ${SECCOMP_LIB}")
+endif()
+if(CAP_LIB)
+    message(STATUS "Found cap: ${CAP_LIB}")
+endif()
 if(NOT SECCOMP_LIB)
     message(FATAL_ERROR "libseccomp not found (install libseccomp-dev)")
 endif()

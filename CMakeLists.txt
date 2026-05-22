@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
 project(agentos_superbuild C CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 option(AGENTOS_STATIC      "Statically link libgcc and libstdc++"  ON)
 option(AGENTOS_MUSL        "Build with musl-gcc for full static"   OFF)
 option(AGENTOS_BUILD_TESTS "Build unit tests"                      OFF)

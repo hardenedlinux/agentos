@@ -4,6 +4,7 @@
 #include "agentos/dispatcher.h"
 #include "agentos/orchestrator.h"
 #include "agentos/obs_bus.h"
+#include "agentos/sandbox.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <random>

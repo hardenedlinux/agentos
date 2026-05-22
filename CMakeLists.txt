@@ -26,7 +26,7 @@ endif()
 set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
 
 # Store downloaded dependency sources outside the build directory
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-build")
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/deps-src")
 set(DEPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/deps-build")
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)

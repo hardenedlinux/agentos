@@ -10,6 +10,7 @@ target_include_directories(agentos PRIVATE
   ${CMAKE_SOURCE_DIR}/src/include
   ${CMAKE_SOURCE_DIR}/src/core
   ${HTTPLIB_INC}
+  ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
   ${RAPIDJSON_INC}
   ${SPDLOG_INC}
   ${CPPZMQ_INC}

@@ -84,13 +84,13 @@ Result<LlmResponse> LlmClient::complete(const LlmRequest& req) const {
         auto err = res.error();
         std::string err_msg = httplib::to_string(err);
         spdlog::error("[llm_client] HTTP request failed: {}", err_msg);
-        return Result<LlmResponse>(Error{err_msg});
+        return Result<LlmResponse>(Error{err_msg}, ErrorTag{});
     }
 
     if (res->status != 200) {
         std::string err_msg = "HTTP status " + std::to_string(res->status) + ": " + res->body;
         spdlog::error("[llm_client] {}", err_msg);
-        return Result<LlmResponse>(Error{err_msg});
+        return Result<LlmResponse>(Error{err_msg}, ErrorTag{});
     }
 
     // Parse JSON response
@@ -100,7 +100,7 @@ Result<LlmResponse> LlmClient::complete(const LlmRequest& req) const {
         std::string err_msg = "Failed to parse LLM response JSON: ";
         err_msg += rapidjson::GetParseError_En(ok.Code());
         spdlog::error("[llm_client] {}", err_msg);
-        return Result<LlmResponse>(Error{err_msg});
+        return Result<LlmResponse>(Error{err_msg}, ErrorTag{});
     }
 
     // Extract content from choices[0].message.content
@@ -108,14 +108,14 @@ Result<LlmResponse> LlmClient::complete(const LlmRequest& req) const {
         resp_doc["choices"].Size() == 0) {
         std::string err_msg = "LLM response missing 'choices' array";
         spdlog::error("[llm_client] {}", err_msg);
-        return Result<LlmResponse>(Error{err_msg});
+        return Result<LlmResponse>(Error{err_msg}, ErrorTag{});
     }
 
     const auto& first_choice = resp_doc["choices"][0];
     if (!first_choice.HasMember("message") || !first_choice["message"].HasMember("content")) {
         std::string err_msg = "LLM response missing 'message.content'";
         spdlog::error("[llm_client] {}", err_msg);
-        return Result<LlmResponse>(Error{err_msg});
+        return Result<LlmResponse>(Error{err_msg}, ErrorTag{});
     }
 
     std::string content = first_choice["message"]["content"].GetString();

@@ -1,5 +1,5 @@
-#include "forge_database.hpp"
-#include "database.hpp"
+#include "forge_database.h"
+#include "database.h"
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 

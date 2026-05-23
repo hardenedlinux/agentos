@@ -1,5 +1,5 @@
-#include "forge_manager.hpp"
-#include "database.hpp"
+#include "forge_manager.h"
+#include "database.h"
 #include "agentos/registry.h"
 #include "agentos/dispatcher.h"
 #include "agentos/orchestrator.h"

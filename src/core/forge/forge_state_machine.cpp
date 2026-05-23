@@ -1,4 +1,4 @@
-#include "forge_state_machine.hpp"
+#include "forge_state_machine.h"
 #include "agentos/sandbox.h"
 #include <spdlog/spdlog.h>
 

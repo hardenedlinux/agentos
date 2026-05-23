@@ -1,5 +1,5 @@
 #include "agentos/orchestrator.h"
-#include "database/database.hpp"
+#include "database/database.h"
 #include <spdlog/spdlog.h>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>

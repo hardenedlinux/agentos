@@ -1,5 +1,5 @@
-#include "forge_rpc.hpp"
-#include "forge_manager.hpp"
+#include "forge_rpc.h"
+#include "forge_manager.h"
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>

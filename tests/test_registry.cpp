@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "agentos/registry.h"
-#include "database/database.hpp"
+#include "database/database.h"
 
 using namespace agentos;
 

@@ -27,7 +27,7 @@ add_dependencies(agentos_tests googletest_ext)
 # Provide include paths for headers that are private to agentos_core
 target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/src/include
+  ${CMAKE_SOURCE_DIR}/src/include/agentos
   ${CPPZMQ_INC}
   ${GTEST_INC}
   ${TOMLPLUSPLUS_INC}

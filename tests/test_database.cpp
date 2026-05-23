@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "database/database.hpp"
+#include "database/database.h"
 #include <filesystem>
 
 using namespace agentos;

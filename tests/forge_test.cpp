@@ -7,15 +7,15 @@
 #include <chrono>
 #include <thread>
 
-#include "forge_job.hpp"
-#include "forge_database.hpp"
-#include "forge_state_machine.hpp"
-#include "forge_manager.hpp"
-#include "database.hpp"
-#include "agentos/registry.h"
-#include "agentos/dispatcher.h"
-#include "agentos/orchestrator.h"
-#include "agentos/obs_bus.h"
+#include "forge/forge_job.h"
+#include "forge/forge_database.h"
+#include "forge/forge_state_machine.h"
+#include "forge/forge_manager.h"
+#include "database/database.h"
+#include "registry.h"
+#include "dispatcher.h"
+#include "orchestrator.h"
+#include "obs_bus.h"
 
 using namespace agentos;
 

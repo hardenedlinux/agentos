@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include <optional>
-#include "forge_job.h"
+#include "agentos/forge/forge_job.h"
 
 namespace agentos {
 
@@ -26,4 +26,3 @@ private:
 };
 
 } // namespace agentos
-

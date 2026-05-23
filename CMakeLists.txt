@@ -159,7 +159,7 @@ ExternalProject_Add(cppzmq_ext
 set(CPPZMQ_INC "${DEPS_BUILD_DIR}/cppzmq/src/cppzmq_ext/cppzmq-4.10.0" CACHE INTERNAL "cppzmq include path")
 
 # toml++ (header-only TOML parser) – vendored single header
-set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/third_party/tomlplusplus")
+set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
 if(NOT EXISTS "${TOMLPLUSPLUS_DIR}/toml.hpp")
   file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DIR}")
   file(DOWNLOAD

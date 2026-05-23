@@ -1,4 +1,4 @@
-#include "config.hpp"
+#include "config.h"
 #include <toml.hpp>
 #include <fstream>
 #include <sstream>
@@ -96,7 +96,7 @@ bool read_env_api_key(Config& cfg) {
 }
 
 } // namespace agentos
-#include "agentos/config.hpp"
+#include "agentos/config.h"
 #include <toml.hpp>
 #include <fstream>
 #include <sstream>

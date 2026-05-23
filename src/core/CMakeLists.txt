@@ -13,6 +13,7 @@ set(AGENTOS_CORE_SOURCES
   mind_layer.cpp
   sandbox/sandbox.cpp
   llm/llm_client.cpp
+  config/config.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
@@ -39,6 +40,7 @@ target_include_directories(agentos_core PUBLIC
   ${HTTPLIB_INC}
   ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
   ${CPPZMQ_INC}
+  ${TOMLPLUSPLUS_INC}
 )
 
 target_include_directories(agentos_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -77,7 +79,7 @@ target_include_directories(agentos_core PUBLIC
   ${CAP_INCLUDE_DIR}
 )
 
-add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext)
+add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext tomlplusplus_ext)
 
 target_link_libraries(agentos_core PRIVATE sqlite3)
 

@@ -32,19 +32,6 @@ public:
     void update_job_plan(const TaskId& id, const std::string& plan_json);
 
     // Store a task (plan step)
-    bool open();
-    void close();
-    bool is_open() const;
-
-    // Expose the underlying sqlite3 handle for use by Registry (static catalog)
-    sqlite3* db_handle() const;
-
-    // Store/update jobs
-    void store_job(const Task& task);
-    void update_job_phase(const TaskId& id, const std::string& phase);
-    void update_job_plan(const TaskId& id, const std::string& plan_json);
-
-    // Store a task (plan step)
     void store_task(const TaskId& job_id, const PlanStep& step);
 
     // Load plan JSON for a job

@@ -158,72 +158,21 @@ ExternalProject_Add(cppzmq_ext
 )
 set(CPPZMQ_INC "${DEPS_BUILD_DIR}/cppzmq/src/cppzmq_ext/cppzmq-4.10.0" CACHE INTERNAL "cppzmq include path")
 
-# toml++ (header-only TOML parser)
-set(TOMLPLUSPLUS_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
-ExternalProject_Add(tomlplusplus_ext
-  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_NAME "tomlplusplus-v3.4.0.tar.gz"
-  PREFIX ${DEPS_BUILD_DIR}/tomlplusplus
-  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND ""
-  INSTALL_COMMAND ""
-  LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"tomlplusplus\",\"version\":\"3.4.0\"}" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.json
-  COMMAND ${CMAKE_COMMAND} -E echo "tomlplusplus 3.4.0" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.txt
-)
-set(TOMLPLUSPLUS_INC "${DEPS_BUILD_DIR}/tomlplusplus/src/tomlplusplus_ext/tomlplusplus-3.4.0/include" CACHE INTERNAL "tomlplusplus include path")
-
-# toml++ (header-only TOML parser)
-set(TOMLPLUSPLUS_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
-ExternalProject_Add(tomlplusplus_ext
-  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_NAME "tomlplusplus-v3.4.0.tar.gz"
-  PREFIX ${DEPS_BUILD_DIR}/tomlplusplus
-  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND ""
-  INSTALL_COMMAND ""
-  LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"tomlplusplus\",\"version\":\"3.4.0\"}" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.json
-  COMMAND ${CMAKE_COMMAND} -E echo "tomlplusplus 3.4.0" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.txt)
-set(TOMLPLUSPLUS_INC "${DEPS_BUILD_DIR}/tomlplusplus/src/tomlplusplus_ext/tomlplusplus-3.4.0/include" CACHE INTERNAL "tomlplusplus include path")
-
-# toml++ (header-only TOML parser)
-set(TOMLPLUSPLUS_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
-ExternalProject_Add(tomlplusplus_ext
-  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_NAME "tomlplusplus-v3.4.0.tar.gz"
-  PREFIX ${DEPS_BUILD_DIR}/tomlplusplus
-  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND ""
-  INSTALL_COMMAND ""
-  LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"tomlplusplus\",\"version\":\"3.4.0\"}" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.json
-  COMMAND ${CMAKE_COMMAND} -E echo "tomlplusplus 3.4.0" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.txt
-)
-set(TOMLPLUSPLUS_INC "${DEPS_BUILD_DIR}/tomlplusplus/src/tomlplusplus_ext/tomlplusplus-3.4.0/include" CACHE INTERNAL "tomlplusplus include path")
-
-# toml++ (header-only TOML parser)
-set(TOMLPLUSPLUS_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
-ExternalProject_Add(tomlplusplus_ext
-  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_NAME "tomlplusplus-v3.4.0.tar.gz"
-  PREFIX ${DEPS_BUILD_DIR}/tomlplusplus
-  DOWNLOAD_DIR ${CMAKE_SOURCE_DIR}/deps-src/downloads
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND ""
-  INSTALL_COMMAND ""
-  LOG_DOWNLOAD ON
-  BUILD_IN_SOURCE TRUE
-  BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"tomlplusplus\",\"version\":\"3.4.0\"}" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.json
-  COMMAND ${CMAKE_COMMAND} -E echo "tomlplusplus 3.4.0" > ${DEPS_BUILD_DIR}/tomlplusplus/Labels.txt
-)
-set(TOMLPLUSPLUS_INC "${DEPS_BUILD_DIR}/tomlplusplus/src/tomlplusplus_ext/tomlplusplus-3.4.0/include" CACHE INTERNAL "tomlplusplus include path")
+# toml++ (header-only TOML parser) – vendored single header
+set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/third_party/tomlplusplus")
+if(NOT EXISTS "${TOMLPLUSPLUS_DIR}/toml.hpp")
+  file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DIR}")
+  file(DOWNLOAD
+    https://raw.githubusercontent.com/marzer/tomlplusplus/v3.4.0/toml.hpp
+    ${TOMLPLUSPLUS_DIR}/toml.hpp
+    STATUS download_status
+    LOG download_log
+  )
+  if(NOT download_status EQUAL 0)
+    message(FATAL_ERROR "Failed to download toml.hpp: ${download_log}")
+  endif()
+endif()
+set(TOMLPLUSPLUS_INC "${TOMLPLUSPLUS_DIR}" CACHE INTERNAL "tomlplusplus include path")
 
 # libseccomp (static)
 set(SECCOMP_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/libseccomp")

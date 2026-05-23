@@ -1,5 +1,5 @@
 #include "agentos/registry.h"
-#include "database/database.h"
+#include "agentos/database/database.h"
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <rapidjson/document.h>

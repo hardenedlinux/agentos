@@ -31,7 +31,6 @@ add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
 
 target_include_directories(agentos_core PUBLIC
   PUBLIC
-  ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/include
 
   SYSTEM PUBLIC

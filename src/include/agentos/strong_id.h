@@ -1,6 +1,6 @@
 #pragma once
 /**
- * agentos/strong_id.hpp
+ * agentos/strong_id.h
  *
  * StrongId<Tag> – phantom type for type‑safe IDs (ADR‑010).
  */

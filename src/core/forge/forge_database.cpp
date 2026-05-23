@@ -1,5 +1,5 @@
-#include "forge_database.h"
-#include "database.h"
+#include "agentos/forge/forge_database.h"
+#include "agentos/database/database.h"
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 

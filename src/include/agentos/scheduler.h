@@ -18,7 +18,7 @@
 
 #include "agentos/types.h"
 #include "agentos/dispatcher.h"
-#include "database/database.hpp"
+#include "database/database.h"
 #include <functional>
 #include <unordered_map>
 

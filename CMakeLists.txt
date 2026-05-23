@@ -79,7 +79,7 @@ ExternalProject_Add(httplib_ext
   BUILD_COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"cpp-httplib\",\"version\":\"0.18.0\"}" > ${DEPS_BUILD_DIR}/httplib/Labels.json
   COMMAND ${CMAKE_COMMAND} -E echo "cpp-httplib 0.18.0" > ${DEPS_BUILD_DIR}/httplib/Labels.txt
 )
-set(HTTPLIB_INC "${DEPS_BUILD_DIR}/httplib/src/httplib_ext/cpp-httplib-0.18.0" CACHE INTERNAL "cpp-httplib include path")
+set(HTTPLIB_INC "${DEPS_BUILD_DIR}/httplib/src/httplib_ext/" CACHE INTERNAL "cpp-httplib include path")
 
 # rapidjson (header-only JSON library)
 set(RAPIDJSON_PREFIX "${CMAKE_SOURCE_DIR}/deps-src/rapidjson")

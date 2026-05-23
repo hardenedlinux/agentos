@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "agentos/strong_id.hpp"
+#include "agentos/strong_id.h"
 
 // Forward declarations of tag types for StrongId (ADR‑010)
 struct ClientTag;

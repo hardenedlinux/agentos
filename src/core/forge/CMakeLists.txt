@@ -9,18 +9,12 @@ add_library(agentos_forge
 
 target_link_libraries(agentos_forge PUBLIC agentos_core ${SECCOMP_LIB} ${CAP_LIB})
 target_include_directories(agentos_forge PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/src/core
-    ${CMAKE_SOURCE_DIR}/src/core/database
-    ${CMAKE_SOURCE_DIR}/src/core/registry
-    ${CMAKE_SOURCE_DIR}/src/core/dispatcher
-    ${CMAKE_SOURCE_DIR}/src/core/orchestrator
-    ${CMAKE_SOURCE_DIR}/src/core/obs_bus
     ${CPPZMQ_INC}
     ${SQLITE3_SRC_DIR}
     ${SECCOMP_INCLUDE_DIR}
     ${CAP_INCLUDE_DIR}
+    ${HTTPLIB_INC}
 )
 
 add_dependencies(agentos_forge libseccomp_ext libcap_ext)

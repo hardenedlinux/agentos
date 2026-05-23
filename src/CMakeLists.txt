@@ -16,7 +16,7 @@ target_include_directories(agentos PRIVATE
   ${CPPZMQ_INC}
   ${TOMLPLUSPLUS_INC}
 )
-add_dependencies(agentos httplib_ext rapidjson_ext spdlog_ext cppzmq_ext tomlplusplus_ext)
+add_dependencies(agentos httplib_ext rapidjson_ext spdlog_ext cppzmq_ext)
 
 if(AGENTOS_COVERAGE)
   target_compile_options(agentos PRIVATE --coverage -fprofile-arcs -ftest-coverage)

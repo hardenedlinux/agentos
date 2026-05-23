@@ -43,7 +43,6 @@ target_include_directories(agentos_core PUBLIC
   ${TOMLPLUSPLUS_INC}
 )
 
-target_include_directories(agentos_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
 

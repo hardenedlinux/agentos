@@ -8,7 +8,6 @@ add_executable(agentos cli/main.cpp)
 target_link_libraries(agentos PRIVATE agentos_core agentos_forge ${SECCOMP_LIB} ${CAP_LIB})
 target_include_directories(agentos PRIVATE
   ${CMAKE_SOURCE_DIR}/src/include
-  ${CMAKE_SOURCE_DIR}/src/core
   ${HTTPLIB_INC}
   ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
   ${RAPIDJSON_INC}

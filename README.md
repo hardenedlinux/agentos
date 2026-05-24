@@ -1,6 +1,6 @@
 # AgentOS
 
-> Single-binary, language-agnostic agent runtime.
+> Single-binary, Linux distro independent, language-agnostic agent runtime.
 > C++23 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
 > **Linux distribution independent** — one binary runs on any modern Linux.
 
@@ -23,7 +23,7 @@ brew install cmake ninja
 ./scripts/build.sh
 
 # 4. Run
-./build/src/cli/agentos
+./build/agentos
 
 # 5. Verify static linkage
 ./scripts/verify_static.sh
@@ -47,7 +47,7 @@ The core is written in **C++23** and compiled with modern toolchains.
 All dependencies are fetched and built automatically by CMake.
 
 **Deploy anywhere.** The binary is statically linked against libstdc++ and libgcc,
-and the fully static musl build has zero dynamic dependencies.  
+and the fully static musl build has zero dynamic dependencies.
 Copy the single file to any Linux machine (x86_64, aarch64) and run it —
 no package manager, no runtime, no container required.
 
@@ -132,7 +132,7 @@ cmake --build build --parallel
 
 ## Binary Linkage — Linux Distribution Independent
 
-AgentOS is designed to be **distribution independent**.  
+AgentOS is designed to be **distribution independent**.
 You build once and deploy the same binary on any modern Linux system.
 
 ### Standard build (recommended)

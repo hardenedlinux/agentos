@@ -22,7 +22,7 @@ brew install cmake ninja
 ./scripts/build.sh
 
 # 4. Run
-./build/src/agentos
+./build/src/cli/agentos
 
 # 5. Verify static linkage
 ./scripts/verify_static.sh
@@ -120,7 +120,7 @@ cmake --build build --parallel
 Runs on any Linux with glibc ≥ 2.17 (CentOS 7, Ubuntu 14.04+, and newer).
 
 ```
-$ ldd ./build/src/agentos
+$ ldd ./build/src/cli/agentos
     linux-vdso.so.1
     libpthread.so.0   ← expected
     libdl.so.2        ← expected
@@ -136,7 +136,7 @@ Zero dynamic dependencies. Runs on literally any Linux distribution.
 sudo apt install musl-tools
 ./scripts/build.sh --musl
 
-$ ldd ./build/src/agentos
+$ ldd ./build/src/cli/agentos
     not a dynamic executable   ✓
 ```
 

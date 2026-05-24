@@ -1,8 +1,12 @@
 # AgentOS
 
-> Single-binary, Linux distro independent, language-agnostic agent runtime.
-> C++23 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
-> **Linux distribution independent** — one binary runs on any modern Linux.
+- Single-binary
+  - Linux distro independent for easy deployment
+- Language-agnostic agent runtime
+  - Use whatever language you want for your plugins
+- Prompt as skills
+- Capability-based security model
+- C++23 core with Fil-C to bring memory safety easily
 
 ---
 

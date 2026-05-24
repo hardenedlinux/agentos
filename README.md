@@ -63,24 +63,30 @@ agentos/
 ├── cmake/
 │   └── deps.cmake          # FetchContent dependency declarations
 ├── src/
-│   ├── main.cpp            # Entry point + dependency smoke tests
-│   ├── plugin_host/        # Process lifecycle (spawn, monitor, kill)
-│   ├── dispatcher/         # JSON-RPC socket server and router
-│   ├── capability_reg/     # Capability → plugin registry
-│   ├── task_engine/        # Agent DAG scheduler
-│   ├── obs_bus/            # Logs, metrics, traces aggregation
-│   └── config/             # Manifest + env + CLI config loading
-├── include/agentos/        # Public headers
-├── tests/                  # Google Test unit tests
+│   ├── cli/
+│   │   └── main.cpp            # Entry point + dependency smoke tests
+│   ├── core/
+│   │   ├── capability/         # Capability validation (ADR-006)
+│   │   ├── config/             # Manifest + env + CLI config loading
+│   │   ├── database/           # SQLite persistence layer
+│   │   ├── dispatcher/         # JSON-RPC socket server and router
+│   │   ├── forge/              # Worker generation state machine
+│   │   ├── obs_bus/            # Logs, metrics, traces aggregation
+│   │   ├── orchestrator/       # Job lifecycle management
+│   │   ├── registry/           # Plugin capability registry
+│   │   ├── sandbox/            # Tier-1 sandbox (cgroup, seccomp, Landlock)
+│   │   └── verifier/           # Plan verification
+│   └── include/agentos/        # Public headers
+├── tests/                      # Google Test unit tests
 ├── plugins/
 │   └── hello-plugin/
-│       ├── plugin.md       # Plugin manifest (Markdown + YAML frontmatter)
-│       └── hello_plugin.py # Example plugin implementation (Python)
+│       ├── plugin.md           # Plugin manifest (Markdown + YAML frontmatter)
+│       └── hello_plugin.py     # Example plugin implementation (Python)
 ├── agents/
-│   └── hello-agent.md      # Example agent definition
+│   └── hello-agent.md          # Example agent definition
 └── scripts/
-    ├── build.sh            # Main build script
-    └── verify_static.sh    # Static linkage verification
+    ├── build.sh                # Main build script
+    └── verify_static.sh        # Static linkage verification
 ```
 
 ---

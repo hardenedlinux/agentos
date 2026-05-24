@@ -1,7 +1,7 @@
 # AgentOS
 
 > Single-binary, language-agnostic agent runtime.  
-> C++17 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
+> C++23 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
 
 ---
 
@@ -37,7 +37,10 @@ Subsequent builds are incremental and fast.
 
 AgentOS is a minimal agent runtime that ships as a single compiled binary.  
 It orchestrates **plugins** — separate processes that can be written in  
-any programming language — via a Unix domain socket using JSON-RPC 2.0.
+any programming language — via a Unix domain socket using JSON-RPC 2.0.  
+
+The core is written in **C++23** and compiled with modern toolchains.  
+All dependencies are fetched and built automatically by CMake.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -274,6 +277,14 @@ All dependencies are fetched automatically by CMake at configure time.
 | [yaml-cpp](https://github.com/jbeder/yaml-cpp) | 0.8.0 | Manifest YAML parsing | MIT |
 | [spdlog](https://github.com/gabime/spdlog) | 1.13.0 | Structured logging | MIT |
 | [GoogleTest](https://github.com/google/googletest) | 1.14.0 | Unit testing (test builds only) | BSD-3 |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | 0.18.0 | HTTP client (header-only) | MIT |
+| [ZeroMQ](https://zeromq.org) | 4.3.5 | Async messaging | MPL-2.0 |
+| [cppzmq](https://github.com/zeromq/cppzmq) | 4.10.0 | C++ bindings for ZeroMQ (header-only) | MIT |
+| [SQLite3](https://sqlite.org) | 3.46.0 | Embedded database (amalgamation) | Public Domain |
+| [toml++](https://github.com/marzer/tomlplusplus) | 3.4.0 | TOML parsing (header-only) | MIT |
+| [libseccomp](https://github.com/seccomp/libseccomp) | 2.5.5 | Seccomp BPF sandbox | LGPL-2.1 |
+| [libcap](https://git.kernel.org/pub/scm/libs/libcap/libcap.git) | 2.69 | Capability dropping | BSD-3 |
+| [OpenSSL](https://www.openssl.org) | system | HTTPS support | Apache-2.0 |
 
 ---
 
@@ -281,8 +292,8 @@ All dependencies are fetched automatically by CMake at configure time.
 
 | Phase | Status | Description |
 |---|---|---|
-| 0 — Foundation | 🔨 In progress | Core binary, socket server, plugin spawn, dispatcher |
-| 1 — Agents | ⏳ Planned | TOML agent DAG, task engine, variable interpolation |
+| 0 — Foundation | ✅ Complete | Core binary, socket server, plugin spawn, dispatcher, capability validation, sandbox, database, forge state machine, orchestrator, verifier |
+| 1 — Agents | 🔨 In progress | Agent DAG, task engine, variable interpolation |
 | 2 — SDKs | ⏳ Planned | Python, Go, TypeScript SDK wrappers + first-party plugins |
 | 3 — Observability | ⏳ Planned | Structured logs, Prometheus, OpenTelemetry traces |
 | 4 — Security | ⏳ Planned | cgroup limits, capability whitelisting, fuzz testing |

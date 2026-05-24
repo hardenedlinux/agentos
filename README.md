@@ -1,6 +1,6 @@
 # AgentOS
 
-> Single-binary, language-agnostic agent runtime.  
+> Single-binary, language-agnostic agent runtime.
 > C++23 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
 
 ---
@@ -28,18 +28,18 @@ brew install cmake ninja
 ./scripts/verify_static.sh
 ```
 
-The first build downloads and compiles all dependencies (~2–5 min).  
+The first build downloads and compiles all dependencies (~2–5 min).
 Subsequent builds are incremental and fast.
 
 ---
 
 ## What is AgentOS?
 
-AgentOS is a minimal agent runtime that ships as a single compiled binary.  
-It orchestrates **plugins** — separate processes that can be written in  
-any programming language — via a Unix domain socket using JSON-RPC 2.0.  
+AgentOS is a minimal agent runtime that ships as a single compiled binary.
+It orchestrates **plugins** — separate processes that can be written in
+any programming language — via a Unix domain socket using JSON-RPC 2.0.
 
-The core is written in **C++23** and compiled with modern toolchains.  
+The core is written in **C++23** and compiled with modern toolchains.
 All dependencies are fetched and built automatically by CMake.
 
 ```
@@ -125,16 +125,14 @@ cmake --build build --parallel
 
 ### Standard build (recommended)
 
-`libstdc++` and `libgcc` are statically linked. Only glibc remains dynamic.  
+`libstdc++` and `libgcc` are statically linked. Only glibc remains dynamic.
 Runs on any Linux with glibc ≥ 2.17 (CentOS 7, Ubuntu 14.04+, and newer).
 
 ```
 $ ldd ./build/src/cli/agentos
-    linux-vdso.so.1
-    libpthread.so.0   ← expected
-    libdl.so.2        ← expected
-    libc.so.6         ← expected (glibc)
-    # libstdc++ and libgcc_s are absent ✓
+    linux-vdso.so.1 (0x000075e686d66000)
+    libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000075e686000000)
+    /lib64/ld-linux-x86-64.so.2 (0x000075e686d68000)
 ```
 
 ### Fully static build (musl)
@@ -218,7 +216,7 @@ See `plugins/hello-plugin/hello_plugin.py` for a complete working example.
 
 ## Plugin Manifest Format
 
-Plugin manifests are Markdown files with YAML frontmatter.  
+Plugin manifests are Markdown files with YAML frontmatter.
 The frontmatter is the machine-readable contract. The body is documentation.
 
 ```markdown

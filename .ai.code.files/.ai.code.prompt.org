@@ -1,7 +1,0 @@
-# AI Prompt File
-# This file is for storing AI prompts and instructions
-# Use this file to save reusable prompts for your AI assistant
-
-* Sample prompt:
-
-Explain the architecture of this codebase

@@ -2,6 +2,7 @@
 
 > Single-binary, language-agnostic agent runtime.
 > C++23 core · Unix sockets · JSON-RPC 2.0 · Plugins in any language.
+> **Linux distribution independent** — one binary runs on any modern Linux.
 
 ---
 
@@ -31,6 +32,9 @@ brew install cmake ninja
 The first build downloads and compiles all dependencies (~2–5 min).
 Subsequent builds are incremental and fast.
 
+**Deploy anywhere.** After building, copy the single binary to any Linux machine
+(x86_64 or aarch64) and run it — no package manager, no runtime, no container required.
+
 ---
 
 ## What is AgentOS?
@@ -41,6 +45,11 @@ any programming language — via a Unix domain socket using JSON-RPC 2.0.
 
 The core is written in **C++23** and compiled with modern toolchains.
 All dependencies are fetched and built automatically by CMake.
+
+**Deploy anywhere.** The binary is statically linked against libstdc++ and libgcc,
+and the fully static musl build has zero dynamic dependencies.  
+Copy the single file to any Linux machine (x86_64, aarch64) and run it —
+no package manager, no runtime, no container required.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -121,7 +130,10 @@ cmake --build build --parallel
 
 ---
 
-## Binary Linkage
+## Binary Linkage — Linux Distribution Independent
+
+AgentOS is designed to be **distribution independent**.  
+You build once and deploy the same binary on any modern Linux system.
 
 ### Standard build (recommended)
 
@@ -296,6 +308,12 @@ All dependencies are fetched automatically by CMake at configure time.
 | 3 — Observability | ⏳ Planned | Structured logs, Prometheus, OpenTelemetry traces |
 | 4 — Security | ⏳ Planned | cgroup limits, capability whitelisting, fuzz testing |
 | 5 — Windows | ⏳ Planned | Named pipe transport, Windows CI |
+
+---
+
+## License
+
+TBD
 
 ---
 

@@ -1,4 +1,5 @@
 #include "agentos/database/database.h"
+#include "agentos/home_init.h"
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -15,7 +16,11 @@ struct Database::Impl {
 Database::Database(const std::string& db_path)
     : impl_(std::make_unique<Impl>())
 {
-    impl_->db_path = db_path;
+    if (!db_path.empty()) {
+        impl_->db_path = db_path;
+    } else {
+        impl_->db_path = (agentos_home() / "agentos.db").string();
+    }
 }
 
 Database::~Database() {

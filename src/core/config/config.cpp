@@ -1,16 +1,26 @@
 #include "agentos/config.h"
+#include "agentos/home_init.h"
 #include <toml.hpp>
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
+#include <filesystem>
 
 namespace agentos {
 
 std::optional<Config> load_config(std::string_view path, std::string& error) {
     Config cfg;
 
+    // Determine config file path
+    std::filesystem::path config_path;
+    if (!path.empty()) {
+        config_path = path;
+    } else {
+        config_path = agentos_home() / "config.toml";
+    }
+
     // Open file
-    std::ifstream file(path.data());
+    std::ifstream file(config_path);
     if (!file.is_open()) {
         // File not found is not an error; use defaults
         return cfg;

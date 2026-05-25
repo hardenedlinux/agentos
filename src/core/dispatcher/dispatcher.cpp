@@ -1,4 +1,5 @@
 #include "agentos/dispatcher.h"
+#include "agentos/home_init.h"
 #include <spdlog/spdlog.h>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
@@ -12,7 +13,7 @@ namespace agentos
 {
 
   Dispatcher::Dispatcher (const std::string &socket_dir)
-    : socket_dir_ (socket_dir),
+    : socket_dir_ (socket_dir.empty() ? (agentos_home() / "run").string() : socket_dir),
       context_ (nullptr),
       pull_socket_ (nullptr),
       pub_socket_ (nullptr),

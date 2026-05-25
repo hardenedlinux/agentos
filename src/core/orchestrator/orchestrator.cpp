@@ -1,4 +1,5 @@
 #include "agentos/orchestrator.h"
+#include "agentos/home_init.h"
 #include "agentos/database/database.h"
 #include <spdlog/spdlog.h>
 #include <rapidjson/document.h>
@@ -19,7 +20,7 @@ Orchestrator::Orchestrator(Registry&    registry,
     , scheduler_(scheduler)
     , dispatcher_(dispatcher)
     , db_(nullptr)
-    , db_path_(db_path)
+    , db_path_(db_path.empty() ? (agentos_home() / "agentos.db").string() : db_path)
 {
     if (!db_path_.empty()) {
         db_ = std::make_unique<Database>(db_path_);

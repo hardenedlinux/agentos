@@ -1,4 +1,5 @@
 #include "agentos/forge/forge_cli.h"
+#include "agentos/home_init.h"
 #include <iostream>
 #include <zmq.hpp>
 #include <rapidjson/document.h>
@@ -61,7 +62,7 @@ void ForgeCli::list_jobs() {
     // Connect to daemon via ZMQ
     zmq::context_t ctx(1);
     zmq::socket_t sock(ctx, zmq::socket_type::req);
-    sock.connect("ipc:///tmp/agentos_forge.sock");
+    sock.connect("ipc://" + (agentos_home() / "run" / "agentos.sock").string());
 
     // Send request using raw string literal (ADR‑010)
     const char* request_str = R"({"method":"forge.list","params":{}})";
@@ -92,7 +93,7 @@ void ForgeCli::list_jobs() {
 void ForgeCli::show_job(const std::string& id) {
     zmq::context_t ctx(1);
     zmq::socket_t sock(ctx, zmq::socket_type::req);
-    sock.connect("ipc:///tmp/agentos_forge.sock");
+    sock.connect("ipc://" + (agentos_home() / "run" / "agentos.sock").string());
 
     // Build request with raw string literal (ADR‑010)
     std::string request_str = R"({"method":"forge.show","params":{"id":")" + id + R"("}})";
@@ -122,7 +123,7 @@ void ForgeCli::show_job(const std::string& id) {
 void ForgeCli::approve_job(const std::string& id) {
     zmq::context_t ctx(1);
     zmq::socket_t sock(ctx, zmq::socket_type::req);
-    sock.connect("ipc:///tmp/agentos_forge.sock");
+    sock.connect("ipc://" + (agentos_home() / "run" / "agentos.sock").string());
 
     std::string request_str = R"({"method":"forge.approve","params":{"id":")" + id + R"("}})";
     zmq::message_t request(request_str.data(), request_str.size());
@@ -138,7 +139,7 @@ void ForgeCli::approve_job(const std::string& id) {
 void ForgeCli::reject_job(const std::string& id, const std::string& reason) {
     zmq::context_t ctx(1);
     zmq::socket_t sock(ctx, zmq::socket_type::req);
-    sock.connect("ipc:///tmp/agentos_forge.sock");
+    sock.connect("ipc://" + (agentos_home() / "run" / "agentos.sock").string());
 
     std::string request_str = R"({"method":"forge.reject","params":{"id":")" + id + R"(","reason":")" + reason + R"("}})";
     zmq::message_t request(request_str.data(), request_str.size());

@@ -14,6 +14,7 @@ set(AGENTOS_CORE_SOURCES
   sandbox/sandbox.cpp
   llm/llm_client.cpp
   config/config.cpp
+  home_init.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)

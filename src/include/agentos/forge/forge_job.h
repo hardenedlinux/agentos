@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <vector>
 
 #include "agentos/types.h"
 

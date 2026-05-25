@@ -24,6 +24,7 @@ struct ForgeJob {
     std::vector<std::string> allowed_read_paths;
     std::vector<std::string> allowed_write_paths;
     std::vector<int> allowed_tcp_ports;
+    bool network = true; // ADR-015: true means network namespace is shared
 };
 
 } // namespace agentos

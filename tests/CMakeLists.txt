@@ -58,4 +58,18 @@ if(AGENTOS_BUILD_TESTS)
     ${TOMLPLUSPLUS_INC}
   )
   gtest_discover_tests(test_types)
+
+  # Test for home_init module (ADR-014)
+  add_executable(test_home_init test_home_init.cpp)
+  target_link_libraries(test_home_init PRIVATE
+    ${GTEST_LIB}
+    ${GTEST_MAIN_LIB}
+    agentos_core
+  )
+  add_dependencies(test_home_init googletest_ext)
+  target_include_directories(test_home_init PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${GTEST_INC}
+  )
+  gtest_discover_tests(test_home_init)
 endif()

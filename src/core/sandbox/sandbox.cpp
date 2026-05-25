@@ -1,4 +1,5 @@
 #include "agentos/sandbox.h"
+#include "agentos/home_init.h"
 #include <spdlog/spdlog.h>
 #include <sys/capability.h>
 #include <seccomp.h>
@@ -317,6 +318,141 @@ bool apply_sandbox(const std::string& job_dir,
 
     spdlog::info("[sandbox] sandbox applied successfully");
     return true;
+}
+
+void confine_daemon(const std::filesystem::path& home) {
+    struct landlock_ruleset_attr rs_attr = {};
+    rs_attr.handled_access_fs =
+        LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_WRITE_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR |
+        LANDLOCK_ACCESS_FS_EXECUTE |
+        LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_REMOVE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_CHAR |
+        LANDLOCK_ACCESS_FS_MAKE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_SOCK |
+        LANDLOCK_ACCESS_FS_MAKE_FIFO |
+        LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        LANDLOCK_ACCESS_FS_MAKE_SYM;
+    rs_attr.handled_access_net =
+        LANDLOCK_ACCESS_NET_BIND_TCP |
+        LANDLOCK_ACCESS_NET_CONNECT_TCP;
+
+    int rs_fd = syscall(SYS_landlock_create_ruleset, &rs_attr, sizeof(rs_attr), 0);
+    if (rs_fd < 0) {
+        spdlog::error("[daemon] landlock_create_ruleset failed: {}", strerror(errno));
+        return;
+    }
+
+    struct landlock_path_beneath_attr path_attr = {};
+    path_attr.allowed_access =
+        LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_WRITE_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR |
+        LANDLOCK_ACCESS_FS_EXECUTE |
+        LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_REMOVE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_CHAR |
+        LANDLOCK_ACCESS_FS_MAKE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_SOCK |
+        LANDLOCK_ACCESS_FS_MAKE_FIFO |
+        LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        LANDLOCK_ACCESS_FS_MAKE_SYM;
+    path_attr.parent_fd = open(home.c_str(), O_PATH | O_CLOEXEC);
+    if (path_attr.parent_fd < 0) {
+        spdlog::error("[daemon] open {} failed: {}", home.string(), strerror(errno));
+        close(rs_fd);
+        return;
+    }
+    if (syscall(SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_PATH_BENEATH,
+                &path_attr, 0) != 0) {
+        spdlog::error("[daemon] landlock_add_rule for {} failed: {}", home.string(), strerror(errno));
+        close(path_attr.parent_fd);
+        close(rs_fd);
+        return;
+    }
+    close(path_attr.parent_fd);
+
+    struct landlock_net_port_attr net_attr = {};
+    net_attr.allowed_access = LANDLOCK_ACCESS_NET_CONNECT_TCP;
+    net_attr.port = 443;
+    if (syscall(SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_NET_PORT,
+                &net_attr, 0) != 0) {
+        spdlog::warn("[daemon] landlock_add_rule for port 443 failed: {}", strerror(errno));
+    }
+
+    if (syscall(SYS_landlock_restrict_self, rs_fd, 0) != 0) {
+        spdlog::error("[daemon] landlock_restrict_self failed: {}", strerror(errno));
+        close(rs_fd);
+        return;
+    }
+
+    close(rs_fd);
+    spdlog::info("[daemon] daemon confined to {}", home.string());
+}
+
+void apply_worker_sandbox(const std::string& job_dir,
+                          const std::vector<std::string>& fs_read,
+                          const std::vector<std::string>& fs_write,
+                          const std::vector<int>& tcp_connect_ports,
+                          bool network) {
+    spdlog::info("[sandbox] applying worker sandbox for job_dir={}", job_dir);
+
+    // 1. cgroup v2
+    if (!join_cgroup("/sys/fs/cgroup/agentos")) {
+        spdlog::warn("[sandbox] cgroup join failed, continuing");
+    }
+
+    // 2. mount namespace (always)
+    if (unshare(CLONE_NEWNS) != 0) {
+        spdlog::error("[sandbox] unshare CLONE_NEWNS failed: {}", strerror(errno));
+        return;
+    }
+
+    // 3. network namespace (only if network false)
+    if (!network) {
+        if (unshare(CLONE_NEWNET) != 0) {
+            spdlog::error("[sandbox] unshare CLONE_NEWNET failed: {}", strerror(errno));
+            return;
+        }
+    }
+
+    // 4. mount tmpfs and bind mounts
+    std::vector<std::string> read_paths = fs_read;
+    std::vector<std::string> write_paths = fs_write;
+    // Implicit: job_dir read+write
+    write_paths.push_back(job_dir);
+    // Implicit: skills read
+    std::filesystem::path home = agentos_home();
+    read_paths.push_back((home / "skills").string());
+
+    if (!setup_mounts(job_dir, read_paths, write_paths)) {
+        spdlog::error("[sandbox] mount setup failed");
+        return;
+    }
+
+    // 5. Landlock ruleset
+    if (!apply_landlock(read_paths, write_paths, tcp_connect_ports)) {
+        spdlog::error("[sandbox] Landlock setup failed");
+        return;
+    }
+
+    // 6. seccomp
+    if (!apply_seccomp()) {
+        spdlog::error("[sandbox] seccomp setup failed");
+        return;
+    }
+
+    // 7. drop capabilities
+    if (!drop_capabilities()) {
+        spdlog::error("[sandbox] capability drop failed");
+        return;
+    }
+
+    spdlog::info("[sandbox] worker sandbox applied successfully");
 }
 
 } // namespace agentos

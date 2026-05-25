@@ -47,7 +47,7 @@ static void print_banner ()
        /____/   v)"
             << AGENTOS_VERSION << R"(
 
-  Core:    Single-binary Agent Runtime  |  C++23
+  Core:    Single-binary Agent Runtime  |  C++17
   Plugins: Unix Sockets + JSON-RPC 2.0  |  Language-agnostic clients
   Subsystems: Dispatcher, Registry, Verifier, Scheduler, Orchestrator, ObsBus, LlmClient
 )" << "\n";

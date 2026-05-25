@@ -6,7 +6,7 @@
   - Use whatever language you want for your plugins
 - Prompt as skills
 - Capability-based security model
-- C++23 core with Fil-C to bring memory safety easily
+- C++17 core with (optional) Fil-C to bring memory safety easily
 
 ---
 

@@ -56,6 +56,7 @@ target_compile_options(agentos_core PRIVATE
   -Wall -Wextra -Wpedantic -Wno-unused-parameter
   -Wno-deprecated-declarations
   -Wno-class-memaccess
+  -Wno-array-bounds
   $<$<CONFIG:Release>:-O2>
   $<$<CONFIG:Debug>:-g>
   $<$<CONFIG:Debug>:-O0>

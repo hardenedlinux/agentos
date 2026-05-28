@@ -110,11 +110,11 @@ TEST(WorkerRunTest, GcRunLayersRemovesNonRunningLayers) {
     std::filesystem::create_directories(layer_path);
     ASSERT_TRUE(std::filesystem::exists(layer_path));
 
-    // Create a WorkerRun with status "completed"
+    // Create a WorkerRun with status "crashed"
     WorkerRun run;
     run.run_id = "test_run_gc";
     run.worker_id = "test_worker";
-    run.status = "completed";
+    run.status = "crashed";
     run.layer_path = layer_path;
     run.log_path = home.path() + "/logs/runs/test_run_gc/output.log";
 

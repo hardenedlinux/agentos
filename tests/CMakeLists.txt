@@ -20,6 +20,7 @@ target_link_libraries(agentos_tests PRIVATE
   agentos_forge
   ${GTEST_LIB}
   ${GTEST_MAIN_LIB}
+  ${GMOCK_LIB}
   ${ZMQ_LIB}
 )
 add_dependencies(agentos_tests googletest_ext)

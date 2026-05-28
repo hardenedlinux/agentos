@@ -235,7 +235,8 @@ if(AGENTOS_BUILD_TESTS)
       -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
       -DBUILD_SHARED_LIBS=OFF
       -DINSTALL_GTEST=ON
-    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a <INSTALL_DIR>/lib/libgtest_main.a
+      -DINSTALL_GMOCK=ON
+    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libgtest.a <INSTALL_DIR>/lib/libgtest_main.a <INSTALL_DIR>/lib/libgmock.a
     LOG_DOWNLOAD ON
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
     COMMAND ${CMAKE_COMMAND} -E echo "{\"name\":\"googletest\",\"version\":\"1.14.0\"}" > ${DEPS_BUILD_DIR}/googletest/Labels.json
@@ -246,6 +247,7 @@ if(AGENTOS_BUILD_TESTS)
   set(GTEST_INC "${INSTALL_DIR}/include" CACHE INTERNAL "googletest include path")
   set(GTEST_LIB "${INSTALL_DIR}/lib/libgtest.a" CACHE INTERNAL "googletest static library")
   set(GTEST_MAIN_LIB "${INSTALL_DIR}/lib/libgtest_main.a" CACHE INTERNAL "googletest main static library")
+  set(GMOCK_LIB "${INSTALL_DIR}/lib/libgmock.a" CACHE INTERNAL "googletest mock static library")
 endif()
 
 

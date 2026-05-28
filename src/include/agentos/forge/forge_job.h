@@ -17,6 +17,7 @@ struct ForgeJob {
     std::string phase; // Drafting, Reviewing, SandboxProbe, Approved, Promoted, HumanReview
     std::string last_code;
     std::string last_feedback;
+    std::string last_code_path; // ADR-016: path to the last attempt's code file
     int64_t created_at = 0;
     int64_t updated_at = 0;
 

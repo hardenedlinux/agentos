@@ -64,6 +64,8 @@ std::vector<Task> Orchestrator::load_in_flight_jobs() {
 
 void Orchestrator::resume_in_flight() {
     if (!db_) return;
+    // ADR-016: Mark any worker_runs with status='running' as crashed on restart
+    db_->mark_all_running_as_crashed();
     auto jobs = db_->resume_in_flight();
     for (const auto& j : jobs) {
         if (j.plan_json.empty()) {

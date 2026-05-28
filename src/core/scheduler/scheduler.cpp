@@ -1,11 +1,15 @@
 #include "agentos/scheduler.h"
 #include "agentos/capability.h"
 #include "agentos/registry.h"
+#include "agentos/rpc.h"
+#include "agentos/database/database.h"
+#include "agentos/sandbox.h"
 #include <regex>
 #include <spdlog/spdlog.h>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <chrono>
 
 namespace agentos
 {
@@ -38,6 +42,18 @@ namespace agentos
 
     StepResultMap results;
 
+    // ADR-016: Generate run_id for this plan execution
+    std::string run_id = gen_new_uuid();
+    spdlog::info("[scheduler] run_id={} for plan {}", run_id, plan.task_id);
+
+    // Record worker run in DB (if available)
+    // We'll use a dummy worker_id for now; actual worker_id should come from step.
+    // For simplicity, we use plan.task_id as worker_id.
+    // The DB is accessed via registry_? Actually we need a Database reference.
+    // We'll assume the Scheduler has access to a Database via some member.
+    // For now, we'll skip DB recording because Scheduler doesn't have a Database member.
+    // TODO: add Database reference to Scheduler.
+
     for (const auto &step : plan.steps)
     {
       // ADR-006 Layer 2: validate capabilities for generated code
@@ -62,13 +78,14 @@ namespace agentos
       = "{}"; // TODO: serialise step.args with interpolation
       // args_json = interpolate_args(step.args_json, results);
 
-      // Build task JSON for the worker
+      // Build task JSON for the worker, including run_id
       rapidjson::StringBuffer buf;
       rapidjson::Writer<rapidjson::StringBuffer> w(buf);
       w.StartObject();
       w.Key("job_id");   w.String(plan.task_id.value().c_str());
       w.Key("task_id");  w.String(step.id.c_str());
       w.Key("method");   w.String(step.command.c_str());
+      w.Key("run_id");   w.String(run_id.c_str());
       w.Key("params");
       w.RawValue(args_json.c_str(), args_json.size(), rapidjson::kObjectType);
       w.EndObject();
@@ -100,6 +117,9 @@ namespace agentos
       results[step.id] = result_json;
       spdlog::info ("[scheduler] step '{}' done", step.id);
     }
+
+    // ADR-016: After all steps, trigger GC (if DB available)
+    // TODO: integrate with Database when Scheduler has access.
 
     // Assemble final output — last step's result is the task output
     std::string output = results.empty () ? "{}" : results.begin ()->second;

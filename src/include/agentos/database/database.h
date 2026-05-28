@@ -43,6 +43,13 @@ public:
         std::string plan_json;
     };
     std::vector<InFlightJob> resume_in_flight();
+
+    // ADR-016: Worker run management
+    void insert_worker_run(const WorkerRun& run);
+    void update_worker_run(const WorkerRun& run);
+    std::vector<WorkerRun> get_active_worker_runs();
+    void mark_all_running_as_crashed();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

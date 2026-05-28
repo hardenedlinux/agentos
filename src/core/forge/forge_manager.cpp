@@ -5,10 +5,13 @@
 #include "agentos/orchestrator.h"
 #include "agentos/obs_bus.h"
 #include "agentos/sandbox.h"
+#include "agentos/home_init.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <random>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 
 namespace agentos {
 
@@ -41,6 +44,27 @@ void ForgeManager::setup_state_machine() {
             job.last_code = "// placeholder code for " + job.method;
             job.last_feedback.clear();
             job.attempt++;
+
+            // ADR-016: Write code to file
+            namespace fs = std::filesystem;
+            fs::path forge_dir = agentos_home() / "forge" / job.id.value();
+            std::error_code ec;
+            fs::create_directories(forge_dir, ec);
+            if (ec) {
+                spdlog::error("[forge] cannot create forge dir {}: {}", forge_dir.string(), ec.message());
+                return;
+            }
+            std::string filename = "attempt_" + std::to_string(job.attempt) + ".py";
+            fs::path filepath = forge_dir / filename;
+            std::ofstream out(filepath);
+            if (!out) {
+                spdlog::error("[forge] cannot write code file {}", filepath.string());
+                return;
+            }
+            out << job.last_code;
+            out.close();
+            job.last_code_path = filepath.string();
+            spdlog::info("[forge] wrote code to {}", filepath.string());
         },
         // ReviewCallback
         [this](ForgeJob& job) {

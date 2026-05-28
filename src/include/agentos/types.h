@@ -164,4 +164,18 @@ namespace agentos
     std::vector<std::string> errors; // one entry per violated constraint
   };
 
+  // ADR-016: Worker run record
+  struct WorkerRun
+  {
+    std::string run_id;       // UUID
+    std::string worker_id;    // worker identifier
+    int pid = 0;
+    int64_t started_at = 0;
+    int64_t ended_at = 0;
+    int exit_code = -1;
+    std::string status;       // running | completed | failed | crashed
+    std::string layer_path;   // ~/.agentos/layers/runs/<run-id>/
+    std::string log_path;     // ~/.agentos/logs/runs/<run-id>/output.log
+  };
+
 } // namespace agentos

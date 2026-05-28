@@ -1,5 +1,7 @@
 #include "agentos/sandbox.h"
 #include "agentos/home_init.h"
+#include "agentos/database/database.h"
+#include "agentos/rpc.h"
 #include <spdlog/spdlog.h>
 #include <sys/capability.h>
 #include <seccomp.h>
@@ -394,12 +396,131 @@ void confine_daemon(const std::filesystem::path& home) {
     spdlog::info("[daemon] daemon confined to {}", home.string());
 }
 
+bool apply_worker_filesystem(const std::string& worker_id,
+                             const std::string& run_id) {
+    namespace fs = std::filesystem;
+    fs::path home = agentos_home();
+
+    // Create run layer directories
+    fs::path layers_dir = home / "layers" / "runs" / run_id;
+    fs::path upper_dir = layers_dir / "upper";
+    fs::path work_dir  = layers_dir / "work";
+    std::error_code ec;
+    fs::create_directories(upper_dir, ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create upper dir {}: {}", upper_dir.string(), ec.message());
+        return false;
+    }
+    fs::create_directories(work_dir, ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create work dir {}: {}", work_dir.string(), ec.message());
+        return false;
+    }
+
+    // Create log directory
+    fs::path log_dir = home / "logs" / "runs" / run_id;
+    fs::create_directories(log_dir, ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create log dir {}: {}", log_dir.string(), ec.message());
+        return false;
+    }
+
+    // Build overlayfs mount options
+    std::string lower0 = "/";
+    std::string lower1 = (home / "layers" / "workers" / worker_id).string();
+    // Ensure worker base layer directory exists
+    std::error_code ec2;
+    fs::create_directories(lower1, ec2);
+    if (ec2) {
+        spdlog::error("[sandbox] cannot create worker base layer {}: {}", lower1, ec2.message());
+        return false;
+    }
+    std::string options = "lowerdir=" + lower0 + ":" + lower1 +
+                          ",upperdir=" + upper_dir.string() +
+                          ",workdir=" + work_dir.string();
+
+    // Mount overlayfs on a temporary directory (we'll pivot_root into it)
+    fs::path merged = layers_dir / "merged";
+    fs::create_directories(merged, ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create merged dir {}: {}", merged.string(), ec.message());
+        return false;
+    }
+
+    if (mount("overlay", merged.c_str(), "overlay", MS_NODEV, options.c_str()) != 0) {
+        spdlog::error("[sandbox] overlay mount failed: {}", strerror(errno));
+        return false;
+    }
+
+    // Create old_root directory inside merged for pivot_root
+    fs::path old_root = merged / "old_root";
+    fs::create_directories(old_root, ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create old_root dir {}: {}", old_root.string(), ec.message());
+        return false;
+    }
+
+    // pivot_root
+    if (syscall(SYS_pivot_root, merged.c_str(), old_root.c_str()) != 0) {
+        spdlog::error("[sandbox] pivot_root failed: {}", strerror(errno));
+        return false;
+    }
+
+    // chdir to new root
+    if (chdir("/") != 0) {
+        spdlog::error("[sandbox] chdir / failed: {}", strerror(errno));
+        return false;
+    }
+
+    // Bind mount worker persistent directory to /home/agentos
+    fs::path worker_persistent = home / "workers" / worker_id;
+    fs::create_directories(worker_persistent, ec);
+    if (ec) {
+        spdlog::warn("[sandbox] cannot create worker persistent dir {}: {}", worker_persistent.string(), ec.message());
+    }
+    fs::create_directories("/home/agentos", ec);
+    if (ec) {
+        spdlog::error("[sandbox] cannot create /home/agentos: {}", ec.message());
+        return false;
+    }
+    if (mount(worker_persistent.c_str(), "/home/agentos", "none", MS_BIND, nullptr) != 0) {
+        spdlog::error("[sandbox] bind mount {} to /home/agentos failed: {}", worker_persistent.string(), strerror(errno));
+        return false;
+    }
+
+    spdlog::info("[sandbox] worker filesystem isolation applied for run {}", run_id);
+    return true;
+}
+
+void gc_run_layers(Database& db) {
+    auto runs = db.get_active_worker_runs();
+    for (const auto& run : runs) {
+        if (run.status != "running") {
+            std::error_code ec;
+            std::filesystem::remove_all(run.layer_path, ec);
+            if (ec) {
+                spdlog::warn("[sandbox] GC failed to remove layer {}: {}", run.layer_path, ec.message());
+            }
+        }
+    }
+}
+
 void apply_worker_sandbox(const std::string& job_dir,
                           const std::vector<std::string>& fs_read,
                           const std::vector<std::string>& fs_write,
                           const std::vector<int>& tcp_connect_ports,
-                          bool network) {
+                          bool network,
+                          const std::string& run_id) {
     spdlog::info("[sandbox] applying worker sandbox for job_dir={}", job_dir);
+
+    // ADR-016: Apply filesystem isolation (overlayfs + pivot_root)
+    // This must be done before other sandbox steps because it changes the root.
+    // The worker_id is derived from job_dir (last component).
+    std::string worker_id = std::filesystem::path(job_dir).filename().string();
+    if (!apply_worker_filesystem(worker_id, run_id)) {
+        spdlog::error("[sandbox] worker filesystem isolation failed");
+        return;
+    }
 
     // 1. cgroup v2
     if (!join_cgroup("/sys/fs/cgroup/agentos")) {

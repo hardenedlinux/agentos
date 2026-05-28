@@ -34,6 +34,7 @@ target_include_directories(agentos_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src/include/agentos
   ${CPPZMQ_INC}
   ${GTEST_INC}
+  ${GMOCK_INC}
   ${TOMLPLUSPLUS_INC}
 )
 

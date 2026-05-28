@@ -18,10 +18,6 @@
 #include "agentos/types.h"
 
 using namespace agentos;
-using ::testing::_;
-using ::testing::Return;
-using ::testing::NiceMock;
-
 // ---------------------------------------------------------------------------
 // Helper: create a temporary directory and set AGENTOS_HOME to it
 // ---------------------------------------------------------------------------
@@ -47,15 +43,6 @@ public:
 private:
     std::string path_;
     std::string old_home_;
-};
-
-// ---------------------------------------------------------------------------
-// Mock Database for testing mark_all_running_as_crashed
-// ---------------------------------------------------------------------------
-class MockDatabase : public Database {
-public:
-    MockDatabase() : Database(":memory:") {}
-    MOCK_METHOD(void, mark_all_running_as_crashed, (), (override));
 };
 
 // ---------------------------------------------------------------------------
@@ -312,24 +299,11 @@ TEST(WorkerRunTest, ForgeDatabaseUpdateLastCodePath) {
 // Tests for Orchestrator::resume_in_flight calling mark_all_running_as_crashed
 // ===========================================================================
 TEST(WorkerRunTest, OrchestratorResumeInFlightCallsMarkAllRunningAsCrashed) {
-    // Create mock database
-    NiceMock<MockDatabase> mockDb;
-    EXPECT_CALL(mockDb, mark_all_running_as_crashed()).Times(1);
-
     // Create dummy dependencies
     DummyRegistry registry;
     DummyVerifier verifier(registry);
     DummyDispatcher dispatcher;
     DummyScheduler scheduler(registry, dispatcher);
-
-    // Create Orchestrator with a dummy db_path that will be ignored
-    // because we pass a non-empty path but we want to use our mock.
-    // We'll need to modify Orchestrator to accept a Database pointer.
-    // For now, we'll just test the method directly by calling resume_in_flight
-    // on a mock Database? Actually Orchestrator owns its Database.
-    // We'll create a test that uses a real Database and verify that
-    // mark_all_running_as_crashed is called via the real implementation.
-    // We'll test indirectly by checking that running runs become crashed.
 
     // Use a real Database
     Database realDb(":memory:");

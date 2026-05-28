@@ -30,6 +30,7 @@
 #include "agentos/obs_bus.h"
 #include "agentos/master.h"
 #include "agentos/registry.h"
+#include "agentos/database/database.h"
 #include "agentos/scheduler.h"
 #include "agentos/types.h"
 #include "agentos/verifier.h"

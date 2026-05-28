@@ -493,7 +493,7 @@ bool apply_worker_filesystem(const std::string& worker_id,
 }
 
 void gc_run_layers(Database& db) {
-    auto runs = db.get_active_worker_runs();
+    auto runs = db.get_all_worker_runs();
     for (const auto& run : runs) {
         if (run.status != "running") {
             std::error_code ec;

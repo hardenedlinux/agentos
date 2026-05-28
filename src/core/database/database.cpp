@@ -305,6 +305,32 @@ std::vector<WorkerRun> Database::get_active_worker_runs() {
     return runs;
 }
 
+std::vector<WorkerRun> Database::get_all_worker_runs() {
+    std::vector<WorkerRun> runs;
+    if (!impl_->db) return runs;
+    const char* sql = "SELECT run_id, worker_id, pid, started_at, ended_at, exit_code, status, layer_path, log_path FROM worker_runs";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("[database] get_all_worker_runs prepare: {}", sqlite3_errmsg(impl_->db));
+        return runs;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        WorkerRun run;
+        run.run_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        run.worker_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        run.pid = sqlite3_column_int(stmt, 2);
+        run.started_at = sqlite3_column_int64(stmt, 3);
+        run.ended_at = sqlite3_column_int64(stmt, 4);
+        run.exit_code = sqlite3_column_int(stmt, 5);
+        run.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+        run.layer_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+        run.log_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        runs.push_back(std::move(run));
+    }
+    sqlite3_finalize(stmt);
+    return runs;
+}
+
 void Database::mark_all_running_as_crashed() {
     if (!impl_->db) return;
     const char* sql = "UPDATE worker_runs SET status='crashed', ended_at=? WHERE status='running'";

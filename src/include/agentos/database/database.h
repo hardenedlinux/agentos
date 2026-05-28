@@ -48,6 +48,7 @@ public:
     void insert_worker_run(const WorkerRun& run);
     void update_worker_run(const WorkerRun& run);
     std::vector<WorkerRun> get_active_worker_runs();
+    std::vector<WorkerRun> get_all_worker_runs();
     virtual void mark_all_running_as_crashed();
 
 private:

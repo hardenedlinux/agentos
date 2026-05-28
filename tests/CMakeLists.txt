@@ -15,6 +15,8 @@ add_executable(agentos_tests ${TEST_SOURCES})
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Threads REQUIRED)
+
 target_link_libraries(agentos_tests PRIVATE
   agentos_core
   agentos_forge
@@ -22,6 +24,7 @@ target_link_libraries(agentos_tests PRIVATE
   ${GTEST_MAIN_LIB}
   ${GMOCK_LIB}
   ${ZMQ_LIB}
+  Threads::Threads
 )
 add_dependencies(agentos_tests googletest_ext)
 

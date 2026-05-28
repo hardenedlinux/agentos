@@ -61,7 +61,7 @@ public:
 
 class DummyScheduler : public Scheduler {
 public:
-    DummyScheduler(const Registry& r, Dispatcher& d, const SchedulerConfig& c = {})
+    DummyScheduler(const Registry& r, Dispatcher& d, const SchedulerConfig& c = SchedulerConfig{})
         : Scheduler(r, d, c) {}
 };
 

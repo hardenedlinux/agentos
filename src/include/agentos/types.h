@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view> // C++17
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 

@@ -9,12 +9,7 @@
 #include "agentos/database/database.h"
 #include "agentos/sandbox.h"
 #include "agentos/forge/forge_database.h"
-#include "agentos/orchestrator.h"
 #include "agentos/home_init.h"
-#include "agentos/registry.h"
-#include "agentos/verifier.h"
-#include "agentos/scheduler.h"
-#include "agentos/dispatcher.h"
 #include "agentos/types.h"
 
 using namespace agentos;
@@ -49,43 +44,10 @@ private:
     std::string old_home_;
 };
 
-// ---------------------------------------------------------------------------
-// Mock Database for testing mark_all_running_as_crashed
-// ---------------------------------------------------------------------------
-class MockDatabase : public Database {
-public:
-    MockDatabase() : Database(":memory:") {}
-    MOCK_METHOD(void, mark_all_running_as_crashed, (), (override));
-};
-
-// ---------------------------------------------------------------------------
-// Dummy stubs for Orchestrator dependencies
-// ---------------------------------------------------------------------------
-class DummyRegistry : public Registry {
-public:
-    DummyRegistry() : Registry() {}
-};
-
-class DummyVerifier : public Verifier {
-public:
-    DummyVerifier(const Registry& r) : Verifier(r) {}
-};
-
-class DummyScheduler : public Scheduler {
-public:
-    DummyScheduler(const Registry& r, Dispatcher& d, const SchedulerConfig& c = {})
-        : Scheduler(r, d, c) {}
-};
-
-class DummyDispatcher : public Dispatcher {
-public:
-    DummyDispatcher() : Dispatcher("/tmp") {}
-};
-
 // ===========================================================================
 // Tests for apply_worker_filesystem
 // ===========================================================================
-TEST(ADR016Test, ApplyWorkerFilesystemCreatesDirectories) {
+TEST(WorkerRunTest, ApplyWorkerFilesystemCreatesDirectories) {
     // This test requires root privileges because it calls mount/pivot_root.
     // Skip if not root.
     if (geteuid() != 0) {
@@ -115,7 +77,7 @@ TEST(ADR016Test, ApplyWorkerFilesystemCreatesDirectories) {
 // ===========================================================================
 // Tests for gc_run_layers
 // ===========================================================================
-TEST(ADR016Test, GcRunLayersRemovesNonRunningLayers) {
+TEST(WorkerRunTest, GcRunLayersRemovesNonRunningLayers) {
     TempHome home;
 
     // Create a temporary layer directory
@@ -131,8 +93,7 @@ TEST(ADR016Test, GcRunLayersRemovesNonRunningLayers) {
     run.layer_path = layer_path;
     run.log_path = home.path() + "/logs/runs/test_run_gc/output.log";
 
-    // Create a mock Database that returns this run
-    // We'll use a real Database with in-memory SQLite
+    // Use a real Database with in-memory SQLite
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -146,7 +107,7 @@ TEST(ADR016Test, GcRunLayersRemovesNonRunningLayers) {
     EXPECT_FALSE(std::filesystem::exists(layer_path));
 }
 
-TEST(ADR016Test, GcRunLayersDoesNotRemoveRunningLayers) {
+TEST(WorkerRunTest, GcRunLayersDoesNotRemoveRunningLayers) {
     TempHome home;
 
     std::string layer_path = home.path() + "/layers/runs/test_run_running";
@@ -176,7 +137,7 @@ TEST(ADR016Test, GcRunLayersDoesNotRemoveRunningLayers) {
 // ===========================================================================
 // Tests for Database worker_runs methods
 // ===========================================================================
-TEST(ADR016Test, DatabaseInsertAndGetActiveWorkerRuns) {
+TEST(WorkerRunTest, DatabaseInsertAndGetActiveWorkerRuns) {
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -197,7 +158,7 @@ TEST(ADR016Test, DatabaseInsertAndGetActiveWorkerRuns) {
     EXPECT_EQ(active[0].status, "running");
 }
 
-TEST(ADR016Test, DatabaseUpdateWorkerRun) {
+TEST(WorkerRunTest, DatabaseUpdateWorkerRun) {
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -222,7 +183,7 @@ TEST(ADR016Test, DatabaseUpdateWorkerRun) {
     EXPECT_TRUE(active.empty()); // because status is no longer 'running'
 }
 
-TEST(ADR016Test, DatabaseMarkAllRunningAsCrashed) {
+TEST(WorkerRunTest, DatabaseMarkAllRunningAsCrashed) {
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -251,15 +212,12 @@ TEST(ADR016Test, DatabaseMarkAllRunningAsCrashed) {
 
     auto active = db.get_active_worker_runs();
     EXPECT_TRUE(active.empty());
-
-    // Verify they are now crashed
-    // We can query directly via SQLite? Not needed.
 }
 
 // ===========================================================================
 // Tests for ForgeDatabase last_code_path
 // ===========================================================================
-TEST(ADR016Test, ForgeDatabaseInsertAndGetWithLastCodePath) {
+TEST(WorkerRunTest, ForgeDatabaseInsertAndGetWithLastCodePath) {
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -283,7 +241,7 @@ TEST(ADR016Test, ForgeDatabaseInsertAndGetWithLastCodePath) {
     EXPECT_EQ(opt->last_code_path, "/tmp/forge/forge_test_001/attempt_1.py");
 }
 
-TEST(ADR016Test, ForgeDatabaseUpdateLastCodePath) {
+TEST(WorkerRunTest, ForgeDatabaseUpdateLastCodePath) {
     Database db(":memory:");
     ASSERT_TRUE(db.open());
 
@@ -310,63 +268,6 @@ TEST(ADR016Test, ForgeDatabaseUpdateLastCodePath) {
     auto opt = fdb.get_job("forge_test_002");
     ASSERT_TRUE(opt.has_value());
     EXPECT_EQ(opt->last_code_path, "/tmp/forge/forge_test_002/attempt_2.py");
-}
-
-// ===========================================================================
-// Tests for Orchestrator::resume_in_flight calling mark_all_running_as_crashed
-// ===========================================================================
-TEST(ADR016Test, OrchestratorResumeInFlightCallsMarkAllRunningAsCrashed) {
-    // Create mock database
-    NiceMock<MockDatabase> mockDb;
-    EXPECT_CALL(mockDb, mark_all_running_as_crashed()).Times(1);
-
-    // Create dummy dependencies
-    DummyRegistry registry;
-    DummyVerifier verifier(registry);
-    DummyDispatcher dispatcher;
-    DummyScheduler scheduler(registry, dispatcher);
-
-    // Create Orchestrator with a dummy db_path that will be ignored
-    // because we pass a non-empty path but we want to use our mock.
-    // We'll need to modify Orchestrator to accept a Database pointer.
-    // For now, we'll just test the method directly by calling resume_in_flight
-    // on a mock Database? Actually Orchestrator owns its Database.
-    // We'll create a test that uses a real Database and verify that
-    // mark_all_running_as_crashed is called via the real implementation.
-    // We'll test indirectly by checking that running runs become crashed.
-
-    // Use a real Database
-    Database realDb(":memory:");
-    ASSERT_TRUE(realDb.open());
-
-    // Insert a running run
-    WorkerRun run;
-    run.run_id = "orchestrator_test_run";
-    run.worker_id = "test_worker";
-    run.pid = 999;
-    run.started_at = 100;
-    run.status = "running";
-    run.layer_path = "/tmp/layers/runs/orchestrator_test_run";
-    run.log_path = "/tmp/logs/runs/orchestrator_test_run/output.log";
-    realDb.insert_worker_run(run);
-
-    // Create Orchestrator with this database
-    // We need to pass the db_path to Orchestrator constructor.
-    // But Orchestrator opens its own Database. We'll use a temporary file.
-    std::string db_path = "/tmp/agentos_test_orchestrator.db";
-    {
-        Orchestrator orchestrator(registry, verifier, scheduler, dispatcher, db_path);
-        // The constructor calls resume_in_flight which should mark runs as crashed.
-    }
-
-    // Reopen the database and check that the run is now crashed
-    Database checkDb(db_path);
-    ASSERT_TRUE(checkDb.open());
-    auto active = checkDb.get_active_worker_runs();
-    EXPECT_TRUE(active.empty());
-
-    // Cleanup
-    std::filesystem::remove(db_path);
 }
 
 // ===========================================================================

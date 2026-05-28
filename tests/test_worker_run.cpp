@@ -18,6 +18,7 @@
 #include "agentos/types.h"
 
 using namespace agentos;
+
 // ---------------------------------------------------------------------------
 // Helper: create a temporary directory and set AGENTOS_HOME to it
 // ---------------------------------------------------------------------------

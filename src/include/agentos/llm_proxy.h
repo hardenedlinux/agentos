@@ -193,8 +193,9 @@ private:
 
                     doc.AddMember("max_tokens", req.max_tokens, alloc);
 
-                    // DeepSeek‑specific extras (required for some models to return text)
+                    // DeepSeek‑specific extras
                     if (is_deepseek) {
+                        doc.AddMember("stream", false, alloc);               // ensure non‑streaming
                         rapidjson::Value thinking(rapidjson::kObjectType);
                         thinking.AddMember("type", "enabled", alloc);
                         doc.AddMember("thinking", thinking, alloc);
@@ -258,6 +259,11 @@ private:
                 }
 
                 // ---- Parse response ----------------------------------------------------
+                // Debug: log raw response body (only for DeepSeek to help diagnose)
+                if (is_deepseek) {
+                    spdlog::info("[llm_proxy] raw DeepSeek response body: {}", res->body);
+                }
+
                 rapidjson::Document resp_doc;
                 resp_doc.Parse(res->body.c_str());
                 if (resp_doc.HasParseError()) {

@@ -242,10 +242,10 @@ private:
 
             // ---- Parse response ----------------------------------------------------
             rapidjson::Document resp_doc;
-            rapidjson::ParseResult ok = resp_doc.Parse(res->body.c_str());
-            if (!ok) {
+            resp_doc.Parse(res->body.c_str());
+            if (resp_doc.HasParseError()) {
                 std::string err_msg = "Failed to parse LLM response JSON: ";
-                err_msg += rapidjson::GetParseError_En(ok.Code());
+                err_msg += rapidjson::GetParseError_En(resp_doc.GetParseError());
                 spdlog::error("[llm_proxy] {}", err_msg);
                 return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
             }

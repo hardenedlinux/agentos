@@ -35,57 +35,57 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
 
         // [llm]
         if (auto* llm_tbl = tbl["llm"].as_table()) {
-            if (auto* val = llm_tbl->at_path("base_url").as_string()) {
-                cfg.llm.base_url = val->get();
+            if (auto v = llm_tbl->at_path("base_url").as_string()) {
+                cfg.llm.base_url = *v;
             }
-            if (auto* val = llm_tbl->at_path("model").as_string()) {
-                cfg.llm.model = val->get();
+            if (auto v = llm_tbl->at_path("model").as_string()) {
+                cfg.llm.model = *v;
             }
-            if (auto* val = llm_tbl->at_path("max_tokens").as_integer()) {
-                cfg.llm.max_tokens = static_cast<int>(val->get());
+            if (auto v = llm_tbl->at_path("max_tokens").as_integer()) {
+                cfg.llm.max_tokens = static_cast<int>(*v);
             }
-            if (auto* val = llm_tbl->at_path("timeout_s").as_integer()) {
-                cfg.llm.timeout_s = static_cast<int>(val->get());
+            if (auto v = llm_tbl->at_path("timeout_s").as_integer()) {
+                cfg.llm.timeout_s = static_cast<int>(*v);
             }
-            if (auto* val = llm_tbl->at_path("max_concurrent").as_integer()) {
-                cfg.llm.max_concurrent = static_cast<int>(val->get());
+            if (auto v = llm_tbl->at_path("max_concurrent").as_integer()) {
+                cfg.llm.max_concurrent = static_cast<int>(*v);
             }
         }
 
         // [forge]
         if (auto* forge_tbl = tbl["forge"].as_table()) {
-            if (auto* val = forge_tbl->at_path("max_attempts").as_integer()) {
-                cfg.forge.max_attempts = static_cast<int>(val->get());
+            if (auto v = forge_tbl->at_path("max_attempts").as_integer()) {
+                cfg.forge.max_attempts = static_cast<int>(*v);
             }
-            if (auto* val = forge_tbl->at_path("promotion_threshold").as_integer()) {
-                cfg.forge.promotion_threshold = static_cast<int>(val->get());
+            if (auto v = forge_tbl->at_path("promotion_threshold").as_integer()) {
+                cfg.forge.promotion_threshold = static_cast<int>(*v);
             }
         }
 
         // [sandbox]
         if (auto* sandbox_tbl = tbl["sandbox"].as_table()) {
-            if (auto* val = sandbox_tbl->at_path("tier1_memory_mb").as_integer()) {
-                cfg.sandbox.memory_mb = static_cast<int>(val->get());
+            if (auto v = sandbox_tbl->at_path("tier1_memory_mb").as_integer()) {
+                cfg.sandbox.memory_mb = static_cast<int>(*v);
             }
-            if (auto* val = sandbox_tbl->at_path("tier1_cpu_weight").as_integer()) {
-                cfg.sandbox.cpu_weight = static_cast<int>(val->get());
+            if (auto v = sandbox_tbl->at_path("tier1_cpu_weight").as_integer()) {
+                cfg.sandbox.cpu_weight = static_cast<int>(*v);
             }
-            if (auto* val = sandbox_tbl->at_path("tier1_pid_limit").as_integer()) {
-                cfg.sandbox.pid_limit = static_cast<int>(val->get());
+            if (auto v = sandbox_tbl->at_path("tier1_pid_limit").as_integer()) {
+                cfg.sandbox.pid_limit = static_cast<int>(*v);
             }
         }
 
         // [database]
         if (auto* db_tbl = tbl["database"].as_table()) {
-            if (auto* val = db_tbl->at_path("path").as_string()) {
-                cfg.database.path = val->get();
+            if (auto v = db_tbl->at_path("path").as_string()) {
+                cfg.database.path = *v;
             }
         }
 
         // [logging]
         if (auto* log_tbl = tbl["logging"].as_table()) {
-            if (auto* val = log_tbl->at_path("level").as_string()) {
-                cfg.logging.level = val->get();
+            if (auto v = log_tbl->at_path("level").as_string()) {
+                cfg.logging.level = *v;
             }
         }
 

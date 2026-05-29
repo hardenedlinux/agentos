@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include <httplib.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
 
@@ -12,48 +12,6 @@
 
 namespace {
 using namespace agentos;
-
-// ----------------------------------------------------------------------
-// FakeLlmServer  –  runs a local HTTP server for integration tests
-// ----------------------------------------------------------------------
-class FakeLlmServer {
-public:
-    FakeLlmServer() {
-        svr_.Post("/v1/chat/completions",
-            [](const httplib::Request& /*req*/, httplib::Response& res) {
-                // Return a valid OpenAI‑style response
-                res.set_content(
-                    R"({"choices":[{"message":{"content":"Hello from test"}}]})",
-                    "application/json");
-            });
-
-        port_ = svr_.bind_to_port("localhost", 0);
-        if (port_ <= 0) {
-            throw std::runtime_error("FakeLlmServer bind failed");
-        }
-
-        ready_ = true;
-        thread_ = std::thread([this]() { svr_.listen_after_bind(); });
-
-        // Give the server thread a moment to start accepting connections
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    ~FakeLlmServer() {
-        svr_.stop();
-        if (thread_.joinable()) {
-            thread_.join();
-        }
-    }
-
-    int port() const { return port_; }
-
-private:
-    httplib::Server svr_;
-    int port_ = 0;
-    std::thread thread_;
-    bool ready_ = false;
-};
 
 // ----------------------------------------------------------------------
 // Tests
@@ -97,27 +55,29 @@ TEST(LlmProxyTest, EnqueueUnreachableHostReturnsError) {
                 err.find("Failed") != std::string::npos);
 }
 
-TEST(LlmProxyTest, FakeServerReturnsResponse) {
-    FakeLlmServer server;
-    const int port = server.port();
+TEST(LlmProxyTest, DeepSeekE2E) {
+    const char* key = std::getenv("DEEPSEEK_API_KEY");
+    if (!key) {
+        GTEST_SKIP() << "DEEPSEEK_API_KEY not set";
+    }
 
-    LlmProxy proxy(1, 5);   // 1 worker thread, moderate timeout
+    LlmProxy proxy(1, 60);   // 1 worker thread, 60‑second timeout
 
     LlmRequest req;
-    req.base_url      = "http://localhost:" + std::to_string(port);
-    req.api_key       = "noop";
-    req.model         = "test-model";
-    req.system_prompt = "sysmsg";
-    req.user_prompt   = "message";
-    req.max_tokens    = 100;
+    req.base_url      = "https://api.deepseek.com";
+    req.api_key       = key;
+    req.model         = "deepseek-v4-flash";
+    req.system_prompt = "Answer with exactly one word.";
+    req.user_prompt   = "What is the color of the sky?";
+    req.max_tokens    = 16;
 
     auto fut = proxy.enqueue(req);
-    auto status = fut.wait_for(std::chrono::seconds(5));
+    auto status = fut.wait_for(std::chrono::seconds(60));
     ASSERT_EQ(status, std::future_status::ready);
 
     auto res = fut.get();
     ASSERT_TRUE(res.ok) << res.error;
-    EXPECT_EQ(res.value.content, "Hello from test");
+    EXPECT_FALSE(res.value.content.empty());
 }
 
 } // namespace

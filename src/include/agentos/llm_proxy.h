@@ -9,6 +9,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <exception>
 
 #include <chrono>
 #include <cstdlib>
@@ -107,194 +108,201 @@ private:
         constexpr int kMaxAttempts = 3;          // initial attempt + 2 retries
 
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-            // ---- Serialise request -------------------------------------------------
-            rapidjson::Document doc;
-            doc.SetObject();
-            auto& alloc = doc.GetAllocator();
+            try {
+                // ---- Serialise request -------------------------------------------------
+                rapidjson::Document doc;
+                doc.SetObject();
+                auto& alloc = doc.GetAllocator();
 
-            std::string path;
-            httplib::Headers headers;
+                std::string path;
+                httplib::Headers headers;
 
-            if (is_anthropic) {
-                // model
-                rapidjson::Value model_val(req.model.c_str(),
-                                          static_cast<rapidjson::SizeType>(req.model.size()),
-                                          alloc);
-                doc.AddMember("model", model_val, alloc);
-                // max_tokens
-                doc.AddMember("max_tokens", req.max_tokens, alloc);
+                if (is_anthropic) {
+                    // model
+                    rapidjson::Value model_val(req.model.c_str(),
+                                              static_cast<rapidjson::SizeType>(req.model.size()),
+                                              alloc);
+                    doc.AddMember("model", model_val, alloc);
+                    // max_tokens
+                    doc.AddMember("max_tokens", req.max_tokens, alloc);
 
-                // system (if present)
-                if (!req.system_prompt.empty()) {
-                    rapidjson::Value sys(req.system_prompt.c_str(),
-                                        static_cast<rapidjson::SizeType>(req.system_prompt.size()),
-                                        alloc);
-                    doc.AddMember("system", sys, alloc);
-                }
-
-                // messages array – a single "user" message
-                rapidjson::Value msgs(rapidjson::kArrayType);
-                {
-                    rapidjson::Value msg(rapidjson::kObjectType);
-                    rapidjson::Value role("user", 4, alloc);
-                    msg.AddMember("role", role, alloc);
-                    rapidjson::Value content(req.user_prompt.c_str(),
-                                            static_cast<rapidjson::SizeType>(req.user_prompt.size()),
-                                            alloc);
-                    msg.AddMember("content", content, alloc);
-                    msgs.PushBack(msg, alloc);
-                }
-                doc.AddMember("messages", msgs, alloc);
-
-                // Anthropic‑specific headers
-                headers = {
-                    {"Content-Type", "application/json"},
-                    {"x-api-key", req.api_key},
-                    {"anthropic-version", "2023-06-01"}
-                };
-                path = "/v1/messages";
-            } else {
-                // OpenAI‑compatible serialisation
-                // model
-                rapidjson::Value model_val(req.model.c_str(),
-                                          static_cast<rapidjson::SizeType>(req.model.size()),
-                                          alloc);
-                doc.AddMember("model", model_val, alloc);
-
-                // messages
-                rapidjson::Value messages(rapidjson::kArrayType);
-
-                if (!req.system_prompt.empty()) {
-                    rapidjson::Value sys_msg(rapidjson::kObjectType);
-                    rapidjson::Value role("system", 6, alloc);
-                    sys_msg.AddMember("role", role, alloc);
-                    rapidjson::Value content(req.system_prompt.c_str(),
+                    // system (if present)
+                    if (!req.system_prompt.empty()) {
+                        rapidjson::Value sys(req.system_prompt.c_str(),
                                             static_cast<rapidjson::SizeType>(req.system_prompt.size()),
                                             alloc);
-                    sys_msg.AddMember("content", content, alloc);
-                    messages.PushBack(sys_msg, alloc);
+                        doc.AddMember("system", sys, alloc);
+                    }
+
+                    // messages array – a single "user" message
+                    rapidjson::Value msgs(rapidjson::kArrayType);
+                    {
+                        rapidjson::Value msg(rapidjson::kObjectType);
+                        rapidjson::Value role("user", 4, alloc);
+                        msg.AddMember("role", role, alloc);
+                        rapidjson::Value content(req.user_prompt.c_str(),
+                                                static_cast<rapidjson::SizeType>(req.user_prompt.size()),
+                                                alloc);
+                        msg.AddMember("content", content, alloc);
+                        msgs.PushBack(msg, alloc);
+                    }
+                    doc.AddMember("messages", msgs, alloc);
+
+                    // Anthropic‑specific headers
+                    headers = {
+                        {"Content-Type", "application/json"},
+                        {"x-api-key", req.api_key},
+                        {"anthropic-version", "2023-06-01"}
+                    };
+                    path = "/v1/messages";
+                } else {
+                    // OpenAI‑compatible serialisation
+                    // model
+                    rapidjson::Value model_val(req.model.c_str(),
+                                              static_cast<rapidjson::SizeType>(req.model.size()),
+                                              alloc);
+                    doc.AddMember("model", model_val, alloc);
+
+                    // messages
+                    rapidjson::Value messages(rapidjson::kArrayType);
+
+                    if (!req.system_prompt.empty()) {
+                        rapidjson::Value sys_msg(rapidjson::kObjectType);
+                        rapidjson::Value role("system", 6, alloc);
+                        sys_msg.AddMember("role", role, alloc);
+                        rapidjson::Value content(req.system_prompt.c_str(),
+                                                static_cast<rapidjson::SizeType>(req.system_prompt.size()),
+                                                alloc);
+                        sys_msg.AddMember("content", content, alloc);
+                        messages.PushBack(sys_msg, alloc);
+                    }
+
+                    {
+                        rapidjson::Value user_msg(rapidjson::kObjectType);
+                        rapidjson::Value role("user", 4, alloc);
+                        user_msg.AddMember("role", role, alloc);
+                        rapidjson::Value content(req.user_prompt.c_str(),
+                                                static_cast<rapidjson::SizeType>(req.user_prompt.size()),
+                                                alloc);
+                        user_msg.AddMember("content", content, alloc);
+                        messages.PushBack(user_msg, alloc);
+                    }
+                    doc.AddMember("messages", messages, alloc);
+
+                    doc.AddMember("max_tokens", req.max_tokens, alloc);
+
+                    // Use the path supplied by the caller (default "/v1/chat/completions")
+                    path = req.api_path;
+
+                    headers = {
+                        {"Content-Type", "application/json"},
+                        {"Authorization", "Bearer " + req.api_key}
+                    };
                 }
 
-                {
-                    rapidjson::Value user_msg(rapidjson::kObjectType);
-                    rapidjson::Value role("user", 4, alloc);
-                    user_msg.AddMember("role", role, alloc);
-                    rapidjson::Value content(req.user_prompt.c_str(),
-                                            static_cast<rapidjson::SizeType>(req.user_prompt.size()),
-                                            alloc);
-                    user_msg.AddMember("content", content, alloc);
-                    messages.PushBack(user_msg, alloc);
+                // Serialise to string
+                rapidjson::StringBuffer buffer;
+                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                doc.Accept(writer);
+                std::string body = buffer.GetString();
+
+                // ---- HTTP transport ----------------------------------------------------
+                std::unique_ptr<httplib::Client> cli;
+                if (req.base_url.find("https://") == 0) {
+                    cli = std::make_unique<httplib::SSLClient>(req.base_url);
+                } else {
+                    cli = std::make_unique<httplib::Client>(req.base_url);
                 }
-                doc.AddMember("messages", messages, alloc);
+                cli->set_connection_timeout(timeout_s, 0);
+                cli->set_read_timeout(timeout_s, 0);
 
-                doc.AddMember("max_tokens", req.max_tokens, alloc);
+                auto res = cli->Post(path.c_str(), headers, body, "application/json");
 
-                // Use the path supplied by the caller (default "/v1/chat/completions")
-                path = req.api_path;
-
-                headers = {
-                    {"Content-Type", "application/json"},
-                    {"Authorization", "Bearer " + req.api_key}
-                };
-            }
-
-            // Serialise to string
-            rapidjson::StringBuffer buffer;
-            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-            doc.Accept(writer);
-            std::string body = buffer.GetString();
-
-            // ---- HTTP transport ----------------------------------------------------
-            std::unique_ptr<httplib::Client> cli;
-            if (req.base_url.find("https://") == 0) {
-                cli = std::make_unique<httplib::SSLClient>(req.base_url);
-            } else {
-                cli = std::make_unique<httplib::Client>(req.base_url);
-            }
-            cli->set_connection_timeout(timeout_s, 0);
-            cli->set_read_timeout(timeout_s, 0);
-
-            auto res = cli->Post(path.c_str(), headers, body, "application/json");
-
-            // ---- Error / retry evaluation -----------------------------------------
-            if (!res) {
-                std::string err_msg = httplib::to_string(res.error());
-                spdlog::warn("[llm_proxy] attempt {}/{} network error: {}",
-                             attempt + 1, kMaxAttempts, err_msg);
-                if (attempt < (kMaxAttempts - 1)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    continue;
+                // ---- Error / retry evaluation -----------------------------------------
+                if (!res) {
+                    std::string err_msg = httplib::to_string(res.error());
+                    spdlog::warn("[llm_proxy] attempt {}/{} network error: {}",
+                                 attempt + 1, kMaxAttempts, err_msg);
+                    if (attempt < (kMaxAttempts - 1)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        continue;
+                    }
+                    return Result<LlmResponse>(Error{"Network error after retries: " + err_msg},
+                                               ErrorTag{});
                 }
-                return Result<LlmResponse>(Error{"Network error after retries: " + err_msg},
+
+                if (res->status >= 500) {
+                    spdlog::warn("[llm_proxy] attempt {}/{} HTTP {}: {}",
+                                 attempt + 1, kMaxAttempts, res->status, res->body);
+                    if (attempt < (kMaxAttempts - 1)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        continue;
+                    }
+                    return Result<LlmResponse>(
+                        Error{"HTTP " + std::to_string(res->status) + ": " + res->body},
+                        ErrorTag{});
+                }
+
+                if (res->status >= 400 && res->status < 500) {
+                    spdlog::error("[llm_proxy] HTTP client error {}: {}",
+                                  res->status, res->body);
+                    return Result<LlmResponse>(
+                        Error{"HTTP " + std::to_string(res->status) + ": " + res->body},
+                        ErrorTag{});
+                }
+
+                // ---- Parse response ----------------------------------------------------
+                rapidjson::Document resp_doc;
+                resp_doc.Parse(res->body.c_str());
+                if (resp_doc.HasParseError()) {
+                    std::string err_msg = "Failed to parse LLM response JSON: ";
+                    err_msg += rapidjson::GetParseError_En(resp_doc.GetParseError());
+                    spdlog::error("[llm_proxy] {}", err_msg);
+                    return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                }
+
+                std::string content;
+                if (is_anthropic) {
+                    // content is inside content[0].text
+                    if (!resp_doc.HasMember("content") || !resp_doc["content"].IsArray() ||
+                        resp_doc["content"].Size() == 0) {
+                        std::string err_msg = "Anthropic response missing 'content' array";
+                        spdlog::error("[llm_proxy] {}", err_msg);
+                        return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                    }
+                    const auto& first_block = resp_doc["content"][0];
+                    if (!first_block.HasMember("text") || !first_block["text"].IsString()) {
+                        std::string err_msg = "Anthropic response block missing 'text' field";
+                        spdlog::error("[llm_proxy] {}", err_msg);
+                        return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                    }
+                    content = first_block["text"].GetString();
+                } else {
+                    // OpenAI‑compatible: choices[0].message.content
+                    if (!resp_doc.HasMember("choices") || !resp_doc["choices"].IsArray() ||
+                        resp_doc["choices"].Size() == 0) {
+                        std::string err_msg = "LLM response missing 'choices' array";
+                        spdlog::error("[llm_proxy] {}", err_msg);
+                        return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                    }
+                    const auto& first_choice = resp_doc["choices"][0];
+                    if (!first_choice.HasMember("message") ||
+                        !first_choice["message"].HasMember("content")) {
+                        std::string err_msg = "LLM response missing 'message.content'";
+                        spdlog::error("[llm_proxy] {}", err_msg);
+                        return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                    }
+                    content = first_choice["message"]["content"].GetString();
+                }
+
+                LlmResponse response{std::move(content)};
+                return Result<LlmResponse>(std::move(response));
+
+            } catch (const std::exception& e) {
+                spdlog::error("[llm_proxy] unexpected exception: {}", e.what());
+                return Result<LlmResponse>(Error{"LLM call failed: " + std::string(e.what())},
                                            ErrorTag{});
             }
-
-            if (res->status >= 500) {
-                spdlog::warn("[llm_proxy] attempt {}/{} HTTP {}: {}",
-                             attempt + 1, kMaxAttempts, res->status, res->body);
-                if (attempt < (kMaxAttempts - 1)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    continue;
-                }
-                return Result<LlmResponse>(
-                    Error{"HTTP " + std::to_string(res->status) + ": " + res->body},
-                    ErrorTag{});
-            }
-
-            if (res->status >= 400 && res->status < 500) {
-                spdlog::error("[llm_proxy] HTTP client error {}: {}",
-                              res->status, res->body);
-                return Result<LlmResponse>(
-                    Error{"HTTP " + std::to_string(res->status) + ": " + res->body},
-                    ErrorTag{});
-            }
-
-            // ---- Parse response ----------------------------------------------------
-            rapidjson::Document resp_doc;
-            resp_doc.Parse(res->body.c_str());
-            if (resp_doc.HasParseError()) {
-                std::string err_msg = "Failed to parse LLM response JSON: ";
-                err_msg += rapidjson::GetParseError_En(resp_doc.GetParseError());
-                spdlog::error("[llm_proxy] {}", err_msg);
-                return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
-            }
-
-            std::string content;
-            if (is_anthropic) {
-                // content is inside content[0].text
-                if (!resp_doc.HasMember("content") || !resp_doc["content"].IsArray() ||
-                    resp_doc["content"].Size() == 0) {
-                    std::string err_msg = "Anthropic response missing 'content' array";
-                    spdlog::error("[llm_proxy] {}", err_msg);
-                    return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
-                }
-                const auto& first_block = resp_doc["content"][0];
-                if (!first_block.HasMember("text") || !first_block["text"].IsString()) {
-                    std::string err_msg = "Anthropic response block missing 'text' field";
-                    spdlog::error("[llm_proxy] {}", err_msg);
-                    return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
-                }
-                content = first_block["text"].GetString();
-            } else {
-                // OpenAI‑compatible: choices[0].message.content
-                if (!resp_doc.HasMember("choices") || !resp_doc["choices"].IsArray() ||
-                    resp_doc["choices"].Size() == 0) {
-                    std::string err_msg = "LLM response missing 'choices' array";
-                    spdlog::error("[llm_proxy] {}", err_msg);
-                    return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
-                }
-                const auto& first_choice = resp_doc["choices"][0];
-                if (!first_choice.HasMember("message") ||
-                    !first_choice["message"].HasMember("content")) {
-                    std::string err_msg = "LLM response missing 'message.content'";
-                    spdlog::error("[llm_proxy] {}", err_msg);
-                    return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
-                }
-                content = first_choice["message"]["content"].GetString();
-            }
-
-            LlmResponse response{std::move(content)};
-            return Result<LlmResponse>(std::move(response));
         }
 
         // Should never be reached

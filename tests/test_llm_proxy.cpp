@@ -69,11 +69,11 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     LlmRequest req;
     req.base_url      = "https://api.deepseek.com";
     req.api_key       = key;
-    req.model         = "deepseek-v4-flash";
-    req.api_path      = "/chat/completions";          // DeepSeek‑specific path
+    req.model         = "deepseek-v4-pro";          // model from the reference example
+    req.api_path      = "/chat/completions";        // DeepSeek‑specific path
     req.system_prompt = "Answer with exactly one word.";
     req.user_prompt   = "What is the color of the sky?";
-    req.max_tokens    = 16;
+    req.max_tokens    = 256;                        // generous limit
 
     auto fut = proxy.enqueue(req);
     auto status = fut.wait_for(std::chrono::seconds(60));

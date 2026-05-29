@@ -104,6 +104,8 @@ private:
                                             int timeout_s) {
         const bool is_anthropic =
             req.base_url.find("anthropic.com") != std::string::npos;
+        const bool is_deepseek =
+            req.base_url.find("deepseek.com") != std::string::npos;
 
         constexpr int kMaxAttempts = 3;          // initial attempt + 2 retries
 
@@ -190,6 +192,14 @@ private:
                     doc.AddMember("messages", messages, alloc);
 
                     doc.AddMember("max_tokens", req.max_tokens, alloc);
+
+                    // DeepSeek‑specific extras (required for some models to return text)
+                    if (is_deepseek) {
+                        rapidjson::Value thinking(rapidjson::kObjectType);
+                        thinking.AddMember("type", "enabled", alloc);
+                        doc.AddMember("thinking", thinking, alloc);
+                        doc.AddMember("reasoning_effort", "high", alloc);
+                    }
 
                     // Use the path supplied by the caller (default "/v1/chat/completions")
                     path = req.api_path;
@@ -288,7 +298,14 @@ private:
                         spdlog::error("[llm_proxy] {}", err_msg);
                         return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
                     }
-                    content = first_choice["message"]["content"].GetString();
+                    const auto& msg = first_choice["message"];
+                    const auto& c = msg["content"];
+                    if (!c.IsString()) {
+                        std::string err_msg = "LLM message.content is not a string";
+                        spdlog::error("[llm_proxy] {}", err_msg);
+                        return Result<LlmResponse>(Error{std::move(err_msg)}, ErrorTag{});
+                    }
+                    content = c.GetString();
                 }
 
                 LlmResponse response{std::move(content)};

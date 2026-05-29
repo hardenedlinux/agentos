@@ -207,12 +207,8 @@ private:
                 std::string body = buffer.GetString();
 
                 // ---- HTTP transport ----------------------------------------------------
-                std::unique_ptr<httplib::Client> cli;
-                if (req.base_url.find("https://") == 0) {
-                    cli = std::make_unique<httplib::SSLClient>(req.base_url);
-                } else {
-                    cli = std::make_unique<httplib::Client>(req.base_url);
-                }
+                // httplib::Client handles both http:// and https:// when built with SSL support
+                auto cli = std::make_unique<httplib::Client>(req.base_url);
                 cli->set_connection_timeout(timeout_s, 0);
                 cli->set_read_timeout(timeout_s, 0);
 

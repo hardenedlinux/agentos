@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <thread>
 
@@ -80,7 +81,13 @@ TEST(LlmProxyTest, DeepSeekE2E) {
 
     auto res = fut.get();
     ASSERT_TRUE(res.ok) << res.error;
-    EXPECT_FALSE(res.value.content.empty());
+
+    // Print the raw content even when the test passes, for debugging purposes.
+    std::cout << "DeepSeek raw content: '" << res.value.content << "'\n";
+
+    // The model must produce at least one character.
+    ASSERT_FALSE(res.value.content.empty())
+        << "Content was empty; check the log for possible parsing issues.";
 }
 
 } // namespace

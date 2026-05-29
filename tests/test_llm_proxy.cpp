@@ -34,6 +34,9 @@ public:
 
         ready_ = true;
         thread_ = std::thread([this]() { svr_.listen_after_bind(); });
+
+        // Give the server thread a moment to start accepting connections
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     ~FakeLlmServer() {

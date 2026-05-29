@@ -67,6 +67,7 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     req.base_url      = "https://api.deepseek.com";
     req.api_key       = key;
     req.model         = "deepseek-v4-flash";
+    req.api_path      = "/chat/completions";          // DeepSeek‑specific path
     req.system_prompt = "Answer with exactly one word.";
     req.user_prompt   = "What is the color of the sky?";
     req.max_tokens    = 16;

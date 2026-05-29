@@ -12,12 +12,13 @@ namespace agentos {
 class LlmProxy;   // forward declaration
 
 struct LlmRequest {
-    std::string base_url;        // provider endpoint
+    std::string base_url;        // provider endpoint (scheme + host, no path)
     std::string api_key;         // credential
     std::string model;           // model identifier (e.g. "claude-opus-4-5")
     std::string system_prompt;
     std::string user_prompt;
     int         max_tokens = 1024;
+    std::string api_path = "/v1/chat/completions"; // OpenAI‑compatible path
 };
 
 struct LlmResponse {

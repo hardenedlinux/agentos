@@ -102,8 +102,6 @@ private:
                                             int timeout_s) {
         const bool is_anthropic =
             req.base_url.find("anthropic.com") != std::string::npos;
-        const bool is_deepseek =
-            req.base_url.find("deepseek.com") != std::string::npos;
 
         constexpr int kMaxAttempts = 3;          // initial attempt + 2 retries
 
@@ -155,7 +153,7 @@ private:
                 };
                 path = "/v1/messages";
             } else {
-                // OpenAI‑compatible serialisation (also used by DeepSeek)
+                // OpenAI‑compatible serialisation
                 // model
                 rapidjson::Value model_val(req.model.c_str(),
                                           static_cast<rapidjson::SizeType>(req.model.size()),
@@ -190,12 +188,8 @@ private:
 
                 doc.AddMember("max_tokens", req.max_tokens, alloc);
 
-                // DeepSeek expects a slightly different path
-                if (is_deepseek) {
-                    path = "/chat/completions";
-                } else {
-                    path = "/v1/chat/completions";
-                }
+                // Use the path supplied by the caller (default "/v1/chat/completions")
+                path = req.api_path;
 
                 headers = {
                     {"Content-Type", "application/json"},

@@ -69,11 +69,11 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     LlmRequest req;
     req.base_url      = "https://api.deepseek.com";
     req.api_key       = key;
-    req.model         = "deepseek-v4-pro";          // model from the reference example
-    req.api_path      = "/chat/completions";        // DeepSeek‑specific path
-    req.system_prompt = "Answer with exactly one word.";
-    req.user_prompt   = "What is the color of the sky?";
-    req.max_tokens    = 256;                        // generous limit
+    req.model         = "deepseek-chat";          // standard chat model
+    req.api_path      = "/v1/chat/completions";   // OpenAI‑compatible endpoint
+    req.system_prompt = "You are a helpful assistant.";
+    req.user_prompt   = "Say hello world";
+    req.max_tokens    = 30;
 
     auto fut = proxy.enqueue(req);
     auto status = fut.wait_for(std::chrono::seconds(60));
@@ -82,7 +82,6 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     auto res = fut.get();
     ASSERT_TRUE(res.ok) << res.error;
 
-    // Print the raw content even when the test passes, for debugging purposes.
     std::cout << "DeepSeek raw content: '" << res.value.content << "'\n";
 
     // The model must produce at least one character.

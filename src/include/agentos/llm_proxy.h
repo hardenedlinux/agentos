@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <memory>
 
 #include <chrono>
 #include <cstdlib>
@@ -204,11 +205,16 @@ private:
             std::string body = buffer.GetString();
 
             // ---- HTTP transport ----------------------------------------------------
-            httplib::Client cli(req.base_url);
-            cli.set_connection_timeout(timeout_s, 0);
-            cli.set_read_timeout(timeout_s, 0);
+            std::unique_ptr<httplib::Client> cli;
+            if (req.base_url.find("https://") == 0) {
+                cli = std::make_unique<httplib::SSLClient>(req.base_url);
+            } else {
+                cli = std::make_unique<httplib::Client>(req.base_url);
+            }
+            cli->set_connection_timeout(timeout_s, 0);
+            cli->set_read_timeout(timeout_s, 0);
 
-            auto res = cli.Post(path.c_str(), headers, body, "application/json");
+            auto res = cli->Post(path.c_str(), headers, body, "application/json");
 
             // ---- Error / retry evaluation -----------------------------------------
             if (!res) {

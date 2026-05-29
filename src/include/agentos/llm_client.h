@@ -2,32 +2,40 @@
 #define AGENTOS_LLM_CLIENT_H
 
 #include <string>
-#include <string_view> // C++17
-#include "agentos/types.h"
+#include <string_view>
+
+#include "agentos/config.h"   // for Config::Llm
+#include "agentos/types.h"    // for Result
 
 namespace agentos {
 
+class LlmProxy;   // forward declaration
+
 struct LlmRequest {
+    std::string base_url;        // provider endpoint
+    std::string api_key;         // credential
+    std::string model;           // model identifier (e.g. "claude-opus-4-5")
     std::string system_prompt;
     std::string user_prompt;
-    std::string model;
-    int max_tokens = 1024;
+    int         max_tokens = 1024;
 };
 
 struct LlmResponse {
-    std::string content; // raw JSON string from Master's perspective
+    std::string content;         // raw text from the LLM
 };
 
 class LlmClient {
 public:
-    explicit LlmClient(std::string_view api_key, std::string_view base_url);
+    /// Construct with a bound proxy and the resolved LLM configuration.
+    LlmClient(LlmProxy& proxy, const Config::Llm& cfg);
 
+    /// Issue a blocking LLM call through the proxy.
     [[nodiscard]]
     Result<LlmResponse> complete(const LlmRequest& req) const;
 
 private:
-    std::string api_key_;
-    std::string base_url_;
+    LlmProxy&          proxy_;
+    const Config::Llm& cfg_;
 };
 
 } // namespace agentos

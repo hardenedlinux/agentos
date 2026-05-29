@@ -47,6 +47,9 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
             if (auto* val = llm_tbl->at_path("timeout_s").as_integer()) {
                 cfg.llm.timeout_s = static_cast<int>(val->get());
             }
+            if (auto* val = llm_tbl->at_path("max_concurrent").as_integer()) {
+                cfg.llm.max_concurrent = static_cast<int>(val->get());
+            }
         }
 
         // [forge]

@@ -35,8 +35,12 @@ void write_default_config(const std::filesystem::path& path) {
     out << "# See ADR-013 for format details.\n";
     out << "\n";
     out << "[llm]\n";
+    out << "base_url = \"https://api.anthropic.com\"\n";
     out << "api_key = \"\"\n";
     out << "model = \"gpt-4\"\n";
+    out << "max_tokens = 1024\n";
+    out << "timeout_s = 120\n";
+    out << "max_concurrent = 0\n";
     out << "\n";
     out << "[daemon]\n";
     out << "log_level = \"info\"\n";

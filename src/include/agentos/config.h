@@ -12,6 +12,7 @@ struct Config {
         int         max_tokens = 1024;
         int         timeout_s  = 120;
         std::string api_key;   // from env, not TOML
+        int         max_concurrent = 0;   // 0 = auto (hardware_concurrency - 1, min 1)
     } llm;
 
     struct Forge {

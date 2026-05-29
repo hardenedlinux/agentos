@@ -36,6 +36,7 @@
 #include "agentos/verifier.h"
 #include "agentos/version.h"
 #include "agentos/llm_client.h"
+#include "agentos/llm_proxy.h"
 
 static void print_banner ()
 {
@@ -146,7 +147,9 @@ static void verify_architecture ()
                 result.errors.empty () ? "none" : result.errors[0]);
 
   // Verify LlmClient can be instantiated (no actual HTTP call)
-  agentos::LlmClient llm_client("test-api-key", "https://api.openai.com");
+  agentos::LlmProxy proxy(1, 120);
+  agentos::Config::Llm llm_cfg;
+  agentos::LlmClient llm_client(proxy, llm_cfg);
   spdlog::info ("LlmClient    ✓");
 
   spdlog::info ("--- end architecture check ---");

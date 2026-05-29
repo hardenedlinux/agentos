@@ -193,15 +193,6 @@ private:
 
                     doc.AddMember("max_tokens", req.max_tokens, alloc);
 
-                    // DeepSeek‑specific extras
-                    if (is_deepseek) {
-                        doc.AddMember("stream", false, alloc);               // ensure non‑streaming
-                        rapidjson::Value thinking(rapidjson::kObjectType);
-                        thinking.AddMember("type", "enabled", alloc);
-                        doc.AddMember("thinking", thinking, alloc);
-                        doc.AddMember("reasoning_effort", "high", alloc);
-                    }
-
                     // Use the path supplied by the caller (default "/v1/chat/completions")
                     path = req.api_path;
 

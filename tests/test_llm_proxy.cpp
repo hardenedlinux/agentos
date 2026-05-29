@@ -89,7 +89,7 @@ TEST(LlmProxyTest, EnqueueUnreachableHostReturnsError) {
 
     auto res = fut.get();
     EXPECT_FALSE(res.ok);
-    const std::string& err = res.error.message;
+    const std::string& err = res.error;
     EXPECT_TRUE(err.find("Network error") != std::string::npos ||
                 err.find("Failed") != std::string::npos);
 }
@@ -113,7 +113,7 @@ TEST(LlmProxyTest, FakeServerReturnsResponse) {
     ASSERT_EQ(status, std::future_status::ready);
 
     auto res = fut.get();
-    ASSERT_TRUE(res.ok) << res.error.message;
+    ASSERT_TRUE(res.ok) << res.error;
     EXPECT_EQ(res.value.content, "Hello from test");
 }
 

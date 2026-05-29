@@ -1,3 +1,5 @@
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -55,7 +57,6 @@ TEST(LlmProxyTest, EnqueueUnreachableHostReturnsError) {
                 err.find("Failed") != std::string::npos);
 }
 
-#if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
 TEST(LlmProxyTest, DeepSeekE2E) {
     const char* key = std::getenv("DEEPSEEK_API_KEY");
     if (!key) {
@@ -81,10 +82,5 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     ASSERT_TRUE(res.ok) << res.error;
     EXPECT_FALSE(res.value.content.empty());
 }
-#else
-TEST(LlmProxyTest, DeepSeekE2E) {
-    GTEST_SKIP() << "cpp-httplib built without OpenSSL (CPPHTTPLIB_OPENSSL_SUPPORT not defined)";
-}
-#endif
 
 } // namespace

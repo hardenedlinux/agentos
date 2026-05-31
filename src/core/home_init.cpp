@@ -261,18 +261,21 @@ void initialise_home(const std::filesystem::path& base) {
     seed_if_absent(advisers / "planning" / "skill.md",      PLANNING_SKILL);
     seed_if_absent(advisers / "planning" / "config.toml",   PLANNING_CONFIG);
     seed_if_absent(advisers / "planning" / "planning.py",   PLANNING_SCRIPT);
+    seed_if_absent(advisers / "planning" / "adviser.py",    PLANNING_SCRIPT);
 
     // Code‑writer adviser
     seed_if_absent(advisers / "code-writer" / "manifest.toml", CODE_WRITER_MANIFEST);
     seed_if_absent(advisers / "code-writer" / "skill.md",      CODE_WRITER_SKILL);
     seed_if_absent(advisers / "code-writer" / "config.toml",   CODE_WRITER_CONFIG);
     seed_if_absent(advisers / "code-writer" / "code_writer.py", CODE_WRITER_SCRIPT);
+    seed_if_absent(advisers / "code-writer" / "adviser.py",     CODE_WRITER_SCRIPT);
 
     // Code‑reviewer adviser
     seed_if_absent(advisers / "code-reviewer" / "manifest.toml", CODE_REVIEWER_MANIFEST);
     seed_if_absent(advisers / "code-reviewer" / "skill.md",      CODE_REVIEWER_SKILL);
     seed_if_absent(advisers / "code-reviewer" / "config.toml",   CODE_REVIEWER_CONFIG);
     seed_if_absent(advisers / "code-reviewer" / "code_reviewer.py", CODE_REVIEWER_SCRIPT);
+    seed_if_absent(advisers / "code-reviewer" / "adviser.py",       CODE_REVIEWER_SCRIPT);
 }
 
 } // namespace agentos

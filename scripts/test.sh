@@ -35,7 +35,14 @@ if $CLEAN; then
   rm -rf "$BUILD_DIR"
 fi
 
-mkdir -p "$BUILD_DIR"
+# Ensure writable temporary directories exist (tests create their
+# own dirs inside /tmp via mkdtemp, but we guarantee that /tmp is
+# present and that the build‑time test output directory is available).
+mkdir -p /tmp
+mkdir -p "$BUILD_DIR/tests"
+
+# Use a dedicated TMPDIR if the environment doesn't provide one.
+export TMPDIR="${TMPDIR:-/tmp}"
 
 echo "→ Configuring superbuild ($BUILD_TYPE, musl=$USE_MUSL, tests=ON)"
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \

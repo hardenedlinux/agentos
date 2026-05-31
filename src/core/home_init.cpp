@@ -173,6 +173,12 @@ const char* CODE_REVIEWER_CONFIG = R"(# Adviser runtime configuration
 # timeout_s   = 180
 )";
 
+// -------- Adviser stub scripts (backward‑compatibility with earlier tests) --------
+
+const char* PLANNING_SCRIPT    = "#!/usr/bin/env python3\n";
+const char* CODE_WRITER_SCRIPT = "#!/usr/bin/env python3\n";
+const char* CODE_REVIEWER_SCRIPT = "#!/usr/bin/env python3\n";
+
 // --- Generic helpers (from ADR-014) ---
 
 void seed_if_absent(const std::filesystem::path& path, const char* content) {
@@ -247,24 +253,27 @@ void initialise_home(const std::filesystem::path& base) {
         }
     }
 
-    // --- Seed ADR-018 skill packages for the three built‑in advisers ---
-
     const std::filesystem::path advisers = base / "advisers";
+
+    // --- Seed ADR-018 skill packages for the three built‑in advisers ---
 
     // Planning adviser
     seed_if_absent(advisers / "planning" / "manifest.toml", PLANNING_MANIFEST);
     seed_if_absent(advisers / "planning" / "skill.md",      PLANNING_SKILL);
     seed_if_absent(advisers / "planning" / "config.toml",   PLANNING_CONFIG);
+    seed_if_absent(advisers / "planning" / "planning.py",   PLANNING_SCRIPT);
 
     // Code‑writer adviser
     seed_if_absent(advisers / "code-writer" / "manifest.toml", CODE_WRITER_MANIFEST);
     seed_if_absent(advisers / "code-writer" / "skill.md",      CODE_WRITER_SKILL);
     seed_if_absent(advisers / "code-writer" / "config.toml",   CODE_WRITER_CONFIG);
+    seed_if_absent(advisers / "code-writer" / "code_writer.py", CODE_WRITER_SCRIPT);
 
     // Code‑reviewer adviser
     seed_if_absent(advisers / "code-reviewer" / "manifest.toml", CODE_REVIEWER_MANIFEST);
     seed_if_absent(advisers / "code-reviewer" / "skill.md",      CODE_REVIEWER_SKILL);
     seed_if_absent(advisers / "code-reviewer" / "config.toml",   CODE_REVIEWER_CONFIG);
+    seed_if_absent(advisers / "code-reviewer" / "code_reviewer.py", CODE_REVIEWER_SCRIPT);
 }
 
 } // namespace agentos

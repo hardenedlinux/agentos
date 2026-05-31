@@ -108,4 +108,84 @@ bool read_env_api_key(Config& cfg) {
     return false;
 }
 
+// ADR-018: resolution of adviser LLM configuration
+std::optional<ResolvedAdviserConfig> resolve_adviser_llm(
+    const std::filesystem::path& adviser_dir,
+    const Config&                global,
+    std::string&                 error) {
+
+    // Start with the daemon global LLM defaults.
+    Config::Llm resolved = global.llm;
+
+    const auto cfg_path = adviser_dir / "config.toml";
+
+    // Variables that are only obtained from the adviser config file.
+    std::string api_key_env_override;
+
+    if (std::filesystem::exists(cfg_path) && std::filesystem::is_regular_file(cfg_path)) {
+        try {
+            std::ifstream file(cfg_path);
+            std::string content;
+            if (file.is_open()) {
+                std::stringstream ss;
+                ss << file.rdbuf();
+                content = ss.str();
+            }
+            if (!content.empty()) {
+                toml::table tbl = toml::parse(content);
+
+                if (auto* llm = tbl["llm"].as_table()) {
+                    // Fields that override the global values only if present and non‑empty.
+                    if (auto v = llm->at_path("model").as_string()) {
+                        if (!v->get().empty()) {
+                            resolved.model = v->get();
+                        }
+                    }
+                    if (auto v = llm->at_path("base_url").as_string()) {
+                        if (!v->get().empty()) {
+                            resolved.base_url = v->get();
+                        }
+                    }
+                    if (auto v = llm->at_path("max_tokens").as_integer()) {
+                        resolved.max_tokens = static_cast<int>(v->get());
+                    }
+                    if (auto v = llm->at_path("timeout_s").as_integer()) {
+                        resolved.timeout_s = static_cast<int>(v->get());
+                    }
+                    if (auto v = llm->at_path("api_key_env").as_string()) {
+                        api_key_env_override = v->get();
+                    }
+                }
+            }
+        } catch (const toml::parse_error&) {
+            // Parsing error – fall through to global defaults.
+        }
+    }
+
+    // Resolve API key using the precedence defined in ADR-018:
+    // 1. api_key_env from adviser config (if set) → read that env var.
+    // 2. AGENTOS_LLM_API_KEY.
+    std::string api_key;
+    if (!api_key_env_override.empty()) {
+        const char* env = std::getenv(api_key_env_override.c_str());
+        if (env) {
+            api_key = env;
+        }
+    }
+    if (api_key.empty()) {
+        const char* env = std::getenv("AGENTOS_LLM_API_KEY");
+        if (env) {
+            api_key = env;
+        }
+    }
+
+    resolved.api_key = api_key;
+
+    ResolvedAdviserConfig result;
+    result.llm        = resolved;
+    result.skill_path = adviser_dir / "skill.md";
+
+    return result;
+}
+
 } // namespace agentos

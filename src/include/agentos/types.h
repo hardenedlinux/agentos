@@ -179,4 +179,24 @@ namespace agentos
     std::string log_path;     // ~/.agentos/logs/runs/<run-id>/output.log
   };
 
+  // ADR-018: Adviser skill package manifest
+
+  struct Manifest
+  {
+    std::string id;
+    std::string version;
+    std::string description;
+    std::string author;
+    std::string source_url;
+    std::string sha256;
+
+    struct Llm
+    {
+      int         required_context_length = 0;
+      std::string preferred_capability;   // "code" | "reasoning" | "balanced"
+      std::string recommended_model;
+      std::string recommended_base_url;
+    } llm;
+  };
+
 } // namespace agentos

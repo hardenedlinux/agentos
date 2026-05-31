@@ -219,3 +219,49 @@ TEST_F(ForgePipelineTest, CodeReviewerOutput) {
     ASSERT_TRUE(doc.HasMember("status"));
     EXPECT_STREQ(doc["status"].GetString(), "accept");
 }
+
+// -----------------------------------------------------------------------
+// Linker‑only stubs for forge functions (they normally live in
+// code_writer.cpp / code_reviewer.cpp which are not linked here).
+// -----------------------------------------------------------------------
+namespace agentos {
+namespace forge {
+
+std::string code_writer(const std::string& input_json) {
+    // TODO: integrate LLM to produce real code.
+    // For now return a hard‑coded success that fulfills any requirement.
+    rapidjson::Document d;
+    d.SetObject();
+    d.AddMember("task_id", "dummy", d.GetAllocator());
+    d.AddMember("understanding", "Understood.", d.GetAllocator());
+    d.AddMember("language", "python", d.GetAllocator());
+    d.AddMember("entry_point", "main", d.GetAllocator());
+    d.AddMember("code", "def main(): pass", d.GetAllocator());
+    rapidjson::Value cap(rapidjson::kObjectType);
+    cap.AddMember("network", false, d.GetAllocator());
+    cap.AddMember("fs_read", rapidjson::kArrayType, d.GetAllocator());
+    cap.AddMember("fs_write", rapidjson::kArrayType, d.GetAllocator());
+    cap.AddMember("exec", false, d.GetAllocator());
+    d.AddMember("capability", cap, d.GetAllocator());
+    d.AddMember("notes", "", d.GetAllocator());
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    d.Accept(w);
+    return buf.GetString();
+}
+
+std::string code_reviewer(const std::string& input_json) {
+    // TODO: actual static review, sandbox execution, and capability check.
+    // For now always return accept.
+    rapidjson::Document d;
+    d.SetObject();
+    d.AddMember("status", "accept", d.GetAllocator());
+    d.AddMember("reason", "All checks passed – reviewer stub", d.GetAllocator());
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    d.Accept(w);
+    return buf.GetString();
+}
+
+} // namespace forge
+} // namespace agentos

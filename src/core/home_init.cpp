@@ -217,7 +217,6 @@ void initialise_home(const std::filesystem::path& base) {
         base / "advisers" / "code-writer",
         base / "advisers" / "code-reviewer",
         base / "workers",
-        base / "skills",
         base / "forge",
         base / "logs",
     };

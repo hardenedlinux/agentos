@@ -46,7 +46,7 @@ bool read_env_api_key(Config& cfg);
 
 // ADR-018: Resolved configuration for a single adviser after merging with global config.
 struct ResolvedAdviserConfig {
-    Llm                         llm;
+    Config::Llm                 llm;
     std::filesystem::path       skill_path;
 };
 

@@ -162,19 +162,13 @@ std::optional<ResolvedAdviserConfig> resolve_adviser_llm(
         }
     }
 
-    // Resolve API key using the precedence defined in ADR-018:
-    // 1. api_key_env from adviser config (if set) → read that env var.
-    // 2. AGENTOS_LLM_API_KEY.
-    std::string api_key;
+    // Resolve API key: start with global value (already resolved by daemon).
+    std::string api_key = resolved.api_key;
+
+    // If the adviser config specifies a dedicated env‑var name, try to read it.
     if (!api_key_env_override.empty()) {
         const char* env = std::getenv(api_key_env_override.c_str());
-        if (env) {
-            api_key = env;
-        }
-    }
-    if (api_key.empty()) {
-        const char* env = std::getenv("AGENTOS_LLM_API_KEY");
-        if (env) {
+        if (env && env[0] != '\0') {
             api_key = env;
         }
     }

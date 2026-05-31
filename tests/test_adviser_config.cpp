@@ -191,12 +191,12 @@ protected:
         ASSERT_NE(dir, nullptr) << "mkdtemp failed";
         temp_dir_ = dir;
 
-        // Sensible global defaults
+        // Sensible global defaults – API key is initially empty; daemon will fill it later.
         global_.llm.base_url   = "https://api.global.com";
         global_.llm.model      = "global-model";
         global_.llm.max_tokens = 2048;
         global_.llm.timeout_s  = 90;
-        global_.llm.api_key    = "global-key-toml";   // will be overwritten by env resolution
+        global_.llm.api_key    = "";
     }
 
     void TearDown() override {
@@ -219,22 +219,29 @@ protected:
         EXPECT_TRUE(maybe.has_value()) << "resolve_adviser_llm returned nullopt: " << err;
         return std::move(maybe.value());
     }
+
+    // Convenience: call read_env_api_key to simulate what the daemon would do.
+    void load_daemon_key() {
+        agentos::read_env_api_key(global_);
+    }
 };
 
-// No adviser config → use global values (API key from environment)
+// No adviser config → use global values (API key from daemon)
 TEST_F(ResolveAdviserLLMTest, NoConfigUsesGlobal) {
-    EnvGuard guard("AGENTOS_LLM_API_KEY", nullptr);   // ensure no env var
+    // Daemon hasn't populated a key yet → api_key stays empty
     auto res = resolve();
     EXPECT_EQ(res.llm.base_url,   global_.llm.base_url);
     EXPECT_EQ(res.llm.model,      global_.llm.model);
     EXPECT_EQ(res.llm.max_tokens, global_.llm.max_tokens);
     EXPECT_EQ(res.llm.timeout_s,  global_.llm.timeout_s);
-    EXPECT_EQ(res.llm.api_key,    "");   // env not set
+    EXPECT_EQ(res.llm.api_key,    "");   // no env var
     EXPECT_EQ(res.skill_path,     temp_dir_ / "skill.md");
 }
 
 TEST_F(ResolveAdviserLLMTest, NoConfigApiKeyFromEnv) {
+    // Simulate the daemon having read AGENTOS_LLM_API_KEY
     EnvGuard guard("AGENTOS_LLM_API_KEY", "env-key-value");
+    load_daemon_key();               // sets global_.llm.api_key = "env-key-value"
     auto res = resolve();
     EXPECT_EQ(res.llm.api_key, "env-key-value");
     // other fields unchanged
@@ -281,7 +288,7 @@ TEST_F(ResolveAdviserLLMTest, ApiKeyEnvOverride) {
 [llm]
 api_key_env = "MY_SPECIAL_KEY"
 )");
-    // set the custom env var as well as AGENTOS_LLM_API_KEY to verify priority
+    // Set custom env var; also set AGENTOS_LLM_API_KEY to verify priority
     EnvGuard guard_custom("MY_SPECIAL_KEY", "override-key");
     EnvGuard guard_global("AGENTOS_LLM_API_KEY", "global-key");
     auto res = resolve();
@@ -293,7 +300,9 @@ TEST_F(ResolveAdviserLLMTest, ApiKeyEnvEmptyFallsBack) {
 [llm]
 api_key_env = ""
 )");
+    // Daemon would have filled the global key from AGENTOS_LLM_API_KEY
     EnvGuard guard("AGENTOS_LLM_API_KEY", "fallback-key");
+    load_daemon_key();                     // global_.llm.api_key ← "fallback-key"
     auto res = resolve();
     EXPECT_EQ(res.llm.api_key, "fallback-key");
 }
@@ -303,14 +312,16 @@ TEST_F(ResolveAdviserLLMTest, ApiKeyEnvNotSetFallsBack) {
 [llm]
 api_key_env = "MISSING_VAR"
 )");
+    // Daemon would have read AGENTOS_LLM_API_KEY
     EnvGuard guard("AGENTOS_LLM_API_KEY", "default-key");
+    load_daemon_key();                     // global_.llm.api_key ← "default-key"
     auto res = resolve();
-    // custom env var not present → fallback used
+    // custom env var not present → keep daemon key
     EXPECT_EQ(res.llm.api_key, "default-key");
 }
 
 TEST_F(ResolveAdviserLLMTest, NoApiKeyAtAll) {
-    // no env vars and no api_key_env in config
+    // no env vars and no api_key_env in config → api_key stays empty
     EnvGuard guard_a("AGENTOS_LLM_API_KEY", nullptr);
     auto res = resolve();
     EXPECT_EQ(res.llm.api_key, "");
@@ -320,13 +331,14 @@ TEST_F(ResolveAdviserLLMTest, ParseErrorFallsBack) {
     // Malformed TOML file
     write_file("config.toml", "= invalid");
     EnvGuard guard("AGENTOS_LLM_API_KEY", "env-key");
+    load_daemon_key();           // global_.llm.api_key ← "env-key"
     auto res = resolve();
     // All LLM fields must equal the global defaults because parsing failed
     EXPECT_EQ(res.llm.base_url,   global_.llm.base_url);
     EXPECT_EQ(res.llm.model,      global_.llm.model);
     EXPECT_EQ(res.llm.max_tokens, global_.llm.max_tokens);
     EXPECT_EQ(res.llm.timeout_s,  global_.llm.timeout_s);
-    // API key resolution still sees the env var because it is independent of TOML parsing
+    // API key resolution still sees the daemon‑key (ADVERSE env wasn't used)
     EXPECT_EQ(res.llm.api_key,    "env-key");
 }
 

@@ -14,6 +14,12 @@
 namespace agentos
 {
 
+  static Database* g_scheduler_db = nullptr;
+
+  void Scheduler::set_database(Database& db) {
+      g_scheduler_db = &db;
+  }
+
   Scheduler::Scheduler (const Registry &registry, Dispatcher &dispatcher,
                         const SchedulerConfig &config)
     : registry_ (registry), dispatcher_ (dispatcher),

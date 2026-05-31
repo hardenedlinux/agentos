@@ -14,6 +14,7 @@
 
 #include <memory>
 #include "agentos/types.h"
+#include "agentos/forge_job.h"   // ADR-019
 #include <optional>
 
 namespace agentos
@@ -64,6 +65,11 @@ namespace agentos
     // Diagnostics
     size_t adviser_count () const;
     size_t worker_count () const;
+
+    // ADR-019: register a worker after forge pipeline reaches Promoted
+    void finalize_worker_promotion (const ForgeJob &job,
+                                    const std::string &worker_code,
+                                    const std::string &capability_json);
 
   private:
     struct Impl;

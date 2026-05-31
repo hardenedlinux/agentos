@@ -18,6 +18,7 @@
 
 #include "agentos/types.h"
 #include "agentos/dispatcher.h"
+#include "agentos/database/database.h"  // ADR-019: Database for forge worker persistence
 #include <functional>
 #include <unordered_map>
 
@@ -48,6 +49,9 @@ namespace agentos
 
     // Validate capability declaration for a step (ADR-006 Layer 2)
     bool validate_step_capabilities(const PlanStep &step);
+
+    // ADR-019: provide a database reference for storing forge‑job results
+    static void set_database(Database &db);
 
   private:
     const Registry &registry_;

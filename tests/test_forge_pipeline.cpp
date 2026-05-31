@@ -7,6 +7,8 @@
 #include <filesystem>
 
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <sqlite3.h>
 
 #include "agentos/database/database.h"

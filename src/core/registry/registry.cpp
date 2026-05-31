@@ -1,12 +1,15 @@
 #include "agentos/registry.h"
 #include "agentos/database/database.h"
+#include "agentos/home_init.h"
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <vector>
 
@@ -377,6 +380,128 @@ namespace agentos
     if (!impl_)
       return 0;
     return impl_->workers.size ();
+  }
+
+  // -----------------------------------------------------------------------
+  // ADR-019: worker registration after forge pipeline promotes
+  // -----------------------------------------------------------------------
+  void Registry::finalize_worker_promotion(const ForgePipelineJob& job,
+                                           const std::string& worker_code,
+                                           const std::string& capability_json) {
+    if (!impl_ || !impl_->db) {
+      spdlog::error("[registry] finalize_worker_promotion: no database handle");
+      return;
+    }
+
+    auto home = agentos_home();
+    auto worker_dir = home / "workers" / job.id;
+    std::error_code ec;
+    std::filesystem::create_directories(worker_dir, ec);
+    if (ec) {
+      spdlog::error("[registry] cannot create worker directory {}: {}",
+                   worker_dir.string(), ec.message());
+      return;
+    }
+
+    // Write the worker source file (simplified: always Python)
+    auto code_path = worker_dir / "worker.py";
+    {
+      std::ofstream out(code_path);
+      if (!out) {
+        spdlog::error("[registry] cannot write worker code to {}", code_path.string());
+        return;
+      }
+      out << worker_code;
+    }
+
+    // Write manifest.json
+    auto manifest_path = worker_dir / "manifest.json";
+    {
+      std::ofstream out(manifest_path);
+      if (!out) {
+        spdlog::error("[registry] cannot write manifest to {}", manifest_path.string());
+        return;
+      }
+      out << capability_json;
+    }
+
+    // Insert into agents table
+    int64_t now_ts = std::chrono::system_clock::now().time_since_epoch().count();
+    const char* insert_agent_sql = R"(
+        INSERT OR REPLACE INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+        VALUES (?, 'worker', ?, ?, 'forge', ?, 1)
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, insert_agent_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      spdlog::error("[registry] finalize_worker_promotion prepare agents: {}",
+                   sqlite3_errmsg(impl_->db));
+      return;
+    }
+    sqlite3_bind_text(stmt, 1, job.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, code_path.string().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, capability_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 4, now_ts);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      spdlog::error("[registry] finalize_worker_promotion step agents: {}", sqlite3_errmsg(impl_->db));
+      sqlite3_finalize(stmt);
+      return;
+    }
+    sqlite3_finalize(stmt);
+
+    // Insert capabilities
+    rapidjson::Document cap_doc;
+    cap_doc.Parse(capability_json.c_str());
+    if (!cap_doc.HasParseError() && cap_doc.HasMember("capabilities") && cap_doc["capabilities"].IsArray()) {
+      const char* insert_cap_sql = R"(
+          INSERT OR REPLACE INTO capabilities (agent_id, method, description, input_schema)
+          VALUES (?, ?, ?, ?)
+      )";
+      for (const auto& cap : cap_doc["capabilities"].GetArray()) {
+        if (!cap.IsObject()) continue;
+        std::string method;
+        std::string desc;
+        std::string input_schema = "{}";
+        if (cap.HasMember("method") && cap["method"].IsString())
+          method = cap["method"].GetString();
+        else
+          continue;
+        if (cap.HasMember("description") && cap["description"].IsString())
+          desc = cap["description"].GetString();
+        if (cap.HasMember("input_schema") && cap["input_schema"].IsObject()) {
+          rapidjson::StringBuffer ibuf;
+          rapidjson::Writer<rapidjson::StringBuffer> iw(ibuf);
+          cap["input_schema"].Accept(iw);
+          input_schema = ibuf.GetString();
+        }
+        sqlite3_stmt* cap_stmt = nullptr;
+        if (sqlite3_prepare_v2(impl_->db, insert_cap_sql, -1, &cap_stmt, nullptr) != SQLITE_OK) {
+          spdlog::error("[registry] finalize_worker_promotion prepare capabilities: {}",
+                       sqlite3_errmsg(impl_->db));
+          continue;
+        }
+        sqlite3_bind_text(cap_stmt, 1, job.id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(cap_stmt, 2, method.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(cap_stmt, 3, desc.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(cap_stmt, 4, input_schema.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(cap_stmt) != SQLITE_DONE) {
+          spdlog::error("[registry] finalize_worker_promotion step capabilities: {}",
+                       sqlite3_errmsg(impl_->db));
+        }
+        sqlite3_finalize(cap_stmt);
+      }
+    } else {
+      spdlog::warn("[registry] no capabilities found in manifest; worker registered without capability rows");
+    }
+
+    // Update forge pipeline job status (use dedicated table)
+    const char* update_forge_sql = "UPDATE forge_pipeline_jobs SET status='promoted', updated_at=? WHERE id=?";
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, update_forge_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, now_ts);
+      sqlite3_bind_text(stmt, 2, job.id.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+    }
   }
 
 } // namespace agentos

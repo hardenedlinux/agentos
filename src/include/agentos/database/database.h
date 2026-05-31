@@ -6,8 +6,8 @@
 #include <vector>
 #include <optional>
 
-#include "agentos/types.h"        // for Task, PlanStep, TaskId, etc.
-#include "agentos/forge_job.h"    // ADR-019
+#include "agentos/types.h"                // for Task, PlanStep, TaskId, etc.
+#include "agentos/forge_pipeline_job.h"   // ADR-019 pipeline job
 
 namespace agentos {
 
@@ -52,11 +52,11 @@ public:
     std::vector<WorkerRun> get_all_worker_runs();
     virtual void mark_all_running_as_crashed();
 
-    // ADR-019: Forge job CRUD
-    void store_forge_job(const ForgeJob& job);
-    void update_forge_job(const ForgeJob& job);
-    std::optional<ForgeJob> load_forge_job(const std::string& forge_id);
-    std::vector<ForgeJob> load_in_flight_forge_jobs();
+    // ADR-019: Forge pipeline job CRUD
+    void store_forge_pipeline_job(const ForgePipelineJob& job);
+    void update_forge_pipeline_job(const ForgePipelineJob& job);
+    std::optional<ForgePipelineJob> load_forge_pipeline_job(const std::string& forge_id);
+    std::vector<ForgePipelineJob> load_in_flight_forge_pipeline_jobs();
 
 private:
     struct Impl;

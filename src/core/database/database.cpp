@@ -1,5 +1,6 @@
 #include "agentos/database/database.h"
 #include "agentos/home_init.h"
+#include "agentos/forge_pipeline_job.h"
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -68,6 +69,20 @@ bool Database::open() {
             status     TEXT NOT NULL DEFAULT 'running',
             layer_path TEXT NOT NULL,
             log_path   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS forge_pipeline_jobs (
+            id                 TEXT PRIMARY KEY,
+            task_id            TEXT NOT NULL,
+            status             TEXT NOT NULL DEFAULT 'draft',
+            requirement_json   TEXT,
+            writer_output_json TEXT,
+            reviewer_verdict_json TEXT,
+            feedback           TEXT,
+            attempt            INTEGER DEFAULT 0,
+            max_attempts       INTEGER DEFAULT 3,
+            last_code_path     TEXT,
+            created_at         INTEGER NOT NULL,
+            updated_at         INTEGER NOT NULL
         );
     )";
     char* errmsg = nullptr;
@@ -344,6 +359,160 @@ void Database::mark_all_running_as_crashed() {
         spdlog::error("[database] mark_all_running_as_crashed step: {}", sqlite3_errmsg(impl_->db));
     }
     sqlite3_finalize(stmt);
+}
+
+// -----------------------------------------------------------------------
+// ADR-019 forge pipeline job CRUD
+// -----------------------------------------------------------------------
+
+void Database::store_forge_pipeline_job(const ForgePipelineJob& job) {
+    if (!impl_->db) return;
+    const char* sql = R"(
+        INSERT OR REPLACE INTO forge_pipeline_jobs
+            (id, task_id, status, requirement_json, writer_output_json,
+             reviewer_verdict_json, feedback, attempt, max_attempts,
+             last_code_path, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("[database] store_forge_pipeline_job prepare: {}", sqlite3_errmsg(impl_->db));
+        return;
+    }
+    sqlite3_bind_text(stmt, 1, job.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, job.task_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, job.status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, job.requirement_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, job.writer_output_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, job.reviewer_verdict_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, job.feedback.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 8, job.attempt);
+    sqlite3_bind_int(stmt, 9, job.max_attempts);
+    sqlite3_bind_text(stmt,10, job.last_code_path.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt,11, std::chrono::system_clock::now().time_since_epoch().count());
+    sqlite3_bind_int64(stmt,12, std::chrono::system_clock::now().time_since_epoch().count());
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        spdlog::error("[database] store_forge_pipeline_job step: {}", sqlite3_errmsg(impl_->db));
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::update_forge_pipeline_job(const ForgePipelineJob& job) {
+    if (!impl_->db) return;
+    const char* sql = R"(
+        UPDATE forge_pipeline_jobs SET
+            status = ?,
+            requirement_json = ?,
+            writer_output_json = ?,
+            reviewer_verdict_json = ?,
+            feedback = ?,
+            attempt = ?,
+            max_attempts = ?,
+            last_code_path = ?,
+            updated_at = ?
+        WHERE id = ?
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("[database] update_forge_pipeline_job prepare: {}", sqlite3_errmsg(impl_->db));
+        return;
+    }
+    sqlite3_bind_text(stmt, 1, job.status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, job.requirement_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, job.writer_output_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, job.reviewer_verdict_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, job.feedback.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, job.attempt);
+    sqlite3_bind_int(stmt, 7, job.max_attempts);
+    sqlite3_bind_text(stmt, 8, job.last_code_path.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 9, std::chrono::system_clock::now().time_since_epoch().count());
+    sqlite3_bind_text(stmt,10, job.id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        spdlog::error("[database] update_forge_pipeline_job step: {}", sqlite3_errmsg(impl_->db));
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<ForgePipelineJob> Database::load_forge_pipeline_job(const std::string& forge_id) {
+    if (!impl_->db) return std::nullopt;
+    const char* sql = R"(
+        SELECT id, task_id, status, requirement_json,
+               writer_output_json, reviewer_verdict_json,
+               feedback, attempt, max_attempts,
+               last_code_path, created_at, updated_at
+        FROM forge_pipeline_jobs WHERE id = ?
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("[database] load_forge_pipeline_job prepare: {}", sqlite3_errmsg(impl_->db));
+        return std::nullopt;
+    }
+    sqlite3_bind_text(stmt, 1, forge_id.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<ForgePipelineJob> job;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        ForgePipelineJob fj;
+        fj.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt,0));
+        fj.task_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt,1));
+        fj.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt,2));
+        const char* rq = reinterpret_cast<const char*>(sqlite3_column_text(stmt,3));
+        if (rq) fj.requirement_json = rq;
+        const char* wo = reinterpret_cast<const char*>(sqlite3_column_text(stmt,4));
+        if (wo) fj.writer_output_json = wo;
+        const char* rv = reinterpret_cast<const char*>(sqlite3_column_text(stmt,5));
+        if (rv) fj.reviewer_verdict_json = rv;
+        const char* fb = reinterpret_cast<const char*>(sqlite3_column_text(stmt,6));
+        if (fb) fj.feedback = fb;
+        fj.attempt = sqlite3_column_int(stmt,7);
+        fj.max_attempts = sqlite3_column_int(stmt,8);
+        const char* lcp = reinterpret_cast<const char*>(sqlite3_column_text(stmt,9));
+        if (lcp) fj.last_code_path = lcp;
+        fj.created_at = std::to_string(sqlite3_column_int64(stmt,10));
+        fj.updated_at = std::to_string(sqlite3_column_int64(stmt,11));
+        job = std::move(fj);
+    }
+    sqlite3_finalize(stmt);
+    return job;
+}
+
+std::vector<ForgePipelineJob> Database::load_in_flight_forge_pipeline_jobs() {
+    std::vector<ForgePipelineJob> jobs;
+    if (!impl_->db) return jobs;
+    const char* sql = R"(
+        SELECT id, task_id, status, requirement_json,
+               writer_output_json, reviewer_verdict_json,
+               feedback, attempt, max_attempts,
+               last_code_path, created_at, updated_at
+        FROM forge_pipeline_jobs
+        WHERE status NOT IN ('promoted','rejected','human_review')
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("[database] load_in_flight_forge_pipeline_jobs prepare: {}", sqlite3_errmsg(impl_->db));
+        return jobs;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ForgePipelineJob fj;
+        fj.id = reinterpret_cast<const char*>(sqlite3_column_text(stmt,0));
+        fj.task_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt,1));
+        fj.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt,2));
+        const char* rq = reinterpret_cast<const char*>(sqlite3_column_text(stmt,3));
+        if (rq) fj.requirement_json = rq;
+        const char* wo = reinterpret_cast<const char*>(sqlite3_column_text(stmt,4));
+        if (wo) fj.writer_output_json = wo;
+        const char* rv = reinterpret_cast<const char*>(sqlite3_column_text(stmt,5));
+        if (rv) fj.reviewer_verdict_json = rv;
+        const char* fb = reinterpret_cast<const char*>(sqlite3_column_text(stmt,6));
+        if (fb) fj.feedback = fb;
+        fj.attempt = sqlite3_column_int(stmt,7);
+        fj.max_attempts = sqlite3_column_int(stmt,8);
+        const char* lcp = reinterpret_cast<const char*>(sqlite3_column_text(stmt,9));
+        if (lcp) fj.last_code_path = lcp;
+        fj.created_at = std::to_string(sqlite3_column_int64(stmt,10));
+        fj.updated_at = std::to_string(sqlite3_column_int64(stmt,11));
+        jobs.push_back(std::move(fj));
+    }
+    sqlite3_finalize(stmt);
+    return jobs;
 }
 
 } // namespace agentos

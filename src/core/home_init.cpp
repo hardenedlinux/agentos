@@ -1,6 +1,8 @@
 #include "agentos/home_init.h"
 #include <cstdlib>
 #include <fstream>
+#include <string>
+#include <vector>
 #include <spdlog/spdlog.h>
 
 namespace agentos {

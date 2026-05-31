@@ -28,7 +28,7 @@ struct Config {
     } sandbox;
 
     struct Database {
-        std::string path = "/var/lib/agentos/agentos.db";
+        std::string path = "";   // resolved at startup to ~/.agentos/agentos.db
     } database;
 
     struct Logging {

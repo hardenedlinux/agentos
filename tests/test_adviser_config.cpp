@@ -62,19 +62,19 @@ protected:
 
 TEST_F(AgentosHomeTest, UsesAgentosHomeEnv) {
     setenv("AGENTOS_HOME", "/custom/path", 1);
-    EXPECT_EQ(agentos_home().string(), "/custom/path");
+    EXPECT_EQ(agentos::agentos_home().string(), "/custom/path");
 }
 
 TEST_F(AgentosHomeTest, FallsBackToHomeDotAgentos) {
     unsetenv("AGENTOS_HOME");
     setenv("HOME", "/home/user", 1);
-    EXPECT_EQ(agentos_home().string(), "/home/user/.agentos");
+    EXPECT_EQ(agentos::agentos_home().string(), "/home/user/.agentos");
 }
 
 TEST_F(AgentosHomeTest, UsesTmpIfHomeUnset) {
     unsetenv("AGENTOS_HOME");
     unsetenv("HOME");
-    EXPECT_EQ(agentos_home().string(), "/tmp/.agentos");
+    EXPECT_EQ(agentos::agentos_home().string(), "/tmp/.agentos");
 }
 
 // ----------------------------------------------------------------------
@@ -101,7 +101,7 @@ protected:
 };
 
 TEST_F(HomeInitSeedingTest, CreatesAdviserDirectories) {
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     EXPECT_TRUE(std::filesystem::is_directory(path_under("advisers/planning")));
     EXPECT_TRUE(std::filesystem::is_directory(path_under("advisers/code-writer")));
     EXPECT_TRUE(std::filesystem::is_directory(path_under("advisers/code-reviewer")));
@@ -111,7 +111,7 @@ TEST_F(HomeInitSeedingTest, CreatesAdviserDirectories) {
 }
 
 TEST_F(HomeInitSeedingTest, SeedsPlanningManifest) {
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     auto manifest = path_under("advisers/planning/manifest.toml");
     ASSERT_TRUE(std::filesystem::exists(manifest));
     std::ifstream f(manifest);
@@ -123,7 +123,7 @@ TEST_F(HomeInitSeedingTest, SeedsPlanningManifest) {
 }
 
 TEST_F(HomeInitSeedingTest, SeedsCodeWriterSkill) {
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     auto skill = path_under("advisers/code-writer/skill.md");
     ASSERT_TRUE(std::filesystem::exists(skill));
     std::ifstream f(skill);
@@ -142,7 +142,7 @@ TEST_F(HomeInitSeedingTest, DoesNotOverwriteExistingFile) {
         std::ofstream out(manifest);
         out << "custom content\n";
     }
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     // Re‑read after seeding; existing content must be preserved
     std::ifstream f(manifest);
     ASSERT_TRUE(f.is_open());
@@ -155,7 +155,7 @@ TEST_F(HomeInitSeedingTest, SeedsGlobalConfigIfAbsent) {
     // Ensure global config does not exist yet
     auto cfg = root_ / "config.toml";
     ASSERT_FALSE(std::filesystem::exists(cfg));
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     ASSERT_TRUE(std::filesystem::exists(cfg));
     std::ifstream f(cfg);
     std::string content((std::istreambuf_iterator<char>(f)),
@@ -170,7 +170,7 @@ TEST_F(HomeInitSeedingTest, DoesNotOverwriteGlobalConfig) {
         std::ofstream out(cfg);
         out << "# custom global config\n";
     }
-    initialise_home(root_);
+    agentos::initialise_home(root_);
     std::ifstream f(cfg);
     std::string content((std::istreambuf_iterator<char>(f)),
                         std::istreambuf_iterator<char>());

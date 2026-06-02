@@ -113,7 +113,7 @@ namespace agentos
       out_adviser.id = ClientId(agent_id);
       out_adviser.name = name;
       out_adviser.version = version;
-      out_adviser.binary_path = binary_path;
+      out_adviser.skill_path = binary_path;
       out_adviser.domains = std::move (domains);
       return true;
     }

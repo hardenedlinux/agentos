@@ -1,6 +1,9 @@
 #include <string>
 #include <future>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <filesystem>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
@@ -9,6 +12,42 @@
 #include "agentos/types.h"
 
 namespace agentos::forge {
+
+namespace {
+
+// Read the skill prompt from the file specified by AGENTOS_ADVISER_SKILL_PATH,
+// or fall back to $AGENTOS_HOME/advisers/code-writer/skill.md.
+std::string read_skill_prompt() {
+    const char* skill_path_env = std::getenv("AGENTOS_ADVISER_SKILL_PATH");
+    std::filesystem::path skill_path;
+
+    if (skill_path_env && *skill_path_env) {
+        skill_path = skill_path_env;
+    } else {
+        const char* home_env = std::getenv("AGENTOS_HOME");
+        if (home_env && *home_env) {
+            skill_path = std::filesystem::path(home_env) / "advisers" / "code-writer" / "skill.md";
+        } else {
+            const char* home_dir = std::getenv("HOME");
+            if (home_dir && *home_dir) {
+                skill_path = std::filesystem::path(home_dir) / ".agentos" / "advisers" / "code-writer" / "skill.md";
+            } else {
+                // No HOME either – use a hard‑coded fallback (shouldn't happen in practice)
+                skill_path = "/tmp/.agentos/advisers/code-writer/skill.md";
+            }
+        }
+    }
+
+    std::ifstream ifs(skill_path);
+    if (!ifs.is_open()) {
+        return {}; // empty string signals error
+    }
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    return ss.str();
+}
+
+} // anonymous namespace
 
 std::string code_writer(const std::string& input_json) {
     // Parse input JSON
@@ -47,6 +86,19 @@ std::string code_writer(const std::string& input_json) {
         return buf.GetString();
     }
 
+    // Read the skill prompt (ADR-018)
+    std::string skill_prompt = read_skill_prompt();
+    if (skill_prompt.empty()) {
+        rapidjson::Document err;
+        err.SetObject();
+        err.AddMember("status", "error", err.GetAllocator());
+        err.AddMember("reason", "Could not read skill prompt file (AGENTOS_ADVISER_SKILL_PATH or default skill.md)", err.GetAllocator());
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+        err.Accept(w);
+        return buf.GetString();
+    }
+
     // Read LLM configuration from environment
     const char* base_url_env = std::getenv("AGENTOS_LLM_BASE_URL");
     const char* api_key_env  = std::getenv("AGENTOS_LLM_API_KEY");
@@ -76,9 +128,7 @@ std::string code_writer(const std::string& input_json) {
     llm_req.base_url = base_url;
     llm_req.api_key  = api_key;
     llm_req.model    = model;
-    llm_req.system_prompt = "You are a code writer. Write a " + language +
-                            " function that satisfies the following requirement. "
-                            "Return only the code, no explanation.";
+    llm_req.system_prompt = skill_prompt;
     llm_req.user_prompt = requirement;
     llm_req.max_tokens  = 2048;
     llm_req.api_path    = api_path;

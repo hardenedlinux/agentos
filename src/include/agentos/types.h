@@ -6,11 +6,11 @@
  * No dependencies on other agentos headers.
  */
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <string_view> // C++17
-#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -27,9 +27,9 @@ namespace agentos
 
   // Identity – StrongId phantom types (ADR‑010)
 
-  using ClientId   = StrongId<struct ClientTag>;
-  using TaskId     = StrongId<struct TaskTag>;
-  using JobId      = StrongId<struct JobTag>;
+  using ClientId = StrongId<struct ClientTag>;
+  using TaskId = StrongId<struct TaskTag>;
+  using JobId = StrongId<struct JobTag>;
   using ForgeJobId = StrongId<struct ForgeJobTag>;
 
   // Error handling (ADR‑010)
@@ -37,17 +37,21 @@ namespace agentos
   using Error = std::string;
 
   // Tag to disambiguate error constructor when T == Error
-  struct ErrorTag {};
+  struct ErrorTag
+  {
+  };
 
-  template<typename T>
-  struct Result {
-      T value;
-      Error error;
-      bool ok = false;
+  template <typename T> struct Result
+  {
+    T value;
+    Error error;
+    bool ok = false;
 
-      Result() : value{}, ok(false) {}
-      Result(T val) : value(std::move(val)), ok(true) {}
-      Result(Error err, ErrorTag) : value{}, error(std::move(err)), ok(false) {}
+    Result () : value{}, ok (false) {}
+    Result (T val) : value (std::move (val)), ok (true) {}
+    Result (Error err, ErrorTag) : value{}, error (std::move (err)), ok (false)
+    {
+    }
   };
 
   // Executor command schema
@@ -79,17 +83,18 @@ namespace agentos
   // Registered clients
 
   enum class ClientType
-  {
-    Adviser,
-    Executor
-  };
+    {
+      Adviser,
+      Executor
+    };
 
   struct RegisteredAdviser
   {
     ClientId id;
     std::string name;
     std::string version;
-    std::string binary_path; // path to the agent binary (from static catalog)
+    // ~/.agentos/advisers/<name>/
+    std::string skill_path;
     // Advisers declare which domains they can plan for (e.g. "research",
     // "coding")
     std::vector<std::string> domains;
@@ -168,15 +173,15 @@ namespace agentos
   // ADR-016: Worker run record
   struct WorkerRun
   {
-    std::string run_id;       // UUID
-    std::string worker_id;    // worker identifier
+    std::string run_id;    // UUID
+    std::string worker_id; // worker identifier
     int pid = 0;
     int64_t started_at = 0;
     int64_t ended_at = 0;
     int exit_code = -1;
-    std::string status;       // running | completed | failed | crashed
-    std::string layer_path;   // ~/.agentos/layers/runs/<run-id>/
-    std::string log_path;     // ~/.agentos/logs/runs/<run-id>/output.log
+    std::string status;     // running | completed | failed | crashed
+    std::string layer_path; // ~/.agentos/layers/runs/<run-id>/
+    std::string log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
   };
 
   // ADR-018: Adviser skill package manifest
@@ -192,8 +197,8 @@ namespace agentos
 
     struct Llm
     {
-      int         required_context_length = 0;
-      std::string preferred_capability;   // "code" | "reasoning" | "balanced"
+      int required_context_length = 0;
+      std::string preferred_capability; // "code" | "reasoning" | "balanced"
       std::string recommended_model;
       std::string recommended_base_url;
     } llm;

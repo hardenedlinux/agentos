@@ -213,12 +213,22 @@ TEST_F(ForgePipelineTest, CodeWriterOutput) {
 }
 
 TEST_F(ForgePipelineTest, CodeReviewerOutput) {
-    setenv("AGENTOS_LLM_API_KEY", "test-key", 1);
-    setenv("AGENTOS_LLM_BASE_URL", "http://localhost:1", 1);
-    setenv("AGENTOS_LLM_MODEL", "test-model", 1);
+    // Use DeepSeek API if the key is available; otherwise skip the test.
+    const char* deepseek_key = std::getenv("DEEPSEEK_API_KEY");
+    if (!deepseek_key || std::strlen(deepseek_key) == 0) {
+        GTEST_SKIP() << "DEEPSEEK_API_KEY not set – skipping real LLM test";
+    }
 
-    std::string out = agentos::forge::code_reviewer("{}");
+    // Set environment variables for DeepSeek
+    setenv("AGENTOS_LLM_API_KEY", deepseek_key, 1);
+    setenv("AGENTOS_LLM_BASE_URL", "https://api.deepseek.com", 1);
+    setenv("AGENTOS_LLM_MODEL", "deepseek-chat", 1);
 
+    // Provide a minimal but valid input (code field is required)
+    std::string input = R"({"task_id":"test","code":"def main(): pass","language":"python","requirement":"do nothing"})";
+    std::string out = agentos::forge::code_reviewer(input);
+
+    // Clean up environment
     unsetenv("AGENTOS_LLM_API_KEY");
     unsetenv("AGENTOS_LLM_BASE_URL");
     unsetenv("AGENTOS_LLM_MODEL");
@@ -227,7 +237,10 @@ TEST_F(ForgePipelineTest, CodeReviewerOutput) {
     doc.Parse(out.c_str());
     ASSERT_FALSE(doc.HasParseError());
     ASSERT_TRUE(doc.HasMember("status"));
-    EXPECT_STREQ(doc["status"].GetString(), "error");
+    // The LLM should return either "accept" or "reject"
+    std::string status = doc["status"].GetString();
+    EXPECT_TRUE(status == "accept" || status == "reject")
+        << "Expected status 'accept' or 'reject', got '" << status << "'";
 }
 
 // -----------------------------------------------------------------------

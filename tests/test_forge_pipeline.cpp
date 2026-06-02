@@ -213,13 +213,21 @@ TEST_F(ForgePipelineTest, CodeWriterOutput) {
 }
 
 TEST_F(ForgePipelineTest, CodeReviewerOutput) {
+    setenv("AGENTOS_LLM_API_KEY", "test-key", 1);
+    setenv("AGENTOS_LLM_BASE_URL", "http://localhost:1", 1);
+    setenv("AGENTOS_LLM_MODEL", "test-model", 1);
+
     std::string out = agentos::forge::code_reviewer("{}");
+
+    unsetenv("AGENTOS_LLM_API_KEY");
+    unsetenv("AGENTOS_LLM_BASE_URL");
+    unsetenv("AGENTOS_LLM_MODEL");
 
     rapidjson::Document doc;
     doc.Parse(out.c_str());
     ASSERT_FALSE(doc.HasParseError());
     ASSERT_TRUE(doc.HasMember("status"));
-    EXPECT_STREQ(doc["status"].GetString(), "accept");
+    EXPECT_STREQ(doc["status"].GetString(), "error");
 }
 
 // -----------------------------------------------------------------------

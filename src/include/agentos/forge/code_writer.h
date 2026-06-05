@@ -3,5 +3,5 @@
 
 namespace agentos::forge
 {
-  std::string code_reviewer (const std::string &input_json);
+  std::string code_writer (const std::string &input_json);
 } // namespace agentos::forge

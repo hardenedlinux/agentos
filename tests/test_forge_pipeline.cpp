@@ -7,15 +7,11 @@
 #include <rapidjson/document.h>
 
 #include "agentos/database/database.h"
+#include "agentos/forge/code_reviewer.h"
+#include "agentos/forge/code_writer.h"
 #include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
 #include "agentos/registry.h"
-
-namespace agentos::forge
-{
-  std::string code_writer (const std::string &input_json);
-  std::string code_reviewer (const std::string &input_json);
-} // namespace agentos::forge
 
 namespace fs = std::filesystem;
 
@@ -172,13 +168,13 @@ TEST_F (ForgePipelineTest, UpdateFeedback)
 TEST_F (ForgePipelineTest, LoadInFlight_ExcludesTerminalStates)
 {
   for (auto &[id, status] : std::vector<std::pair<std::string, std::string>>{
-      {"j-draft", "draft"},
-      {"j-reviewing", "reviewing"},
-      {"j-promoted", "promoted"}, // terminal
-    })
-    {
-      db_->store_forge_pipeline_job (make_job (id, status));
-    }
+         {"j-draft", "draft"},
+         {"j-reviewing", "reviewing"},
+         {"j-promoted", "promoted"}, // terminal
+       })
+  {
+    db_->store_forge_pipeline_job (make_job (id, status));
+  }
 
   auto in_flight = db_->load_in_flight_forge_pipeline_jobs ();
 
@@ -343,46 +339,208 @@ TEST_F (ForgeLlmTest, CodeWriterProducesValidJson)
     << "unexpected language: " << lang;
 }
 
-TEST_F (ForgeLlmTest, CodeReviewerReturnsValidVerdict)
+TEST_F (ForgeLlmTest, CodeReviewerAcceptsCorrectCode)
 {
+  // Guard: skip if API key not available (handled by ForgeLlmTest::SetUp)
+
+  // Arrange: write skill.md
   auto skill_path = home_ / "advisers/code-reviewer/skill.md";
-  std::ofstream (skill_path) << "You are a code reviewer. Output JSON only.\n";
+  std::ofstream (skill_path)
+    << "You are a code reviewer for AgentOS.\n"
+    "Review the submitted code for correctness against the requirement.\n"
+    "You MUST respond with a JSON object only, no markdown, no "
+    "explanation.\n"
+    "Schema: {\"status\": \"accept\" | \"reject\", \"reason\": "
+    "\"<string>\"}\n";
   setenv ("AGENTOS_ADVISER_SKILL_PATH", skill_path.c_str (), 1);
 
-  std::string input = R"({
-        "task_id": "llm-test-2",
-        "forge_job_id": "forge-llm-2",
-        "requirement": {
-            "description": "Return the sum of two integers a and b",
-            "input_schema":  {"a": "integer", "b": "integer"},
-            "output_schema": {"result": "integer"}
-        },
-        "writer_output": {
-            "task_id": "llm-test-2",
-            "understanding": "Sum two integers",
-            "language": "python",
-            "entry_point": "main",
-            "code": "def main(a, b):\n    return {\"result\": a + b}\n",
-            "capability": {"network": false, "fs_read": [], "fs_write": [], "exec": false},
-            "notes": ""
-        }
-    })";
+  // Arrange: create forge job directory so sandbox probe can write temp files
+  auto forge_dir = home_ / "forge/forge-llm-accept";
+  fs::create_directories (forge_dir);
 
+  // Arrange: correct, executable Python worker
+  // Reads JSON from stdin, writes JSON to stdout — matches input/output schema
+  std::string good_code
+    = "import json, sys\n"
+      "args = json.load(sys.stdin)\n"
+      "print(json.dumps({\"result\": args[\"a\"] + args[\"b\"]}))\n";
+
+  std::string input = R"({
+    "task_id":      "llm-accept-1",
+    "forge_job_id": "forge-llm-accept",
+    "requirement": {
+      "description":   "Return the integer sum of inputs a and b",
+      "input_schema":  {"a": "integer", "b": "integer"},
+      "output_schema": {"result": "integer"}
+    },
+    "writer_output": {
+      "task_id":      "llm-accept-1",
+      "understanding":"Read two integers from stdin JSON and return their sum as JSON",
+      "language":     "python",
+      "entry_point":  "main",
+      "code":         "import json, sys\nargs = json.load(sys.stdin)\nprint(json.dumps({\"result\": args[\"a\"] + args[\"b\"]}))\n",
+      "capability":   {"network": false, "fs_read": [], "fs_write": [], "exec": false},
+      "notes":        ""
+    }
+  })";
+
+  // Act
   std::string out = agentos::forge::code_reviewer (input);
 
+  // Assert: must be valid JSON
   rapidjson::Document doc;
   doc.Parse (out.c_str ());
   ASSERT_FALSE (doc.HasParseError ())
     << "code_reviewer returned invalid JSON: " << out;
 
-  ASSERT_TRUE (doc.HasMember ("task_id"));
-  ASSERT_TRUE (doc.HasMember ("status"));
-  ASSERT_TRUE (doc.HasMember ("reason"));
+  // Assert: required fields present with correct types
+  ASSERT_TRUE (doc.HasMember ("task_id")) << out;
+  ASSERT_TRUE (doc.HasMember ("status")) << out;
+  ASSERT_TRUE (doc.HasMember ("reason")) << out;
+  ASSERT_TRUE (doc["task_id"].IsString ());
+  ASSERT_TRUE (doc["status"].IsString ());
+  ASSERT_TRUE (doc["reason"].IsString ());
 
+  // Assert: task_id echoed correctly
+  EXPECT_STREQ (doc["task_id"].GetString (), "llm-accept-1");
+
+  // Assert: status is one of the two legal values
   std::string status = doc["status"].GetString ();
   EXPECT_TRUE (status == "accept" || status == "reject")
     << "unexpected status: " << status;
 
-  // reason must be non-empty regardless of verdict
+  // Assert: reason is non-empty regardless of verdict
   EXPECT_GT (std::strlen (doc["reason"].GetString ()), 0u);
+
+  // Assert: correct code + correct capability should be accepted
+  // This is a soft expectation — LLM may occasionally disagree, but
+  // this is the expected happy-path outcome
+  EXPECT_EQ (status, "accept") << "Expected accept for correct code; reason: "
+                               << doc["reason"].GetString ();
+}
+
+TEST_F (ForgeLlmTest, CodeReviewerRejectsWrongOutput)
+{
+  auto skill_path = home_ / "advisers/code-reviewer/skill.md";
+  std::ofstream (skill_path)
+    << "You are a code reviewer for AgentOS.\n"
+       "Review the submitted code for correctness against the requirement.\n"
+       "You MUST respond with a JSON object only, no markdown, no "
+       "explanation.\n"
+       "Schema: {\"status\": \"accept\" | \"reject\", \"reason\": "
+       "\"<string>\"}\n";
+  setenv ("AGENTOS_ADVISER_SKILL_PATH", skill_path.c_str (), 1);
+
+  auto forge_dir = home_ / "forge/forge-llm-reject";
+  fs::create_directories (forge_dir);
+
+  // Wrong code: returns difference instead of sum
+  std::string input = R"({
+    "task_id":      "llm-reject-1",
+    "forge_job_id": "forge-llm-reject",
+    "requirement": {
+      "description":   "Return the integer sum of inputs a and b",
+      "input_schema":  {"a": "integer", "b": "integer"},
+      "output_schema": {"result": "integer"}
+    },
+    "writer_output": {
+      "task_id":      "llm-reject-1",
+      "understanding":"Subtract b from a and return the result",
+      "language":     "python",
+      "entry_point":  "main",
+      "code":         "import json, sys\nargs = json.load(sys.stdin)\nprint(json.dumps({\"result\": args[\"a\"] - args[\"b\"]}))\n",
+      "capability":   {"network": false, "fs_read": [], "fs_write": [], "exec": false},
+      "notes":        ""
+    }
+  })";
+
+  std::string out = agentos::forge::code_reviewer (input);
+
+  rapidjson::Document doc;
+  doc.Parse (out.c_str ());
+  ASSERT_FALSE (doc.HasParseError ()) << out;
+  ASSERT_TRUE (doc.HasMember ("status")) << out;
+  ASSERT_TRUE (doc.HasMember ("reason")) << out;
+
+  // understanding says "subtract" but requirement says "sum" —
+  // Reviewer should catch this
+  EXPECT_STREQ (doc["status"].GetString (), "reject")
+    << "Expected reject for wrong logic; reason: "
+    << doc["reason"].GetString ();
+  EXPECT_GT (std::strlen (doc["reason"].GetString ()), 0u);
+}
+
+TEST_F (ForgeLlmTest, CodeReviewerRejectsPolicyViolation_NetworkTrue)
+{
+  // This test does NOT need an LLM call — Enforce Layer pre-check fires first
+  // Still lives in ForgeLlmTest for fixture convenience, but will run even
+  // without a real API key if we remove the skip guard... however since
+  // ForgeLlmTest::SetUp skips without a key we accept that limitation here.
+
+  auto skill_path = home_ / "advisers/code-reviewer/skill.md";
+  std::ofstream (skill_path) << "You are a code reviewer.\n";
+  setenv ("AGENTOS_ADVISER_SKILL_PATH", skill_path.c_str (), 1);
+
+  auto forge_dir = home_ / "forge/forge-llm-policy";
+  fs::create_directories (forge_dir);
+
+  // capability declares network: true — immediate terminal rejection
+  std::string input = R"({
+    "task_id":      "llm-policy-1",
+    "forge_job_id": "forge-llm-policy",
+    "requirement": {
+      "description":   "Fetch a URL and return the response body",
+      "input_schema":  {"url": "string"},
+      "output_schema": {"body": "string"}
+    },
+    "writer_output": {
+      "task_id":      "llm-policy-1",
+      "understanding":"Fetch URL over HTTP",
+      "language":     "python",
+      "entry_point":  "main",
+      "code":         "import json, sys, urllib.request\nargs = json.load(sys.stdin)\nprint(json.dumps({\"body\": urllib.request.urlopen(args[\"url\"]).read().decode()}))\n",
+      "capability":   {"network": true, "fs_read": [], "fs_write": [], "exec": false},
+      "notes":        ""
+    }
+  })";
+
+  std::string out = agentos::forge::code_reviewer (input);
+
+  rapidjson::Document doc;
+  doc.Parse (out.c_str ());
+  ASSERT_FALSE (doc.HasParseError ()) << out;
+  ASSERT_TRUE (doc.HasMember ("status")) << out;
+  ASSERT_TRUE (doc.HasMember ("reason")) << out;
+
+  // Enforce Layer must reject before any sandbox or LLM work
+  EXPECT_STREQ (doc["status"].GetString (), "reject") << out;
+  EXPECT_GT (std::strlen (doc["reason"].GetString ()), 0u);
+}
+
+TEST_F (ForgeLlmTest, CodeReviewerReturnsMissingFields_IsError)
+{
+  // Malformed input — missing writer_output entirely
+  // code_reviewer must return a parseable JSON error, not crash or return
+  // garbage
+
+  auto skill_path = home_ / "advisers/code-reviewer/skill.md";
+  std::ofstream (skill_path) << "You are a code reviewer.\n";
+  setenv ("AGENTOS_ADVISER_SKILL_PATH", skill_path.c_str (), 1);
+
+  std::string input = R"({
+    "task_id": "llm-bad-input",
+    "forge_job_id": "forge-llm-bad"
+  })";
+
+  std::string out = agentos::forge::code_reviewer (input);
+
+  // Must return valid JSON — never crash or return empty string
+  rapidjson::Document doc;
+  doc.Parse (out.c_str ());
+  ASSERT_FALSE (doc.HasParseError ())
+    << "code_reviewer must return valid JSON even on bad input; got: " << out;
+
+  // Either an error structure or a reject verdict — both acceptable,
+  // but it must be parseable and non-empty
+  EXPECT_FALSE (out.empty ());
 }

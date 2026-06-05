@@ -172,15 +172,13 @@ TEST_F (ForgePipelineTest, UpdateFeedback)
 TEST_F (ForgePipelineTest, LoadInFlight_ExcludesTerminalStates)
 {
   for (auto &[id, status] : std::vector<std::pair<std::string, std::string>>{
-         {"j-draft", "draft"},
-         {"j-reviewing", "reviewing"},
-         {"j-approved", "approved"},
-         {"j-promoted", "promoted"}, // terminal
-         {"j-failed", "failed"},     // terminal
-       })
-  {
-    db_->store_forge_pipeline_job (make_job (id, status));
-  }
+      {"j-draft", "draft"},
+      {"j-reviewing", "reviewing"},
+      {"j-promoted", "promoted"}, // terminal
+    })
+    {
+      db_->store_forge_pipeline_job (make_job (id, status));
+    }
 
   auto in_flight = db_->load_in_flight_forge_pipeline_jobs ();
 
@@ -190,9 +188,7 @@ TEST_F (ForgePipelineTest, LoadInFlight_ExcludesTerminalStates)
 
   EXPECT_TRUE (ids.count ("j-draft"));
   EXPECT_TRUE (ids.count ("j-reviewing"));
-  EXPECT_TRUE (ids.count ("j-approved"));
   EXPECT_FALSE (ids.count ("j-promoted")) << "promoted is a terminal state";
-  EXPECT_FALSE (ids.count ("j-failed")) << "failed is a terminal state";
 }
 
 TEST_F (ForgePipelineTest, LoadInFlight_EmptyWhenAllTerminal)

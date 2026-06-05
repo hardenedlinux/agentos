@@ -84,19 +84,19 @@ namespace agentos::forge
       std::string type = type_it->value.GetString();
 
       if (type == "string") {
-        mock.AddMember(rapidjson::Value(field_name, alloc).Move(),
+        mock.AddMember(rapidjson::Value(field_name.c_str(), alloc).Move(),
                        rapidjson::Value("").Move(), alloc);
       } else if (type == "int") {
-        mock.AddMember(rapidjson::Value(field_name, alloc).Move(),
+        mock.AddMember(rapidjson::Value(field_name.c_str(), alloc).Move(),
                        rapidjson::Value(0).Move(), alloc);
       } else if (type == "path") {
         // create a temp path under scratch_dir
         std::string tmp_path = scratch_dir + "/" + field_name + "_mock";
-        mock.AddMember(rapidjson::Value(field_name, alloc).Move(),
+        mock.AddMember(rapidjson::Value(field_name.c_str(), alloc).Move(),
                        rapidjson::Value(tmp_path.c_str(), alloc).Move(), alloc);
       } else {
         // fallback: empty string
-        mock.AddMember(rapidjson::Value(field_name, alloc).Move(),
+        mock.AddMember(rapidjson::Value(field_name.c_str(), alloc).Move(),
                        rapidjson::Value("").Move(), alloc);
       }
     }

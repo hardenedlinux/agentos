@@ -419,19 +419,17 @@ namespace agentos::forge
     req.system_prompt = system_prompt;
     req.user_prompt = user_prompt;
     req.max_tokens = max_tokens;
-    req.temperature = 0.0;
 
     // Enqueue request and wait for result
-    std::promise<LlmResponse> promise;
-    auto future = promise.get_future();
-
-    proxy.enqueue(req, [&promise](const LlmResponse &resp) {
-      promise.set_value(resp);
-    });
+    std::future<Result<LlmResponse>> future = proxy.enqueue(req);
 
     LlmResponse llm_resp;
     try {
-      llm_resp = future.get();
+      Result<LlmResponse> result = future.get();
+      if (!result.ok) {
+        return make_error("LLM call failed: " + result.error);
+      }
+      llm_resp = result.value;
     } catch (const std::exception &e) {
       return make_error("LLM call failed: " + std::string(e.what()));
     }

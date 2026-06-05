@@ -27,8 +27,7 @@ namespace agentos
     auto result = fut.get ();
     const auto elapsed = std::chrono::steady_clock::now () - t0;
     spdlog::debug (
-                   "[llm] model={} tokens={} elapsed={}ms", request.model,
-                   request.max_tokens,
+                   "[llm] model={} tokens={} elapsed={}ms", req.model, req.max_tokens,
                    std::chrono::duration_cast<std::chrono::milliseconds> (elapsed).count ());
     return result;
   }

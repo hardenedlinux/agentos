@@ -1,20 +1,21 @@
 set(AGENTOS_CORE_SOURCES
-  dispatcher/dispatcher.cpp
-  dispatcher/rpc.cpp
-  registry/registry.cpp
-  verifier/verifier.cpp
-  scheduler/scheduler.cpp
-  master/master.cpp
-  orchestrator/orchestrator.cpp
-  obs_bus/obs_bus.cpp
-  database/database.cpp
-  capability/capability.cpp
-  enforce_layer.cpp
-  mind_layer.cpp
-  sandbox/sandbox.cpp
-  llm/llm_client.cpp
-  config/config.cpp
-  home_init.cpp
+dispatcher/dispatcher.cpp
+dispatcher/rpc.cpp
+registry/registry.cpp
+verifier/verifier.cpp
+scheduler/scheduler.cpp
+master/master.cpp
+orchestrator/orchestrator.cpp
+obs_bus/obs_bus.cpp
+database/database.cpp
+capability/capability.cpp
+enforce_layer.cpp
+mind_layer.cpp
+sandbox/sandbox.cpp
+llm/llm_proxy.cpp
+llm/llm_client.cpp
+config/config.cpp
+home_init.cpp
 )
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
@@ -22,8 +23,8 @@ add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
 target_include_directories(sqlite3 SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
 
 target_compile_definitions(sqlite3 PRIVATE
-  SQLITE_OMIT_LOAD_EXTENSION
-  SQLITE_OMIT_COMPLETE
+SQLITE_OMIT_LOAD_EXTENSION
+SQLITE_OMIT_COMPLETE
 )
 
 set_source_files_properties(${SQLITE3_SRC_DIR}/sqlite3.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")

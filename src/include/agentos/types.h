@@ -83,10 +83,10 @@ namespace agentos
   // Registered clients
 
   enum class ClientType
-    {
-      Adviser,
-      Executor
-    };
+  {
+    Adviser,
+    Executor
+  };
 
   struct RegisteredAdviser
   {

@@ -1,143 +1,145 @@
-#include <string>
-#include <future>
-#include <cstdlib>
-#include <rapidjson/document.h>
-#include <rapidjson/writer.h>
-#include <rapidjson/stringbuffer.h>
-#include "agentos/llm_proxy.h"
-#include "agentos/llm_client.h"
-#include "agentos/types.h"
 #include "agentos/forge/code_reviewer.h"
+#include "agentos/error_utils.h"
+#include "agentos/llm_client.h"
+#include "agentos/llm_proxy.h"
+#include "agentos/types.h"
+#include <cstdlib>
+#include <future>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <string>
 
-namespace agentos::forge {
+namespace agentos::forge
+{
 
-std::string code_reviewer(const std::string& input_json) {
-    // Parse input JSON
-    rapidjson::Document input;
-    input.Parse(input_json.c_str());
-    if (input.HasParseError()) {
-        rapidjson::Document err;
-        err.SetObject();
-        err.AddMember("status", "error", err.GetAllocator());
-        err.AddMember("reason", "Failed to parse input JSON", err.GetAllocator());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        err.Accept(w);
-        return buf.GetString();
-    }
+  std::string code_reviewer (const std::string &input_json)
+  {
+    // TODO: Parse input JSON using rapidjson
+    // Expected structure per ADR-019:
+    // {
+    //   "task_id": "...",
+    //   "forge_job_id": "...",
+    //   "requirement": { "description": "...", "input_schema": {...},
+    //   "output_schema": {...} }, "writer_output": {
+    //     "code": "...",
+    //     "language": "python" | "guile",
+    //     "entry_point": "...",
+    //     "capability": { "network": bool, "fs_read": [...], "fs_write": [...],
+    //     "exec": bool }, "understanding": "..."
+    //   }
+    // }
+    // Extract: task_id, forge_job_id, requirement (as object), writer_output
+    // (as object) Extract from writer_output: code, language, capability block
+    // Return make_error(...) on any parse failure or missing mandatory field
 
-    // Extract fields
-    std::string task_id = input.HasMember("task_id") && input["task_id"].IsString()
-                              ? input["task_id"].GetString()
-                              : "unknown";
-    std::string code = input.HasMember("code") && input["code"].IsString()
-                           ? input["code"].GetString()
-                           : "";
-    std::string requirement = input.HasMember("requirement") && input["requirement"].IsString()
-                                  ? input["requirement"].GetString()
-                                  : "";
-    std::string language = input.HasMember("language") && input["language"].IsString()
-                               ? input["language"].GetString()
-                               : "python";
+    // TODO: ENFORCE LAYER PRE-CHECK (ADR-009 Layer B, ADR-019)
+    // Read capability block from writer_output
+    // If capability.network == true: return make_error("policy violation:
+    // network access declared") If capability.exec == true:    return
+    // make_error("policy violation: exec access declared") This check is
+    // deterministic and must run before sandbox and before LLM A policy
+    // violation here causes immediate terminal rejection (state = rejected, no
+    // retry)
 
-    if (code.empty()) {
-        rapidjson::Document err;
-        err.SetObject();
-        err.AddMember("status", "error", err.GetAllocator());
-        err.AddMember("reason", "Missing 'code' field", err.GetAllocator());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        err.Accept(w);
-        return buf.GetString();
-    }
+    // TODO: Write code to a temporary file under a scratch directory
+    // Use forge_job_id to construct a deterministic path, e.g.:
+    //   ~/.agentos/forge/<forge_job_id>/sandbox_probe.<ext>
+    // Extension: .py for python, .scm for guile
+    // Return make_error(...) on write failure
 
-    // Read LLM configuration from environment
-    const char* base_url_env = std::getenv("AGENTOS_LLM_BASE_URL");
-    const char* api_key_env  = std::getenv("AGENTOS_LLM_API_KEY");
-    const char* model_env    = std::getenv("AGENTOS_LLM_MODEL");
+    // TODO: Construct a synthetic mock input conforming to
+    // requirement.input_schema For each field in input_schema, generate a
+    // minimal valid value by type:
+    //   "string" -> ""
+    //   "int"    -> 0
+    //   "path"   -> a temp path under the scratch directory
+    // Write mock input to a temp JSON file in the scratch directory
+    // This is the input fed to the worker during sandbox execution
 
-    std::string base_url = base_url_env ? base_url_env : "https://api.anthropic.com";
-    std::string api_key  = api_key_env  ? api_key_env  : "";
-    std::string model    = model_env    ? model_env    : "claude-opus-4-5";
+    // TODO: SANDBOX EXECUTION (ADR-006, ADR-011, ADR-015, ADR-016)
+    // fork()
+    // In child process, apply sandbox stack in this order:
+    //   1. cgroup v2 limits (CPU / memory / PID) via libcgroup
+    //      Use Tier-1 defaults from config: memory_mb, cpu_weight, pid_limit
+    //   2. CLONE_NEWNS + CLONE_NEWUSER for mount namespace
+    //   3. Mount overlayfs: lower=host, upper=scratch dir; pivot_root into
+    //   merged view
+    //   4. CLONE_NEWNET (capability.network == false, which we already verified
+    //   above)
+    //   5. Landlock ruleset (ADR-015):
+    //      - allow read+write on scratch dir
+    //      - allow read on each path in capability.fs_read
+    //      - allow read+write on each path in capability.fs_write
+    //      - no TCP rules (network is false)
+    //   6. seccomp whitelist: read, write, open, close, mmap, exit, futex, brk,
+    //   stat
+    //      deny: execve (except the interpreter itself), socket, connect, bind,
+    //      fork, ptrace, mount, setuid Use SECCOMP_RET_ERRNO for denials so
+    //      behaviour is observable, not SECCOMP_RET_KILL (SECCOMP_RET_ERRNO
+    //      lets us detect what was attempted; KILL would lose that information)
+    //   7. libcap: drop all capabilities
+    //   8. exec the worker binary with mock input path as argument
+    //      stdout/stderr redirect to scratch dir output file
+    // In parent process:
+    //   waitpid() with timeout
+    //   If timeout exceeded: kill child, record status = "sandbox_timeout"
+    //   Capture exit code
+    // Return make_error(...) if sandbox setup itself fails (not if the worker
+    // fails)
 
-    if (api_key.empty()) {
-        rapidjson::Document err;
-        err.SetObject();
-        err.AddMember("status", "error", err.GetAllocator());
-        err.AddMember("reason", "AGENTOS_LLM_API_KEY environment variable not set", err.GetAllocator());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        err.Accept(w);
-        return buf.GetString();
-    }
+    // TODO: CAPABILITY HONESTY CHECK (ADR-019)
+    // Parse the seccomp audit log / ptrace record from sandbox execution
+    // Check for any of the following that were attempted but NOT declared:
+    //   - socket() / connect() / bind() syscalls -> undeclared network access
+    //   - open() / openat() paths outside declared fs_read + fs_write ->
+    //   undeclared fs access
+    //   - execve() beyond the initial interpreter -> undeclared exec
+    // If any undeclared access detected:
+    //   return reject verdict immediately with specific reason string
+    //   do NOT proceed to LLM review
+    // If exit_code != 0:
+    //   return reject verdict with "worker exited with code <N>"
+    //   do NOT proceed to LLM review
 
-    // Determine API path based on provider
-    bool is_anthropic = base_url.find("anthropic.com") != std::string::npos;
-    std::string api_path = is_anthropic ? "/v1/messages" : "/v1/chat/completions";
+    // TODO: Validate sandbox output conforms to requirement.output_schema
+    // Read the output file written by the worker during sandbox execution
+    // Parse as JSON
+    // For each field declared in output_schema, verify the field exists and
+    // type matches If validation fails: return reject verdict with specific
+    // field mismatch reason This is still a deterministic check; LLM is not
+    // involved
 
-    // Build LLM request
-    LlmRequest llm_req;
-    llm_req.base_url = base_url;
-    llm_req.api_key  = api_key;
-    llm_req.model    = model;
-    llm_req.system_prompt = "You are a code reviewer. Review the following " + language +
-                            " code for correctness, security, and style. "
-                            "Return a JSON object with fields 'status' (either 'accept' or 'reject'), "
-                            "'reason' (string), and 'suggestions' (string).";
-    llm_req.user_prompt = "Requirement: " + requirement + "\n\nCode:\n" + code;
-    llm_req.max_tokens  = 2048;
-    llm_req.api_path    = api_path;
+    // TODO: LLM REVIEW (functional correctness only — ADR-019)
+    // Only reached if all sandbox checks above passed
+    // Read system prompt from skill.md:
+    //   path = std::getenv("AGENTOS_ADVISER_SKILL_PATH")
+    //   read entire file as string
+    // Read LLM config from environment (ADR-018 AGENTOS_ADVISER_* prefix):
+    //   AGENTOS_ADVISER_BASE_URL
+    //   AGENTOS_ADVISER_API_KEY
+    //   AGENTOS_ADVISER_MODEL
+    //   AGENTOS_ADVISER_MAX_TOKENS
+    //   AGENTOS_ADVISER_TIMEOUT_S
+    // Return make_error(...) if API key is empty
+    // Build user prompt containing:
+    //   - requirement.description
+    //   - writer_output.understanding
+    //   - code
+    //   - sandbox execution summary (exit code, output produced, capability
+    //   check result)
+    // Instruct LLM to return JSON: { "status": "accept"|"reject", "reason":
+    // "..." } Use LlmProxy passed in as parameter (do NOT construct a static
+    // local LlmProxy) Call proxy.enqueue(req), block on future If LLM call
+    // fails: return make_error(...) Parse LLM response JSON; if malformed or
+    // missing "status": return make_error(...)
 
-    // Create a static proxy (initialised once)
-    static LlmProxy proxy(1, 30);
-
-    // Enqueue request and wait for result
-    auto fut = proxy.enqueue(llm_req);
-    auto result = fut.get();
-
-    if (!result.ok) {
-        rapidjson::Document err;
-        err.SetObject();
-        err.AddMember("status", "error", err.GetAllocator());
-        err.AddMember("reason", result.error.message, err.GetAllocator());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        err.Accept(w);
-        return buf.GetString();
-    }
-
-    std::string llm_output = result.value.content;
-
-    // Try to parse the LLM output as JSON; if it fails, wrap it in an error
-    rapidjson::Document llm_json;
-    llm_json.Parse(llm_output.c_str());
-    if (llm_json.HasParseError() || !llm_json.HasMember("status")) {
-        // Fallback: return the raw LLM output as a reason
-        rapidjson::Document out;
-        out.SetObject();
-        out.AddMember("status", "error", out.GetAllocator());
-        out.AddMember("reason", rapidjson::Value(llm_output.c_str(), out.GetAllocator()).Move(), out.GetAllocator());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        out.Accept(w);
-        return buf.GetString();
-    }
-
-    // Build output JSON with the same structure as the stub
-    rapidjson::Document out;
-    out.SetObject();
-    out.AddMember("status", rapidjson::Value(llm_json["status"].GetString(), out.GetAllocator()).Move(), out.GetAllocator());
-    out.AddMember("reason", rapidjson::Value(llm_json["reason"].GetString(), out.GetAllocator()).Move(), out.GetAllocator());
-    if (llm_json.HasMember("suggestions")) {
-        out.AddMember("suggestions", rapidjson::Value(llm_json["suggestions"].GetString(), out.GetAllocator()).Move(), out.GetAllocator());
-    } else {
-        out.AddMember("suggestions", "", out.GetAllocator());
-    }
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    out.Accept(w);
-    return buf.GetString();
-}
-
+    // TODO: Build and return final verdict JSON per ADR-019 output contract:
+    // {
+    //   "task_id": "...",
+    //   "status": "accept" | "reject",   // from LLM response
+    //   "reason": "..."                  // from LLM response
+    // }
+    // Use rapidjson to construct; return as serialised string
+  }
 } // namespace agentos::forge

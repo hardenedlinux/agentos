@@ -1,3 +1,4 @@
+#include "agentos/error_utils.h"
 #include "agentos/llm_client.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/types.h"
@@ -26,8 +27,8 @@ namespace agentos::forge
       std::filesystem::path skill_path;
 
       if (skill_path_env && *skill_path_env)
-      {
-        skill_path = skill_path_env;
+        {
+          skill_path = skill_path_env;
       }
       else
       {
@@ -73,15 +74,7 @@ namespace agentos::forge
     input.Parse (input_json.c_str ());
     if (input.HasParseError ())
     {
-      rapidjson::Document err;
-      err.SetObject ();
-      err.AddMember ("status", "error", err.GetAllocator ());
-      err.AddMember ("reason", "Failed to parse input JSON",
-                     err.GetAllocator ());
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      err.Accept (w);
-      return buf.GetString ();
+      return make_error ("Failed to parse input JSON");
     }
 
     // Extract fields
@@ -100,32 +93,15 @@ namespace agentos::forge
 
     if (requirement.empty ())
     {
-      rapidjson::Document err;
-      err.SetObject ();
-      err.AddMember ("status", "error", err.GetAllocator ());
-      err.AddMember ("reason", "Missing 'requirement' field",
-                     err.GetAllocator ());
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      err.Accept (w);
-      return buf.GetString ();
+      return make_error ("Missing 'requirement' field");
     }
 
     // Read the skill prompt (ADR-018)
     std::string skill_prompt = read_skill_prompt ();
     if (skill_prompt.empty ())
     {
-      rapidjson::Document err;
-      err.SetObject ();
-      err.AddMember ("status", "error", err.GetAllocator ());
-      err.AddMember ("reason",
-                     "Could not read skill prompt file "
-                     "(AGENTOS_ADVISER_SKILL_PATH or default skill.md)",
-                     err.GetAllocator ());
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      err.Accept (w);
-      return buf.GetString ();
+      return make_error ("Could not read skill prompt file "
+                         "(AGENTOS_ADVISER_SKILL_PATH or default skill.md)");
     }
 
     // Read LLM configuration from environment
@@ -140,16 +116,7 @@ namespace agentos::forge
 
     if (api_key.empty ())
     {
-      rapidjson::Document err;
-      err.SetObject ();
-      err.AddMember ("status", "error", err.GetAllocator ());
-      err.AddMember ("reason",
-                     "AGENTOS_LLM_API_KEY environment variable not set",
-                     err.GetAllocator ());
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      err.Accept (w);
-      return buf.GetString ();
+      return make_error ("AGENTOS_ADVISER_API_KEY not set");
     }
 
     // Determine API path based on provider
@@ -175,16 +142,9 @@ namespace agentos::forge
     auto result = fut.get ();
 
     if (!result.ok)
-      {
-        rapidjson::Document err;
-        err.SetObject ();
-        err.AddMember ("status", "error", err.GetAllocator ());
-        err.AddMember ("reason", result.errors.message, err.GetAllocator ());
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-        err.Accept (w);
-        return buf.GetString ();
-      }
+    {
+      return make_error (result.error);
+    }
 
     std::string code = result.value.content;
 

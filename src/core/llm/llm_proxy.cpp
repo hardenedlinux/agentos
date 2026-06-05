@@ -286,7 +286,7 @@ namespace agentos
         try
           {
             // Perform the actual call (blocking, with retries)
-            auto res = perform_call (item.request, timeout_s_);
+            auto res = agentos::perform_call (item.request, timeout_s_);
             item.promise.set_value (std::move (res));
           }
         catch (...)
@@ -294,5 +294,5 @@ namespace agentos
             item.promise.set_exception (std::current_exception ());
           }
       }
-
-  } // namespace agentos
+  }
+} // namespace agentos

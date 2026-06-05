@@ -18,3 +18,4 @@ coverage*
 tests/private
 deps-build/
 .ai.*
+*~

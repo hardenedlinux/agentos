@@ -16,9 +16,9 @@
  * It receives a validated Plan and a Dispatcher, and drives execution.
  */
 
-#include "agentos/types.h"
+#include "agentos/database/database.h" // ADR-019: Database for forge worker persistence
 #include "agentos/dispatcher.h"
-#include "agentos/database/database.h"  // ADR-019: Database for forge worker persistence
+#include "agentos/types.h"
 #include <functional>
 #include <unordered_map>
 
@@ -40,7 +40,7 @@ namespace agentos
   {
   public:
     explicit Scheduler (const Registry &registry, Dispatcher &dispatcher,
-                        const SchedulerConfig &config = {});
+                        const SchedulerConfig &config = {}, Database &db);
 
     // Execute a validated plan. Blocks until all steps complete or fail.
     // Returns per-step results on success; TaskResult.success=false on any
@@ -48,18 +48,20 @@ namespace agentos
     TaskResult run (const Plan &plan);
 
     // Validate capability declaration for a step (ADR-006 Layer 2)
-    bool validate_step_capabilities(const PlanStep &step);
+    bool validate_step_capabilities (const PlanStep &step);
 
     // ADR-019: provide a database reference for storing forge‑job results
-    static void set_database(Database &db);
+    static void set_database (Database &db);
 
   private:
     const Registry &registry_;
     Dispatcher &dispatcher_;
     SchedulerConfig config_;
+    Database &db_;
 
-    std::string interpolate_args (const std::string &args_template_json,
-                                  const StepResultMap &results) const;
+    std::string
+    interpolate_args (const std::unordered_map<std::string, std::string> &args,
+                      const StepResultMap &results) const;
   };
 
 } // namespace agentos

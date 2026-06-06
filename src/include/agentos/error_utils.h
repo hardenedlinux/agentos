@@ -6,8 +6,27 @@
 
 namespace agentos
 {
+  // ---------------------------------------------------------------
+  // Used by Enforce Layer and sandbox checks
+  // ---------------------------------------------------------------
+  static inline std::string make_reject_verdict (const std::string &task_id,
+                                                 const std::string &reason)
+  {
+    rapidjson::Document doc;
+    doc.SetObject ();
+    auto &alloc = doc.GetAllocator ();
+    doc.AddMember ("task_id",
+                   rapidjson::Value (task_id.c_str (), alloc).Move (), alloc);
+    doc.AddMember ("status", rapidjson::Value ("reject", alloc).Move (), alloc);
+    doc.AddMember ("reason", rapidjson::Value (reason.c_str (), alloc).Move (),
+                   alloc);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    doc.Accept (w);
+    return buf.GetString ();
+  }
 
-  inline std::string make_error (const std::string &reason)
+  static inline std::string make_error (const std::string &reason)
   {
     rapidjson::Document doc;
     doc.SetObject ();

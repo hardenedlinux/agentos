@@ -40,9 +40,9 @@ namespace agentos::forge
       return oss.str ();
     }
 
-    // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------
     // Helper: write string to file
-    // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------
     bool write_file (const std::string &path, const std::string &content)
     {
       std::ofstream ofs (path);
@@ -52,31 +52,10 @@ namespace agentos::forge
       return ofs.good ();
     }
 
-    // ---------------------------------------------------------------------------
-    // Helper: build a reject verdict (used by Enforce Layer and sandbox checks)
-    // ---------------------------------------------------------------------------
-    std::string make_reject_verdict (const std::string &task_id,
-                                     const std::string &reason)
-    {
-      rapidjson::Document doc;
-      doc.SetObject ();
-      auto &alloc = doc.GetAllocator ();
-      doc.AddMember ("task_id",
-                     rapidjson::Value (task_id.c_str (), alloc).Move (), alloc);
-      doc.AddMember ("status", rapidjson::Value ("reject", alloc).Move (),
-                     alloc);
-      doc.AddMember ("reason",
-                     rapidjson::Value (reason.c_str (), alloc).Move (), alloc);
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      doc.Accept (w);
-      return buf.GetString ();
-    }
-
-    // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------
     // Helper: generate mock input JSON from input_schema
     // Schema values are plain type-name strings: "integer", "string", "path"
-    // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------
     std::string generate_mock_input (const rapidjson::Value &schema,
                                      const std::string &scratch_dir)
     {
@@ -93,19 +72,19 @@ namespace agentos::forge
 
           if (type == "integer" || type == "int")
             {
-              mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
-                              rapidjson::Value (3).Move (), // avoid to use 0
-                              alloc);
-            }
-          else if (type == "path")
-            {
-              std::string tmp_path = scratch_dir + "/" + field_name + "_mock";
-              mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
-                              rapidjson::Value (tmp_path.c_str (), alloc).Move (),
-                              alloc);
-            }
-          else
-            {
+          mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
+                          rapidjson::Value (3).Move (), // avoid to use 0
+                          alloc);
+        }
+        else if (type == "path")
+        {
+          std::string tmp_path = scratch_dir + "/" + field_name + "_mock";
+          mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
+                          rapidjson::Value (tmp_path.c_str (), alloc).Move (),
+                          alloc);
+        }
+        else
+        {
           // "string" or any unrecognised type → empty string
           mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
                           rapidjson::Value ("").Move (), alloc);

@@ -112,10 +112,16 @@ namespace agentos
   // Sandbox tiers (ADR-006)
 
   enum class SandboxTier
-  {
-    Tier0, // pre‑approved catalog workers
-    Tier1  // generated workers
-  };
+    {
+      Tier0, // pre‑approved catalog workers
+      Tier1  // generated workers
+    };
+
+  enum class NetworkMode
+    {
+      Isolated,
+      PortRestricted
+    };
 
   // Capability declaration (ADR-006 Layer 2)
 
@@ -125,6 +131,7 @@ namespace agentos
     bool exec = false;
     std::vector<std::string> fs_read;
     std::vector<std::string> fs_write;
+    std::vector<int> tcp_connect_ports; // ADR-015
   };
 
   // Plan (produced by Adviser, validated by Verifier)
@@ -134,7 +141,7 @@ namespace agentos
     std::string id;      // e.g. "step_1"
     std::string command; // e.g. "web.search"
     std::unordered_map<std::string, std::string>
-      args;                              // key → value or "{{step_id.field}}"
+    args;                              // key → value or "{{step_id.field}}"
     std::vector<std::string> depends_on; // other step ids
     std::optional<CapabilityDeclaration> capabilities; // ADR-006 Layer 2
   };

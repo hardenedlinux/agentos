@@ -639,26 +639,26 @@ namespace agentos
     )";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-      {
-        spdlog::error (
-                       "[database] load_in_flight_forge_pipeline_jobs prepare: {}",
-                       sqlite3_errmsg (impl_->db));
-        return jobs;
-      }
+    {
+      spdlog::error (
+        "[database] load_in_flight_forge_pipeline_jobs prepare: {}",
+        sqlite3_errmsg (impl_->db));
+      return jobs;
+    }
     while (sqlite3_step (stmt) == SQLITE_ROW)
-      {
-        ForgePipelineJob fj;
-        fj.id = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0));
-        fj.task_id
-          = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1));
-        fj.status
-          = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2));
-        const char *rq
-          = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 3));
-        if (rq)
-          fj.requirement_json = rq;
-        const char *wo
-          = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 4));
+    {
+      ForgePipelineJob fj;
+      fj.id = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0));
+      fj.task_id
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1));
+      fj.status
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2));
+      const char *rq
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 3));
+      if (rq)
+        fj.requirement_json = rq;
+      const char *wo
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 4));
       if (wo)
         fj.writer_output_json = wo;
       const char *rv
@@ -681,6 +681,129 @@ namespace agentos
     }
     sqlite3_finalize (stmt);
     return jobs;
+  }
+
+  void Database::ensure_agent_tables ()
+  {
+    if (!impl_->db)
+      return;
+    const char *sql = R"(
+      CREATE TABLE IF NOT EXISTS agents (
+          id          TEXT PRIMARY KEY,
+          role        TEXT NOT NULL,
+          binary_path TEXT NOT NULL,
+          manifest    TEXT NOT NULL,
+          approved_by TEXT NOT NULL,
+          approved_at INTEGER NOT NULL,
+          enabled     INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS capabilities (
+          agent_id     TEXT NOT NULL REFERENCES agents(id),
+          method       TEXT NOT NULL,
+          description  TEXT NOT NULL,
+          input_schema TEXT NOT NULL,
+          cpu_weight   INTEGER,
+          memory_mb    INTEGER,
+          PRIMARY KEY (agent_id, method)
+      );
+  )";
+    char *err = nullptr;
+    if (sqlite3_exec (impl_->db, sql, nullptr, nullptr, &err) != SQLITE_OK)
+    {
+      spdlog::error ("[database] ensure_agent_tables: {}", err);
+      sqlite3_free (err);
+    }
+  }
+
+  std::vector<Database::AgentRow> Database::load_enabled_agents ()
+  {
+    if (!impl_->db)
+      return {};
+    const char *sql = R"(
+      SELECT id, role, binary_path, manifest
+      FROM agents WHERE enabled = 1
+  )";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    {
+      spdlog::error ("[database] load_enabled_agents prepare: {}",
+                     sqlite3_errmsg (impl_->db));
+      return {};
+    }
+    std::vector<AgentRow> rows;
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      AgentRow row;
+      row.id = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0));
+      row.role = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1));
+      row.binary_path
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2));
+      row.manifest
+        = reinterpret_cast<const char *> (sqlite3_column_text (stmt, 3));
+      rows.push_back (std::move (row));
+    }
+    sqlite3_finalize (stmt);
+    return rows;
+  }
+
+  void Database::insert_agent (const std::string &id, const std::string &role,
+                               const std::string &binary_path,
+                               const std::string &manifest)
+  {
+    if (!impl_->db)
+      return;
+    const char *sql = R"(
+      INSERT OR REPLACE INTO agents
+          (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+      VALUES (?, ?, ?, ?, 'forge', ?, 1)
+  )";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    {
+      spdlog::error ("[database] insert_agent prepare: {}",
+                     sqlite3_errmsg (impl_->db));
+      return;
+    }
+    const int64_t now
+      = std::chrono::system_clock::now ().time_since_epoch ().count ();
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, role.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, binary_path.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, manifest.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 5, now);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_agent step: {}",
+                     sqlite3_errmsg (impl_->db));
+    sqlite3_finalize (stmt);
+  }
+
+  void Database::insert_capability (const std::string &agent_id,
+                                    const std::string &method,
+                                    const std::string &description,
+                                    const std::string &input_schema)
+  {
+    if (!impl_->db)
+      return;
+    const char *sql = R"(
+      INSERT OR REPLACE INTO capabilities
+          (agent_id, method, description, input_schema)
+      VALUES (?, ?, ?, ?)
+  )";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+      {
+        spdlog::error ("[database] insert_capability prepare: {}",
+                       sqlite3_errmsg (impl_->db));
+        return;
+      }
+    sqlite3_bind_text (stmt, 1, agent_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, method.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, description.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, input_schema.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_capability step: {}",
+                     sqlite3_errmsg (impl_->db));
+    sqlite3_finalize (stmt);
   }
 
 } // namespace agentos

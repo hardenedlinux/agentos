@@ -9,34 +9,34 @@
  *   ✓ RapidJSON — JSON serialisation       (header-only)
  *
  * Architecture verified:
- *   Dispatcher → Registry → Verifier → Scheduler → Orchestrator
+ *   Database → Registry → Verifier → Scheduler → Orchestrator → Master
  */
 
 #include <iostream>
 #include <string>
 
-#include <rapidjson/document.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
-#include <rapidjson/rapidjson.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
-#include <zmq.hpp>
-#include <sqlite3.h>
 #include <httplib.h>
 #include <openssl/opensslv.h>
+#include <rapidjson/document.h>
+#include <rapidjson/rapidjson.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+#include <sqlite3.h>
+#include <zmq.hpp>
 
-#include "agentos/dispatcher.h"
-#include "agentos/obs_bus.h"
-#include "agentos/master.h"
-#include "agentos/registry.h"
 #include "agentos/database/database.h"
+#include "agentos/dispatcher.h"
+#include "agentos/llm_client.h"
+#include "agentos/llm_proxy.h"
+#include "agentos/master.h"
+#include "agentos/obs_bus.h"
+#include "agentos/registry.h"
 #include "agentos/scheduler.h"
 #include "agentos/types.h"
 #include "agentos/verifier.h"
 #include "agentos/version.h"
-#include "agentos/llm_client.h"
-#include "agentos/llm_proxy.h"
 
 static void print_banner ()
 {
@@ -123,10 +123,12 @@ static void verify_architecture ()
 
   agentos::Verifier verifier (registry);
 
-  agentos::Scheduler scheduler (registry, dispatcher);
+  agentos::SchedulerConfig config;
 
-  agentos::Master master (dispatcher, registry, verifier,
-                          scheduler, "/tmp/agentos_test.db");
+  agentos::Scheduler scheduler (registry, dispatcher, config, database);
+
+  agentos::Master master (dispatcher, registry, verifier, scheduler,
+                          "/tmp/agentos_test.db");
 
   spdlog::info ("Dispatcher    ✓");
   spdlog::info ("Registry      ✓");
@@ -138,7 +140,7 @@ static void verify_architecture ()
   // Verify the Verifier with a trivial plan (no commands registered = should
   // fail with helpful error)
   agentos::Plan plan;
-  plan.task_id = agentos::TaskId("test-task-001");
+  plan.task_id = agentos::TaskId ("test-task-001");
   plan.steps.push_back ({"step_1", "web.search", {{"query", "test"}}, {}});
 
   auto result = verifier.verify (plan);
@@ -147,9 +149,9 @@ static void verify_architecture ()
                 result.errors.empty () ? "none" : result.errors[0]);
 
   // Verify LlmClient can be instantiated (no actual HTTP call)
-  agentos::LlmProxy proxy(1, 120);
+  agentos::LlmProxy proxy (1, 120);
   agentos::Config::Llm llm_cfg;
-  agentos::LlmClient llm_client(proxy, llm_cfg);
+  agentos::LlmClient llm_client (proxy, llm_cfg);
   spdlog::info ("LlmClient    ✓");
 
   spdlog::info ("--- end architecture check ---");
@@ -167,7 +169,7 @@ static void help ()
   spdlog::info ("  Verifier     — plan validation against registered commands");
   spdlog::info ("  Scheduler    — topological execution, parallelism, retries");
   spdlog::info (
-                "  Master       — task lifecycle coordinator (adviser → core → worker)");
+    "  Master       — task lifecycle coordinator (adviser → core → worker)");
   spdlog::info ("  ObsBus       — structured logs, metrics, task events");
   spdlog::info ("  LlmClient    — HTTP client for LLM API calls (ADR-012)");
   spdlog::info ("");

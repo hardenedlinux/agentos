@@ -12,9 +12,9 @@
  * The Registry never touches the network. It is pure in-memory state.
  */
 
-#include <memory>
+#include "agentos/forge_pipeline_job.h" // ADR-019
 #include "agentos/types.h"
-#include "agentos/forge_pipeline_job.h"   // ADR-019
+#include <memory>
 #include <optional>
 
 namespace agentos
@@ -24,13 +24,13 @@ namespace agentos
   class Registry
   {
   public:
-    Registry ();
     explicit Registry (Database &db);
     ~Registry ();
 
     Registry (const Registry &) = delete;
     Registry &operator= (const Registry &) = delete;
 
+    // Move
     Registry (Registry &&other) noexcept;
     Registry &operator= (Registry &&other) noexcept;
 
@@ -70,6 +70,13 @@ namespace agentos
     void finalize_worker_promotion (const ForgePipelineJob &job,
                                     const std::string &worker_code,
                                     const std::string &capability_json);
+
+    // Find an adviser by its exact id
+    std::optional<RegisteredAdviser>
+    find_adviser_by_id (const std::string &id) const;
+
+    // List all registered advisers — used by Master for LLM-driven selection
+    std::vector<RegisteredAdviser> all_advisers () const;
 
   private:
     struct Impl;

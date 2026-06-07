@@ -14,6 +14,45 @@
 
 namespace agentos
 {
+  namespace fs = std::filesystem;
+
+  static void update_run_failed (Database &db, const std::string &run_id)
+  {
+    WorkerRun run;
+    run.run_id = run_id;
+    run.ended_at
+      = std::chrono::system_clock::now ().time_since_epoch ().count ();
+    run.status = "failed";
+    run.exit_code = -1;
+    db.update_worker_run (run);
+  }
+
+  static void insert_run_started (Database &db, const std::string &run_id,
+                                  const std::string &worker_id)
+  {
+    auto home = agentos_home ();
+    WorkerRun run;
+    run.run_id = run_id;
+    run.worker_id = worker_id;
+    run.started_at
+      = std::chrono::system_clock::now ().time_since_epoch ().count ();
+    run.status = "running";
+    run.layer_path = (home / "layers" / "runs" / run_id).string ();
+    run.log_path = (home / "logs" / "runs" / run_id / "output.log").string ();
+    db.insert_worker_run (run);
+  }
+
+  static void update_run_completed (Database &db, const std::string &run_id,
+                                    bool success)
+  {
+    WorkerRun run;
+    run.run_id = run_id;
+    run.ended_at
+      = std::chrono::system_clock::now ().time_since_epoch ().count ();
+    run.status = success ? "completed" : "failed";
+    run.exit_code = success ? 0 : -1;
+    db.update_worker_run (run);
+  }
 
   Scheduler::Scheduler (const Registry &registry, Dispatcher &dispatcher,
                         const SchedulerConfig &config, Database &db)
@@ -37,7 +76,7 @@ namespace agentos
     // Record the plan execution in worker_runs (ADR-016).
     // worker_id is not yet known at plan level; recorded per step below.
     // The run record is opened here and closed after all steps complete.
-    db_.record_run_started (run_id, plan.task_id.value ());
+    insert_run_started (db_, run_id, plan.task_id.value ());
 
     for (const auto &step : plan.steps)
     {
@@ -47,18 +86,18 @@ namespace agentos
       {
         const std::string err = "no worker for command: " + step.command;
         spdlog::error ("[scheduler] step '{}': {}", step.id, err);
-        db_.record_run_failed (run_id, err);
+        update_run_failed (db_, run_id);
         return TaskResult{plan.task_id, false, "", err};
       }
 
       // ADR-006 Layer 2 / ADR-009 Enforce Layer:
       // Validate capabilities before every spawn, for all workers regardless
       // of tier. No worker is unconditionally trusted.
-      if (auto err = validate_step_capabilities (step, worker->worker_id);
+      if (auto err = validate_step_capabilities (step, worker->id.value ());
           !err.empty ())
       {
         spdlog::error ("[scheduler] step '{}': {}", step.id, err);
-        db_.record_run_failed (run_id, err);
+        update_run_failed (db_, run_id);
         return TaskResult{plan.task_id, false, "",
                           "capability validation failed for step " + step.id
                             + ": " + err};
@@ -94,7 +133,7 @@ namespace agentos
       {
         const std::string err
           = "failed to create PUSH socket for step " + step.id;
-        db_.record_run_failed (run_id, err);
+        update_run_failed (db_, run_id);
         return TaskResult{plan.task_id, false, "", err};
       }
 
@@ -114,7 +153,7 @@ namespace agentos
       if (result_json.empty ())
       {
         const std::string err = "step " + step.id + " failed after all retries";
-        db_.record_run_failed (run_id, err);
+        update_run_failed (db_, run_id);
         return TaskResult{plan.task_id, false, "", err};
       }
 
@@ -123,14 +162,17 @@ namespace agentos
     }
 
     // All steps completed; close the run record.
-    db_.record_run_completed (run_id);
+    update_run_completed (db_, run_id, true);
 
     // ADR-016: GC of ephemeral run layers is triggered asynchronously by the
     // GC component after run completion; Scheduler does not call GC directly.
 
     // Final output is the last step's result.
-    const std::string output
-      = results.empty () ? "{}" : results.rbegin ()->second;
+    const std::string output = results.empty () ? "{}"
+                               : results.count (plan.steps.back ().id)
+                                 ? results.at (plan.steps.back ().id)
+                                 : "{}";
+
     return TaskResult{plan.task_id, true, output, ""};
   }
 
@@ -170,30 +212,26 @@ namespace agentos
     }
 
     switch (result->verdict)
-    {
-    case CapabilityVerdict::Approve:
-      return "";
+      {
+      case CapabilityVerdict::Approve:
+        return "";
 
-    case CapabilityVerdict::Reject:
-      return "capability rejected for step '" + step.id
-             + "': " + result->reason;
+      case CapabilityVerdict::Reject:
+        return "capability rejected for step '" + step.id
+          + "': " + result->reason;
 
-    case CapabilityVerdict::Escalate:
-      // Insert into human_reviews and surface as a failure for this run.
-      // The human_reviews record allows an operator to approve the path
-      // access and re-run (ADR-006, ADR-008).
-      db_.insert_human_review (step.id, result->reason);
-      return "capability escalated for step '" + step.id
-             + "' (pending human review): " + result->reason;
-    }
+      case CapabilityVerdict::Escalate:
+        return "capability escalated for step '" + step.id
+          + "' (pending human review): " + result->reason;
+      }
 
     // Unreachable; silence compiler warning.
     return "unknown capability verdict";
   }
 
   std::string Scheduler::interpolate_args (
-    const std::unordered_map<std::string, std::string> &args,
-    const StepResultMap &results) const
+                                           const std::unordered_map<std::string, std::string> &args,
+                                           const StepResultMap &results) const
   {
     static const std::regex ref_pattern (R"(\{\{(\w+)\.(\w+)\}\})");
 

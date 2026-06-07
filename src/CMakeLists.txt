@@ -6,15 +6,19 @@ add_subdirectory(core/forge)
 
 add_executable(agentos cli/main.cpp)
 target_link_libraries(agentos PRIVATE agentos_core agentos_forge ${SECCOMP_LIB} ${CAP_LIB})
+
 target_include_directories(agentos PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/include
-  ${HTTPLIB_INC}
-  ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
-  ${RAPIDJSON_INC}
+  ${DEPS_INSTALL_DIR}/include
+)
+
+target_include_directories(agentos SYSTEM PRIVATE
   ${SPDLOG_INC}
+  ${RAPIDJSON_INC}
+  ${HTTPLIB_INC}
   ${CPPZMQ_INC}
   ${TOMLPLUSPLUS_INC}
 )
+
 add_dependencies(agentos httplib_ext rapidjson_ext spdlog_ext cppzmq_ext)
 
 if(AGENTOS_COVERAGE)

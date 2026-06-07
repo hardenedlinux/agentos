@@ -40,7 +40,7 @@ namespace agentos
   {
   public:
     explicit Scheduler (const Registry &registry, Dispatcher &dispatcher,
-                        const SchedulerConfig &config = {}, Database &db);
+                        const SchedulerConfig &config, Database &db);
 
     // Execute a validated plan. Blocks until all steps complete or fail.
     // Returns per-step results on success; TaskResult.success=false on any
@@ -48,7 +48,8 @@ namespace agentos
     TaskResult run (const Plan &plan);
 
     // Validate capability declaration for a step (ADR-006 Layer 2)
-    bool validate_step_capabilities (const PlanStep &step);
+    std::string validate_step_capabilities (const PlanStep &step,
+                                            const std::string &worker_id);
 
     // ADR-019: provide a database reference for storing forge‑job results
     static void set_database (Database &db);

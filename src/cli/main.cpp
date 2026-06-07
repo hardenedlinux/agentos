@@ -28,6 +28,7 @@
 
 #include "agentos/database/database.h"
 #include "agentos/dispatcher.h"
+#include "agentos/home_init.h"
 #include "agentos/llm_client.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/master.h"
@@ -114,45 +115,59 @@ static void verify_architecture ()
 {
   spdlog::info ("--- architecture check ---");
 
-  // Instantiate all subsystems and verify they wire together
-  agentos::Dispatcher dispatcher ("/run/agentos");
-  agentos::Database database ("/tmp/agentos_test.db");
-  database.open ();
-  agentos::Registry registry (database);
-  agentos::ObsBus obs;
+  // Database — single instance, owned here, injected everywhere
+  agentos::Database database (
+    (agentos::agentos_home () / "agentos_test.db").string ());
+  if (!database.open ())
+  {
+    spdlog::error ("failed to open database");
+    return;
+  }
 
+  // Registry — loads static catalog from DB at construction
+  agentos::Registry registry (database);
+
+  // Verifier — stateless, depends only on Registry
   agentos::Verifier verifier (registry);
 
-  agentos::SchedulerConfig config;
+  // Dispatcher
+  agentos::Dispatcher dispatcher ((agentos::agentos_home () / "run").string ());
 
+  // Scheduler
+  agentos::SchedulerConfig config;
   agentos::Scheduler scheduler (registry, dispatcher, config, database);
 
-  agentos::Master master (dispatcher, registry, verifier, scheduler,
-                          "/tmp/agentos_test.db");
+  // Orchestrator — execution arm, DB injected
+  agentos::Orchestrator orchestrator (registry, verifier, scheduler, dispatcher,
+                                      database);
+  orchestrator.resume_in_flight ();
 
-  spdlog::info ("Dispatcher    ✓");
+  // LLM
+  agentos::LlmProxy proxy (1, 120);
+  agentos::Config::Llm llm_cfg;
+  agentos::LlmClient llm_client (proxy, llm_cfg);
+
+  // Master — mind layer, delegates execution to Orchestrator
+  agentos::Master master (llm_client, orchestrator, registry);
+
+  spdlog::info ("Database      ✓");
   spdlog::info ("Registry      ✓");
   spdlog::info ("Verifier      ✓");
+  spdlog::info ("Dispatcher    ✓");
   spdlog::info ("Scheduler     ✓");
+  spdlog::info ("Orchestrator  ✓");
+  spdlog::info ("LlmClient     ✓");
   spdlog::info ("Master        ✓");
-  spdlog::info ("ObsBus        ✓");
 
-  // Verify the Verifier with a trivial plan (no commands registered = should
-  // fail with helpful error)
+  // Verify the Verifier with a trivial plan
   agentos::Plan plan;
   plan.task_id = agentos::TaskId ("test-task-001");
-  plan.steps.push_back ({"step_1", "web.search", {{"query", "test"}}, {}});
-
+  plan.steps.push_back (
+    {"step_1", "web.search", {{"query", "test"}}, {}, std::nullopt});
   auto result = verifier.verify (plan);
   spdlog::info ("Verifier rejects unknown command: {} (errors: {})",
                 result.ok ? "UNEXPECTED PASS" : "correctly rejected",
                 result.errors.empty () ? "none" : result.errors[0]);
-
-  // Verify LlmClient can be instantiated (no actual HTTP call)
-  agentos::LlmProxy proxy (1, 120);
-  agentos::Config::Llm llm_cfg;
-  agentos::LlmClient llm_client (proxy, llm_cfg);
-  spdlog::info ("LlmClient    ✓");
 
   spdlog::info ("--- end architecture check ---");
 }

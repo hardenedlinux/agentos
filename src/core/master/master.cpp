@@ -78,7 +78,7 @@ namespace agentos
 
     // If there is only one adviser, skip the LLM call.
     if (advisers.size () == 1)
-      return advisers.front ().id;
+      return advisers.front ().id.value ();
 
     const std::string system_prompt = build_selection_prompt (task);
 
@@ -117,27 +117,30 @@ namespace agentos
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
     w.StartArray ();
     for (const auto &a : advisers)
-    {
-      w.StartObject ();
-      w.Key ("id");
-      w.String (a.id.c_str ());
-      w.Key ("name");
-      w.String (a.name.c_str ());
-      w.Key ("description");
-      w.String (a.description.c_str ());
-      w.EndObject ();
-    }
+      {
+        w.StartObject ();
+        w.Key ("id");
+        w.String (a.id.c_str ());
+        w.Key ("name");
+        w.String (a.name.c_str ());
+        w.Key ("domains");
+        w.StartArray ();
+        for (const auto &d : a.domains)
+          w.String (d.c_str ());
+        w.EndArray ();
+        w.EndObject ();
+      }
     w.EndArray ();
 
     return std::string (
-             "You are the Master of an agent orchestration system. "
-             "Given a task goal and a list of available advisers, select the "
-             "most appropriate adviser to plan the task. "
-             "Respond with a JSON object containing only the field "
-             "'adviser_id' "
-             "with the id of the chosen adviser. "
-             "Available advisers: ")
-           + buf.GetString ();
+                        "You are the Master of an agent orchestration system. "
+                        "Given a task goal and a list of available advisers, select the "
+                        "most appropriate adviser to plan the task. "
+                        "Respond with a JSON object containing only the field "
+                        "'adviser_id' "
+                        "with the id of the chosen adviser. "
+                        "Available advisers: ")
+      + buf.GetString ();
   }
 
   // -----------------------------------------------------------------------------
@@ -212,15 +215,15 @@ namespace agentos
     w.EndObject ();
 
     return std::string (
-                        "You are the Master of an agent orchestration system reviewing a "
-                        "plan produced by an Adviser. "
-                        "The plan must correctly address the task goal using only the "
-                        "declared steps and their dependencies. "
-                        "Respond with a JSON object: "
-                        "{ \"approved\": true } if the plan is sound, or "
-                        "{ \"approved\": false, \"reason\": \"...\" } if it is not. "
-                        "Task and plan: ")
-      + buf.GetString ();
+             "You are the Master of an agent orchestration system reviewing a "
+             "plan produced by an Adviser. "
+             "The plan must correctly address the task goal using only the "
+             "declared steps and their dependencies. "
+             "Respond with a JSON object: "
+             "{ \"approved\": true } if the plan is sound, or "
+             "{ \"approved\": false, \"reason\": \"...\" } if it is not. "
+             "Task and plan: ")
+           + buf.GetString ();
   }
 
 } // namespace agentos

@@ -34,9 +34,6 @@ namespace agentos
     Registry (Registry &&other) noexcept;
     Registry &operator= (Registry &&other) noexcept;
 
-    // Load static catalog from SQLite database (ADR-007)
-    void load_from_db (Database &db);
-
     // Runtime registration is deprecated; these are no-ops.
     void register_adviser (const RegisteredAdviser &agent);
     void register_worker (const RegisteredExecutor &worker);
@@ -69,7 +66,8 @@ namespace agentos
     // ADR-019: register a worker after forge pipeline reaches Promoted
     void finalize_worker_promotion (const ForgePipelineJob &job,
                                     const std::string &worker_code,
-                                    const std::string &capability_json);
+                                    const std::string &capability_json,
+                                    Database &db);
 
     // Find an adviser by its exact id
     std::optional<RegisteredAdviser>

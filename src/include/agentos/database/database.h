@@ -11,7 +11,6 @@
 
 namespace agentos
 {
-
   class Database
   {
   public:
@@ -46,6 +45,16 @@ namespace agentos
       TaskId job_id;
       std::string plan_json;
     };
+
+    // Registry catalog support
+    struct AgentRow
+    {
+      std::string id;
+      std::string role;
+      std::string binary_path;
+      std::string manifest;
+    };
+
     std::vector<InFlightJob> resume_in_flight ();
 
     // ADR-016: Worker run management
@@ -72,18 +81,16 @@ namespace agentos
                             const std::string &description,
                             const std::string &input_schema);
 
+    void update_forge_pipeline_job_status (const std::string &forge_id,
+                                           const std::string &status);
+
+    void insert_human_review (const std::string &id, const std::string &reason,
+                              const std::string &artifacts,
+                              const std::string &forge_id);
+
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-  };
-
-  // Registry catalog support
-  struct AgentRow
-  {
-    std::string id;
-    std::string role;
-    std::string binary_path;
-    std::string manifest;
   };
 
 } // namespace agentos

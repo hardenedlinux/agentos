@@ -791,11 +791,11 @@ namespace agentos
   )";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-      {
-        spdlog::error ("[database] insert_capability prepare: {}",
-                       sqlite3_errmsg (impl_->db));
-        return;
-      }
+    {
+      spdlog::error ("[database] insert_capability prepare: {}",
+                     sqlite3_errmsg (impl_->db));
+      return;
+    }
     sqlite3_bind_text (stmt, 1, agent_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, method.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, description.c_str (), -1, SQLITE_TRANSIENT);
@@ -806,4 +806,57 @@ namespace agentos
     sqlite3_finalize (stmt);
   }
 
+  void Database::update_forge_pipeline_job_status (const std::string &forge_id,
+                                                   const std::string &status)
+  {
+    if (!impl_->db)
+      return;
+    const char *sql
+      = "UPDATE forge_pipeline_jobs SET status=?, updated_at=? WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    {
+      spdlog::error ("[database] update_forge_pipeline_job_status prepare: {}",
+                     sqlite3_errmsg (impl_->db));
+      return;
+    }
+    const int64_t now
+      = std::chrono::system_clock::now ().time_since_epoch ().count ();
+    sqlite3_bind_text (stmt, 1, status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now);
+    sqlite3_bind_text (stmt, 3, forge_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_forge_pipeline_job_status step: {}",
+                     sqlite3_errmsg (impl_->db));
+    sqlite3_finalize (stmt);
+  }
+
+  void Database::insert_human_review (const std::string &id,
+                                      const std::string &reason,
+                                      const std::string &artifacts,
+                                      const std::string &forge_id)
+  {
+    if (!impl_->db)
+      return;
+    const char *sql = R"(
+      INSERT INTO human_reviews (id, forge_id, reason, artifacts, status)
+      VALUES (?, ?, ?, ?, 'pending')
+  )";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2 (impl_->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+      {
+        spdlog::error ("[database] insert_human_review prepare: {}",
+                       sqlite3_errmsg (impl_->db));
+        return;
+      }
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, forge_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, reason.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, artifacts.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_human_review step: {}",
+                     sqlite3_errmsg (impl_->db));
+    sqlite3_finalize (stmt);
+  }
 } // namespace agentos

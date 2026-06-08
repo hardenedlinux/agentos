@@ -10,6 +10,7 @@
 # Usage:
 #   ./scripts/build.sh                  # Release, static libstdc++
 #   ./scripts/build.sh --debug          # Debug build
+#   ./scripts/build.sh --asan           # Debug + AddressSanitizer (no static)
 #   ./scripts/build.sh --musl           # Fully static (requires musl-tools)
 #   ./scripts/build.sh --tests          # Build and run unit tests
 #   ./scripts/build.sh --no-tests       # Skip unit tests (default)
@@ -33,12 +34,14 @@ BUILD_TESTS=OFF
 DEPS_ONLY=false
 CLEAN=false
 CLEAN_ALL=false
+USE_ASAN=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 AGENTOS_COVERAGE=OFF
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --debug)     BUILD_TYPE="Debug"  ;;
+    --asan)      USE_ASAN=true; BUILD_TYPE="Debug" ;;
     --musl)      USE_MUSL=ON         ;;
     --tests)     BUILD_TESTS=ON      ;;
     --no-tests)  BUILD_TESTS=OFF     ;;
@@ -51,6 +54,12 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# ASAN and static linking are incompatible
+if $USE_ASAN; then
+  BUILD_DIR="$ROOT_DIR/build-asan"
+  echo "→ ASAN mode: build dir is $BUILD_DIR, static linking disabled"
+fi
 
 if $CLEAN_ALL; then
   echo "→ Cleaning $BUILD_DIR and $DEPS_BUILD_DIR"
@@ -73,10 +82,11 @@ mkdir -p "$BUILD_DIR"
 #   spdlog, libzmq, libseccomp, libcap, openssl
 #
 # Deps managed by ExternalProject (header-only, no .a):
-#   httplib, rapidjson, cppzmq, sqlite3_amalgamation
+#   httplib, rapidjson, cppzmq
 #
-# Deps managed by file(DOWNLOAD) (single file, no stamp):
-#   tomlplusplus → deps-src/downloads/toml.hpp
+# Deps managed by file(DOWNLOAD) at configure time:
+#   sqlite3_amalgamation → deps-src/sqlite3_amalgamation-src/sqlite3.c
+#   tomlplusplus         → deps-src/downloads/toml.hpp
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Stamp check for ExternalProject deps
@@ -100,9 +110,9 @@ if $deps_stamp_ok; then
   done
 fi
 
-# SQLite amalgamation (header-only, ExternalProject)
+# SQLite amalgamation (downloaded at configure time — check source file)
 if $deps_stamp_ok; then
-  if [ ! -f "$DEPS_BUILD_DIR/stamps/sqlite3/sqlite3_amalgamation_ext-download" ]; then
+  if [ ! -f "$ROOT_DIR/deps-src/sqlite3_amalgamation-src/sqlite3.c" ]; then
     deps_stamp_ok=false
   fi
 fi
@@ -159,15 +169,34 @@ elif [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
   needs_configure=true
 fi
 
+# ASAN mode always needs its own configure (different build dir + flags)
+if $USE_ASAN && [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
+  needs_configure=true
+fi
+
 if $needs_configure; then
-  echo "→ Configuring superbuild ($BUILD_TYPE, musl=$USE_MUSL, tests=$BUILD_TESTS)"
-  cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"            \
-    -DAGENTOS_MUSL="$USE_MUSL"                  \
-    -DAGENTOS_BUILD_TESTS="$BUILD_TESTS"        \
-    -DAGENTOS_STATIC=ON                         \
-    -DAGENTOS_STRIP=ON                          \
-    -DAGENTOS_COVERAGE="$AGENTOS_COVERAGE"
+  if $USE_ASAN; then
+    echo "→ Configuring ASAN build (Debug, tests=$BUILD_TESTS)"
+    cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Debug                          \
+      -DAGENTOS_MUSL=OFF                                \
+      -DAGENTOS_BUILD_TESTS="$BUILD_TESTS"              \
+      -DAGENTOS_STATIC=OFF                              \
+      -DAGENTOS_STRIP=OFF                               \
+      -DAGENTOS_COVERAGE=OFF                            \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+      -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer"   \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+  else
+    echo "→ Configuring superbuild ($BUILD_TYPE, musl=$USE_MUSL, tests=$BUILD_TESTS)"
+    cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
+      -DCMAKE_BUILD_TYPE="$BUILD_TYPE"            \
+      -DAGENTOS_MUSL="$USE_MUSL"                  \
+      -DAGENTOS_BUILD_TESTS="$BUILD_TESTS"        \
+      -DAGENTOS_STATIC=ON                         \
+      -DAGENTOS_STRIP=ON                          \
+      -DAGENTOS_COVERAGE="$AGENTOS_COVERAGE"
+  fi
 else
   echo "→ Dependencies already built and build tree intact, skipping configure"
 fi
@@ -185,13 +214,11 @@ fi
 if [ -n "${TARGET:-}" ]; then
   echo "→ Building target '$TARGET' ($JOBS jobs)"
   cmake --build "$BUILD_DIR" --target "$TARGET" --parallel "$JOBS"
-elif $deps_built; then
+elif $deps_built && ! $USE_ASAN; then
   echo "→ Building agentos core only ($JOBS jobs)"
   cmake --build "$BUILD_DIR" --target agentos --parallel "$JOBS"
 else
   echo "→ Building all ($JOBS jobs)"
-  echo "  Step 1/2: deps  (downloaded + built once, cached in deps-build/ after)"
-  echo "  Step 2/2: agentos core"
   cmake --build "$BUILD_DIR" --parallel "$JOBS"
 fi
 
@@ -207,18 +234,27 @@ if [ -f "$BINARY" ]; then
   echo "─────────────────────────────────────────────────────────────"
 
   if command -v ldd &>/dev/null; then
-      echo " ldd output:"
-      ldd "$BINARY" 2>&1 | sed 's/^/   /'
+    echo " ldd output:"
+    ldd "$BINARY" 2>&1 | sed 's/^/   /'
   fi
   echo "─────────────────────────────────────────────────────────────"
 
-  echo ""
-  echo "→ Running binary:"
-  "$BINARY"
+  if ! $USE_ASAN; then
+    echo ""
+    echo "→ Running binary:"
+    "$BINARY"
+  fi
 else
     echo " (binary not found – skipping size/ldd/run)"
 fi
 echo "─────────────────────────────────────────────────────────────"
 
 echo ""
-echo "✓ Build complete. Binary at: $BINARY"
+if $USE_ASAN; then
+    echo "✓ ASAN build complete."
+    echo "  Run tests with:"
+    echo "  ASAN_OPTIONS=halt_on_error=0 DEEPSEEK_API_KEY=xxx \\"
+    echo "    $BUILD_DIR/tests/<test_binary> --gtest_filter=\"...\""
+else
+    echo "✓ Build complete. Binary at: $BINARY"
+fi

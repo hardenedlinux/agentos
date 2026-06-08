@@ -71,7 +71,7 @@ namespace agentos::forge
   // ---------------------------------------------------------------------------
   // code_writer — main entry point
   // ---------------------------------------------------------------------------
-  std::string code_writer (const std::string &input_json)
+  std::string code_writer (const std::string &input_json, LlmProxy &proxy)
   {
     // ── 1. Parse input
     // ──────────────────────────────────────────────────────── Expected
@@ -197,9 +197,9 @@ namespace agentos::forge
          "The capability block must accurately reflect what the code actually "
          "does.\n"
          "bash is forbidden. Only python or guile are allowed.\n"
-         "network and exec must be false unless the requirement explicitly "
-         "demands "
-         "them (they will be rejected if true).";
+      "network and exec must be false unless the requirement explicitly "
+      "demands "
+      "them (they will be rejected if true).";
 
     // ── 5. Call LLM
     // ───────────────────────────────────────────────────────────
@@ -212,19 +212,18 @@ namespace agentos::forge
     llm_req.max_tokens = max_tokens;
     llm_req.api_path = api_path;
 
-    LlmProxy proxy (1, llm_timeout);
     auto fut = proxy.enqueue (llm_req);
 
     Result<LlmResponse> llm_result;
     try
-    {
-      llm_result = fut.get ();
-    }
+      {
+        llm_result = fut.get ();
+      }
     catch (const std::exception &e)
-    {
-      return make_error ("LLM call threw exception: "
-                         + std::string (e.what ()));
-    }
+      {
+        return make_error ("LLM call threw exception: "
+                           + std::string (e.what ()));
+      }
 
     if (!llm_result.ok)
       return make_error ("LLM call failed: " + llm_result.error);

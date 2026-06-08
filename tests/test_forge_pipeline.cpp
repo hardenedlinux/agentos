@@ -11,6 +11,7 @@
 #include "agentos/forge/code_writer.h"
 #include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
+#include "agentos/llm_proxy.h"
 #include "agentos/registry.h"
 
 namespace fs = std::filesystem;
@@ -271,6 +272,8 @@ TEST_F (ForgePipelineTest, FinalizeWorkerPromotion_WorkerIsDispatchable)
 class ForgeLlmTest : public ForgePipelineTest
 {
 protected:
+  std::optional<agentos::LlmProxy> proxy_;
+
   void SetUp () override
   {
     ForgePipelineTest::SetUp ();
@@ -283,10 +286,12 @@ protected:
     setenv ("AGENTOS_ADVISER_API_KEY", key, 1);
     setenv ("AGENTOS_ADVISER_BASE_URL", "https://api.deepseek.com", 1);
     setenv ("AGENTOS_ADVISER_MODEL", "deepseek-chat", 1);
+    proxy_.emplace (1, 180);
   }
 
   void TearDown () override
   {
+    proxy_.reset ();
     unsetenv ("AGENTOS_ADVISER_API_KEY");
     unsetenv ("AGENTOS_ADVISER_BASE_URL");
     unsetenv ("AGENTOS_ADVISER_MODEL");
@@ -312,7 +317,7 @@ TEST_F (ForgeLlmTest, CodeWriterProducesValidJson)
         "feedback": ""
     })";
 
-  std::string out = agentos::forge::code_writer (input);
+  std::string out = agentos::forge::code_writer (input, *proxy_);
 
   rapidjson::Document doc;
   doc.Parse (out.c_str ());
@@ -385,7 +390,7 @@ TEST_F (ForgeLlmTest, CodeReviewerAcceptsCorrectCode)
   })";
 
   // Act
-  std::string out = agentos::forge::code_reviewer (input);
+  std::string out = agentos::forge::code_reviewer (input, *proxy_);
 
   // Assert: must be valid JSON
   rapidjson::Document doc;
@@ -454,7 +459,7 @@ TEST_F (ForgeLlmTest, CodeReviewerRejectsWrongOutput)
     }
   })";
 
-  std::string out = agentos::forge::code_reviewer (input);
+  std::string out = agentos::forge::code_reviewer (input, *proxy_);
 
   rapidjson::Document doc;
   doc.Parse (out.c_str ());
@@ -504,7 +509,7 @@ TEST_F (ForgeLlmTest, CodeReviewerRejectsPolicyViolation_NetworkTrue)
     }
   })";
 
-  std::string out = agentos::forge::code_reviewer (input);
+  std::string out = agentos::forge::code_reviewer (input, *proxy_);
 
   rapidjson::Document doc;
   doc.Parse (out.c_str ());
@@ -532,7 +537,7 @@ TEST_F (ForgeLlmTest, CodeReviewerReturnsMissingFields_IsError)
     "forge_job_id": "forge-llm-bad"
   })";
 
-  std::string out = agentos::forge::code_reviewer (input);
+  std::string out = agentos::forge::code_reviewer (input, *proxy_);
 
   // Must return valid JSON — never crash or return empty string
   rapidjson::Document doc;

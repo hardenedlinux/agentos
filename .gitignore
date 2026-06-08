@@ -19,3 +19,4 @@ tests/private
 deps-build/
 .ai.*
 *~
+build-asan/

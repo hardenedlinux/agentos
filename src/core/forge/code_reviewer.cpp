@@ -64,14 +64,14 @@ namespace agentos::forge
       auto &alloc = mock.GetAllocator ();
 
       for (auto it = schema.MemberBegin (); it != schema.MemberEnd (); ++it)
-        {
-          const std::string field_name = it->name.GetString ();
-          if (!it->value.IsString ())
-            continue;
-          const std::string type = it->value.GetString ();
+      {
+        const std::string field_name = it->name.GetString ();
+        if (!it->value.IsString ())
+          continue;
+        const std::string type = it->value.GetString ();
 
-          if (type == "integer" || type == "int")
-            {
+        if (type == "integer" || type == "int")
+        {
           mock.AddMember (rapidjson::Value (field_name.c_str (), alloc).Move (),
                           rapidjson::Value (3).Move (), // avoid to use 0
                           alloc);
@@ -226,7 +226,7 @@ namespace agentos::forge
   // ---------------------------------------------------------------------------
   // code_reviewer — main entry point
   // ---------------------------------------------------------------------------
-  std::string code_reviewer (const std::string &input_json)
+  std::string code_reviewer (const std::string &input_json, LlmProxy &proxy)
   {
     // ── 1. Parse input
     // ────────────────────────────────────────────────────────
@@ -444,20 +444,18 @@ namespace agentos::forge
     llm_req.max_tokens = max_tokens;
     llm_req.api_path = api_path;
 
-    // Construct proxy locally (pool_size=1, uses resolved timeout)
-    LlmProxy proxy (1, llm_timeout);
     auto fut = proxy.enqueue (llm_req);
 
     Result<LlmResponse> llm_result;
     try
-    {
-      llm_result = fut.get ();
-    }
+      {
+        llm_result = fut.get ();
+      }
     catch (const std::exception &e)
-    {
-      return make_error ("LLM call threw exception: "
-                         + std::string (e.what ()));
-    }
+      {
+        return make_error ("LLM call threw exception: "
+                           + std::string (e.what ()));
+      }
 
     if (!llm_result.ok)
       return make_error ("LLM call failed: " + llm_result.error);

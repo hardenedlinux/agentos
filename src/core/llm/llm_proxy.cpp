@@ -1,281 +1,288 @@
+/**
+ * agentos/llm/llm_proxy.cpp
+ *
+ * ADR-012: LLM calls are synchronous, non-streaming.
+ * ADR-017: Single LlmProxy instance; all LLM traffic flows through it.
+ *
+ * HTTP transport: cpp-httplib with OpenSSL support.
+ * Provider selection: derived from base_url (anthropic.com → Anthropic API;
+ *                     everything else → OpenAI-compatible).
+ */
 #include "agentos/llm_proxy.h"
+
+#include <chrono>
+#include <cstdlib>
+#include <string>
+#include <thread>
+
+#include <httplib.h>
+#include <openssl/crypto.h>
+#include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <spdlog/spdlog.h>
 
 namespace agentos
 {
 
-  /// Perform the HTTP call, including provider selection and retries.
-  static Result<LlmResponse> perform_call (const LlmRequest &req, int timeout_s)
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Internal helpers
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  namespace
+  {
+
+    // Strip scheme prefix so httplib::SSLClient receives only the host.
+    std::string strip_scheme (const std::string &url)
+    {
+      if (url.size () > 8 && url.substr (0, 8) == "https://")
+        return url.substr (8);
+      if (url.size () > 7 && url.substr (0, 7) == "http://")
+        return url.substr (7);
+      return url;
+    }
+
+    // Serialise an Anthropic-format request body.
+    std::string build_anthropic_body (const LlmRequest &req)
+    {
+      rapidjson::Document doc;
+      doc.SetObject ();
+      auto &alloc = doc.GetAllocator ();
+
+      doc.AddMember (
+        "model",
+        rapidjson::Value (req.model.c_str (),
+                          static_cast<rapidjson::SizeType> (req.model.size ()),
+                          alloc),
+        alloc);
+      doc.AddMember ("max_tokens", req.max_tokens, alloc);
+
+      if (!req.system_prompt.empty ())
+        doc.AddMember ("system",
+                       rapidjson::Value (req.system_prompt.c_str (),
+                                         static_cast<rapidjson::SizeType> (
+                                           req.system_prompt.size ()),
+                                         alloc),
+                       alloc);
+
+      rapidjson::Value msgs (rapidjson::kArrayType);
+      {
+        rapidjson::Value msg (rapidjson::kObjectType);
+        msg.AddMember ("role", rapidjson::Value ("user", 4, alloc), alloc);
+        msg.AddMember (
+          "content",
+          rapidjson::Value (
+            req.user_prompt.c_str (),
+            static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc),
+          alloc);
+        msgs.PushBack (msg, alloc);
+      }
+      doc.AddMember ("messages", msgs, alloc);
+
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc.Accept (w);
+      return buf.GetString ();
+    }
+
+    // Serialise an OpenAI-compatible request body.
+    std::string build_openai_body (const LlmRequest &req)
+    {
+      rapidjson::Document doc;
+      doc.SetObject ();
+      auto &alloc = doc.GetAllocator ();
+
+      doc.AddMember (
+        "model",
+        rapidjson::Value (req.model.c_str (),
+                          static_cast<rapidjson::SizeType> (req.model.size ()),
+                          alloc),
+        alloc);
+
+      rapidjson::Value messages (rapidjson::kArrayType);
+
+      if (!req.system_prompt.empty ())
+      {
+        rapidjson::Value sys (rapidjson::kObjectType);
+        sys.AddMember ("role", rapidjson::Value ("system", 6, alloc), alloc);
+        sys.AddMember ("content",
+                       rapidjson::Value (req.system_prompt.c_str (),
+                                         static_cast<rapidjson::SizeType> (
+                                           req.system_prompt.size ()),
+                                         alloc),
+                       alloc);
+        messages.PushBack (sys, alloc);
+      }
+
+      {
+        rapidjson::Value user (rapidjson::kObjectType);
+        user.AddMember ("role", rapidjson::Value ("user", 4, alloc), alloc);
+        user.AddMember (
+          "content",
+          rapidjson::Value (
+            req.user_prompt.c_str (),
+            static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc),
+          alloc);
+        messages.PushBack (user, alloc);
+      }
+
+      doc.AddMember ("messages", messages, alloc);
+      doc.AddMember ("max_tokens", req.max_tokens, alloc);
+
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc.Accept (w);
+      return buf.GetString ();
+    }
+
+    // Extract content string from a parsed Anthropic response.
+    Result<std::string> extract_anthropic_content (const rapidjson::Document &d)
+    {
+      if (!d.HasMember ("content") || !d["content"].IsArray ()
+          || d["content"].Size () == 0)
+        return Result<std::string> (
+          Error{"Anthropic response missing 'content' array"}, ErrorTag{});
+
+      const auto &block = d["content"][0];
+      if (!block.HasMember ("text") || !block["text"].IsString ())
+        return Result<std::string> (
+          Error{"Anthropic response block missing 'text'"}, ErrorTag{});
+
+      return Result<std::string> (std::string (block["text"].GetString ()));
+    }
+
+    // Extract content string from a parsed OpenAI-compatible response.
+    Result<std::string> extract_openai_content (const rapidjson::Document &d)
+    {
+      if (!d.HasMember ("choices") || !d["choices"].IsArray ()
+          || d["choices"].Size () == 0)
+        return Result<std::string> (
+          Error{"LLM response missing 'choices' array"}, ErrorTag{});
+
+      const auto &choice = d["choices"][0];
+      if (!choice.HasMember ("message")
+          || !choice["message"].HasMember ("content"))
+        return Result<std::string> (
+          Error{"LLM response missing 'message.content'"}, ErrorTag{});
+
+      const auto &c = choice["message"]["content"];
+      if (!c.IsString ())
+        return Result<std::string> (
+          Error{"LLM message.content is not a string"}, ErrorTag{});
+
+      return Result<std::string> (std::string (c.GetString ()));
+    }
+
+  } // namespace
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // perform_call — one HTTP round-trip, called from worker_loop
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  Result<LlmResponse> LlmProxy::perform_call (const LlmRequest &req,
+                                              int timeout_s)
   {
     const bool is_anthropic
       = req.base_url.find ("anthropic.com") != std::string::npos;
-    const bool is_deepseek
-      = req.base_url.find ("deepseek.com") != std::string::npos;
 
-    constexpr int kMaxAttempts = 3; // initial attempt + 2 retries
+    const std::string host = strip_scheme (req.base_url);
+    const std::string path = is_anthropic ? "/v1/messages" : req.api_path;
+    const std::string body
+      = is_anthropic ? build_anthropic_body (req) : build_openai_body (req);
+
+    httplib::Headers headers;
+    if (is_anthropic)
+      headers = {{"Content-Type", "application/json"},
+                 {"x-api-key", req.api_key},
+                 {"anthropic-version", "2023-06-01"}};
+    else
+      headers = {{"Content-Type", "application/json"},
+                 {"Authorization", "Bearer " + req.api_key}};
+
+    // CA bundle: AGENTOS_CA_CERT_PATH env var → system default
+    const char *ca_env = std::getenv ("AGENTOS_CA_CERT_PATH");
+    const std::string ca_path
+      = (ca_env && *ca_env) ? ca_env : "/etc/ssl/certs/ca-certificates.crt";
+
+    constexpr int kMaxAttempts = 3;
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
     {
-      try
+      // Construct a fresh SSLClient each attempt.
+      // host must outlive the SSLClient; it is a local std::string.
+      httplib::SSLClient cli (host, 443);
+      cli.set_ca_cert_path (ca_path);
+      cli.set_connection_timeout (timeout_s, 0);
+      cli.set_read_timeout (timeout_s, 0);
+
+      spdlog::info ("[llm_proxy] attempt {}/{} → {}{}", attempt + 1,
+                    kMaxAttempts, host, path);
+
+      auto res = cli.Post (path, headers, body, "application/json");
+
+      if (!res)
       {
-        // ---- Serialise request
-        // -------------------------------------------------
-        rapidjson::Document doc;
-        doc.SetObject ();
-        auto &alloc = doc.GetAllocator ();
-
-        std::string path;
-        httplib::Headers headers;
-
-        if (is_anthropic)
+        const std::string err = httplib::to_string (res.error ());
+        spdlog::warn ("[llm_proxy] network error: {}", err);
+        if (attempt < kMaxAttempts - 1)
         {
-          // model
-          rapidjson::Value model_val (
-            req.model.c_str (),
-            static_cast<rapidjson::SizeType> (req.model.size ()), alloc);
-          doc.AddMember ("model", model_val, alloc);
-          // max_tokens
-          doc.AddMember ("max_tokens", req.max_tokens, alloc);
-
-          // system (if present)
-          if (!req.system_prompt.empty ())
-          {
-            rapidjson::Value sys (
-              req.system_prompt.c_str (),
-              static_cast<rapidjson::SizeType> (req.system_prompt.size ()),
-              alloc);
-            doc.AddMember ("system", sys, alloc);
-          }
-
-          // messages array – a single "user" message
-          rapidjson::Value msgs (rapidjson::kArrayType);
-          {
-            rapidjson::Value msg (rapidjson::kObjectType);
-            rapidjson::Value role ("user", 4, alloc);
-            msg.AddMember ("role", role, alloc);
-            rapidjson::Value content (
-              req.user_prompt.c_str (),
-              static_cast<rapidjson::SizeType> (req.user_prompt.size ()),
-              alloc);
-            msg.AddMember ("content", content, alloc);
-            msgs.PushBack (msg, alloc);
-          }
-          doc.AddMember ("messages", msgs, alloc);
-
-          // Anthropic‑specific headers
-          headers = {{"Content-Type", "application/json"},
-                     {"x-api-key", req.api_key},
-                     {"anthropic-version", "2023-06-01"}};
-          path = "/v1/messages";
+          std::this_thread::sleep_for (std::chrono::milliseconds (500));
+          continue;
         }
-        else
-        {
-          // OpenAI‑compatible serialisation
-          // model
-          rapidjson::Value model_val (
-            req.model.c_str (),
-            static_cast<rapidjson::SizeType> (req.model.size ()), alloc);
-          doc.AddMember ("model", model_val, alloc);
-
-          // messages
-          rapidjson::Value messages (rapidjson::kArrayType);
-
-          if (!req.system_prompt.empty ())
-          {
-            rapidjson::Value sys_msg (rapidjson::kObjectType);
-            rapidjson::Value role ("system", 6, alloc);
-            sys_msg.AddMember ("role", role, alloc);
-            rapidjson::Value content (
-              req.system_prompt.c_str (),
-              static_cast<rapidjson::SizeType> (req.system_prompt.size ()),
-              alloc);
-            sys_msg.AddMember ("content", content, alloc);
-            messages.PushBack (sys_msg, alloc);
-          }
-
-          {
-            rapidjson::Value user_msg (rapidjson::kObjectType);
-            rapidjson::Value role ("user", 4, alloc);
-            user_msg.AddMember ("role", role, alloc);
-            rapidjson::Value content (
-              req.user_prompt.c_str (),
-              static_cast<rapidjson::SizeType> (req.user_prompt.size ()),
-              alloc);
-            user_msg.AddMember ("content", content, alloc);
-            messages.PushBack (user_msg, alloc);
-          }
-          doc.AddMember ("messages", messages, alloc);
-
-          doc.AddMember ("max_tokens", req.max_tokens, alloc);
-
-          // Use the path supplied by the caller (default
-          // "/v1/chat/completions")
-          path = req.api_path;
-
-          headers = {{"Content-Type", "application/json"},
-                     {"Authorization", "Bearer " + req.api_key}};
-        }
-
-        // Serialise to string
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer (buffer);
-        doc.Accept (writer);
-        std::string body = buffer.GetString ();
-
-        // ---- HTTP transport
-        // ----------------------------------------------------
-        // httplib::Client handles both http:// and https:// when built with
-        // SSL support
-
-        // Drop scheme prefix, httplib::Client only accepts
-        // host, not complete url scheme.
-        std::string host = req.base_url;
-        if (host.substr (0, 8) == "https://")
-          host = host.substr (8);
-        else if (host.substr (0, 7) == "http://")
-          host = host.substr (7);
-
-        spdlog::info ("[llm_proxy] connecting to host: '{}'", host);
-
-        const char *ca_cert_env = std::getenv ("AGENTOS_CA_CERT_PATH");
-        const std::string ca_cert_path
-          = ca_cert_env && *ca_cert_env ? ca_cert_env
-          : "/etc/ssl/certs/ca-certificates.crt";
-
-        auto cli = std::make_unique<httplib::Client> (req.base_url);
-        cli->set_ca_cert_path (ca_cert_path);
-        cli->set_connection_timeout (timeout_s, 0);
-        cli->set_read_timeout (timeout_s, 0);
-
-        cli->set_connection_timeout (timeout_s, 0);
-        cli->set_read_timeout (timeout_s, 0);
-
-        auto res = cli->Post (path.c_str (), headers, body, "application/json");
-
-        // ---- Error / retry evaluation
-        // -----------------------------------------
-        if (!res)
-        {
-          std::string err_msg = httplib::to_string (res.error ());
-          spdlog::warn ("[llm_proxy] attempt {}/{} network error: {}",
-                        attempt + 1, kMaxAttempts, err_msg);
-          if (attempt < (kMaxAttempts - 1))
-          {
-            std::this_thread::sleep_for (std::chrono::milliseconds (500));
-            continue;
-          }
-          return Result<LlmResponse> (
-            Error{"Network error after retries: " + err_msg}, ErrorTag{});
-        }
-
-        if (res->status >= 500)
-        {
-          spdlog::warn ("[llm_proxy] attempt {}/{} HTTP {}: {}", attempt + 1,
-                        kMaxAttempts, res->status, res->body);
-          if (attempt < (kMaxAttempts - 1))
-          {
-            std::this_thread::sleep_for (std::chrono::milliseconds (500));
-            continue;
-          }
-          return Result<LlmResponse> (
-            Error{"HTTP " + std::to_string (res->status) + ": " + res->body},
-            ErrorTag{});
-        }
-
-        if (res->status >= 400 && res->status < 500)
-        {
-          spdlog::error ("[llm_proxy] HTTP client error {}: {}", res->status,
-                         res->body);
-          return Result<LlmResponse> (
-            Error{"HTTP " + std::to_string (res->status) + ": " + res->body},
-            ErrorTag{});
-        }
-
-        // ---- Parse response
-        // ---------------------------------------------------- Debug: log raw
-        // response body (only for DeepSeek to help diagnose)
-        if (is_deepseek)
-        {
-          spdlog::info ("[llm_proxy] raw DeepSeek response body: {}",
-                        res->body);
-        }
-
-        rapidjson::Document resp_doc;
-        resp_doc.Parse (res->body.c_str ());
-        if (resp_doc.HasParseError ())
-        {
-          std::string err_msg = "Failed to parse LLM response JSON: ";
-          err_msg += rapidjson::GetParseError_En (resp_doc.GetParseError ());
-          spdlog::error ("[llm_proxy] {}", err_msg);
-          return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-        }
-
-        std::string content;
-        if (is_anthropic)
-        {
-          // content is inside content[0].text
-          if (!resp_doc.HasMember ("content") || !resp_doc["content"].IsArray ()
-              || resp_doc["content"].Size () == 0)
-          {
-            std::string err_msg = "Anthropic response missing 'content' array";
-            spdlog::error ("[llm_proxy] {}", err_msg);
-            return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-          }
-          const auto &first_block = resp_doc["content"][0];
-          if (!first_block.HasMember ("text")
-              || !first_block["text"].IsString ())
-          {
-            std::string err_msg
-              = "Anthropic response block missing 'text' field";
-            spdlog::error ("[llm_proxy] {}", err_msg);
-            return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-          }
-          content = first_block["text"].GetString ();
-        }
-        else
-        {
-          // OpenAI‑compatible: choices[0].message.content
-          if (!resp_doc.HasMember ("choices") || !resp_doc["choices"].IsArray ()
-              || resp_doc["choices"].Size () == 0)
-          {
-            std::string err_msg = "LLM response missing 'choices' array";
-            spdlog::error ("[llm_proxy] {}", err_msg);
-            return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-          }
-          const auto &first_choice = resp_doc["choices"][0];
-          if (!first_choice.HasMember ("message")
-              || !first_choice["message"].HasMember ("content"))
-          {
-            std::string err_msg = "LLM response missing 'message.content'";
-            spdlog::error ("[llm_proxy] {}", err_msg);
-            return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-          }
-          const auto &msg = first_choice["message"];
-          const auto &c = msg["content"];
-          if (!c.IsString ())
-          {
-            std::string err_msg = "LLM message.content is not a string";
-            spdlog::error ("[llm_proxy] {}", err_msg);
-            return Result<LlmResponse> (Error{std::move (err_msg)}, ErrorTag{});
-          }
-          content = c.GetString ();
-        }
-
-        LlmResponse response{std::move (content)};
-        return Result<LlmResponse> (std::move (response));
+        return Result<LlmResponse> (Error{"Network error: " + err}, ErrorTag{});
       }
-      catch (const std::exception &e)
+
+      if (res->status >= 500)
       {
-        spdlog::error ("[llm_proxy] unexpected exception: {}", e.what ());
+        spdlog::warn ("[llm_proxy] HTTP {}: {}", res->status, res->body);
+        if (attempt < kMaxAttempts - 1)
+        {
+          std::this_thread::sleep_for (std::chrono::milliseconds (500));
+          continue;
+        }
         return Result<LlmResponse> (
-          Error{"LLM call failed: " + std::string (e.what ())}, ErrorTag{});
+          Error{"HTTP " + std::to_string (res->status) + ": " + res->body},
+          ErrorTag{});
       }
+
+      if (res->status >= 400)
+      {
+        spdlog::error ("[llm_proxy] HTTP client error {}: {}", res->status,
+                       res->body);
+        return Result<LlmResponse> (
+          Error{"HTTP " + std::to_string (res->status) + ": " + res->body},
+          ErrorTag{});
+      }
+
+      // Parse response
+      rapidjson::Document d;
+      d.Parse (res->body.c_str ());
+      if (d.HasParseError ())
+        return Result<LlmResponse> (
+          Error{std::string ("JSON parse error: ")
+                + rapidjson::GetParseError_En (d.GetParseError ())},
+          ErrorTag{});
+
+      auto content_result = is_anthropic ? extract_anthropic_content (d)
+                                         : extract_openai_content (d);
+
+      if (!content_result.ok)
+        return Result<LlmResponse> (Error{content_result.error}, ErrorTag{});
+
+      spdlog::debug ("[llm_proxy] response ({} chars)",
+                     content_result.value.size ());
+      return Result<LlmResponse> (
+        LlmResponse{std::move (content_result.value)});
     }
 
-    // Should never be reached
-    return Result<LlmResponse> (Error{"Unreachable"}, ErrorTag{});
+    return Result<LlmResponse> (Error{"Max attempts exceeded"}, ErrorTag{});
   }
 
-  /// Enqueue a request and return a future that will hold the result.
+  // ─────────────────────────────────────────────────────────────────────────────
+  // LlmProxy public interface
+  // ─────────────────────────────────────────────────────────────────────────────
+
   std::future<Result<LlmResponse>> LlmProxy::enqueue (LlmRequest req)
   {
     LlmWorkItem item;
@@ -291,6 +298,15 @@ namespace agentos
 
   void LlmProxy::worker_loop ()
   {
+    // Clean up OpenSSL thread-local state when this thread exits.
+    struct SslCleanup
+    {
+      ~SslCleanup ()
+      {
+        OPENSSL_thread_stop ();
+      }
+    } ssl_cleanup;
+
     while (true)
     {
       LlmWorkItem item;
@@ -298,26 +314,27 @@ namespace agentos
         std::unique_lock<std::mutex> lk (mtx_);
         cv_.wait (lk, [this] { return stop_ || !queue_.empty (); });
         if (stop_ && queue_.empty ())
-          goto failed;
+          return;
         item = std::move (queue_.front ());
         queue_.pop ();
       }
 
       try
       {
-        // Perform the actual call (blocking, with retries)
-        auto res = agentos::perform_call (item.request, timeout_s_);
+        auto res = perform_call (item.request, timeout_s_);
         item.promise.set_value (std::move (res));
+      }
+      catch (const std::exception &e)
+      {
+        spdlog::error ("[llm_proxy] exception in worker: {}", e.what ());
+        item.promise.set_exception (std::current_exception ());
       }
       catch (...)
       {
-        OPENSSL_thread_stop ();
+        spdlog::error ("[llm_proxy] unknown exception in worker");
         item.promise.set_exception (std::current_exception ());
       }
     }
-
-  failed:
-    OPENSSL_thread_stop ();
-    return;
   }
+
 } // namespace agentos

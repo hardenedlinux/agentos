@@ -38,9 +38,9 @@ include(FetchContent)
 # spdlog (compiled, static)
 # ---------------------------------------------------------------------------
 ExternalProject_Add(spdlog_ext
-  URL           https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.tar.gz
-  URL_HASH      SHA256=4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9
-  DOWNLOAD_NAME spdlog-v1.12.0.tar.gz
+  URL           https://github.com/gabime/spdlog/archive/refs/tags/v1.15.3.tar.gz
+  URL_HASH      SHA256=15a04e69c222eb6c01094b5c7ff8a249b36bb22788d72519646fb85feb267e67
+  DOWNLOAD_NAME spdlog-v1.15.3.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/spdlog
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/spdlog-src
@@ -67,9 +67,9 @@ set(SPDLOG_LIB "${INSTALL_DIR}/lib/libspdlog.a" CACHE INTERNAL "spdlog static li
 # cpp-httplib (header-only)
 # ---------------------------------------------------------------------------
 ExternalProject_Add(httplib_ext
-  URL           https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.0.tar.gz
-  URL_HASH      SHA256=6ed5894bbbc4a34a0f4c5e962672d0003d2ea099bbadacc66f6dee2b213ff394
-  DOWNLOAD_NAME httplib-v0.18.0.tar.gz
+  URL           https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.39.0.tar.gz
+  URL_HASH      SHA256=44ef684e2c97d034ac1a3dde58407b7017471abd9611d1a9b562d22044bee322
+  DOWNLOAD_NAME httplib-v0.39.0.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/httplib
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
@@ -190,15 +190,16 @@ set(TOMLPLUSPLUS_INC "${TOMLPLUSPLUS_DIR}" CACHE INTERNAL "tomlplusplus include 
 set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src"
     CACHE INTERNAL "sqlite3 source directory")
 set(SQLITE3_DOWNLOAD_PATH
-    "${CMAKE_SOURCE_DIR}/deps-src/downloads/sqlite3-amalgamation-3460000.zip")
+    "${CMAKE_SOURCE_DIR}/deps-src/downloads/sqlite3-amalgamation-3490100.zip")
 
 if(NOT EXISTS "${SQLITE3_SRC_DIR}/sqlite3.c")
   if(NOT EXISTS "${SQLITE3_DOWNLOAD_PATH}")
     file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/deps-src/downloads")
     message(STATUS "Downloading sqlite3 amalgamation...")
     file(DOWNLOAD
-      https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+      https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip
       "${SQLITE3_DOWNLOAD_PATH}"
+      EXPECTED_HASH SHA256=6cebd1d8403fc58c30e93939b246f3e6e58d0765a5cd50546f16c00fd805d2c3
       STATUS download_status
       LOG    download_log
     )
@@ -213,7 +214,7 @@ if(NOT EXISTS "${SQLITE3_SRC_DIR}/sqlite3.c")
     DESTINATION "${CMAKE_SOURCE_DIR}/deps-src"
   )
   file(RENAME
-    "${CMAKE_SOURCE_DIR}/deps-src/sqlite-amalgamation-3460000"
+    "${CMAKE_SOURCE_DIR}/deps-src/sqlite-amalgamation-3490100"
     "${SQLITE3_SRC_DIR}"
   )
 endif()
@@ -222,9 +223,9 @@ endif()
 # libseccomp (C only, autoconf/make)
 # ---------------------------------------------------------------------------
 ExternalProject_Add(libseccomp_ext
-  URL           https://github.com/seccomp/libseccomp/archive/refs/tags/v2.5.5.tar.gz
-  URL_HASH      SHA256=7082b016d3cbda3e15c0e71ebd018023d693bb7507389b32f943db13f935e01d
-  DOWNLOAD_NAME libseccomp-v2.5.5.tar.gz
+  URL           https://github.com/seccomp/libseccomp/archive/refs/tags/v2.6.0.tar.gz
+  URL_HASH      SHA256=0889a8da98e37f86019c90789fd4ff7eda6e1ceb9ef07d4c51c67aeb50a77860
+  DOWNLOAD_NAME libseccomp-v2.6.0.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/libseccomp
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/libseccomp-src
@@ -254,9 +255,9 @@ set(SECCOMP_INCLUDE_DIR "${INSTALL_DIR}/include"          CACHE INTERNAL "libsec
 # is cached in deps-src/downloads/ it is never fetched again.
 # ---------------------------------------------------------------------------
 ExternalProject_Add(libcap_ext
-  URL           https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.69.tar.gz
-  DOWNLOAD_NAME libcap-v2.69.tar.gz
-  URL_HASH      SHA256=9cc2fa3ee744d881629cdac1a1b54c302e7684fda3e3622056218c7681642ffb
+  URL           https://git.kernel.org/pub/scm/libs/libcap/libcap.git/snapshot/libcap-2.74.tar.gz
+  URL_HASH      SHA256=6b7a77c463f8be6876a99ecaeb7fbc20303270aed6ca4109ad65805513df5fd9
+  DOWNLOAD_NAME libcap-v2.74.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/libcap
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/libcap-src
@@ -279,9 +280,17 @@ set(CAP_INCLUDE_DIR "${INSTALL_DIR}/include"      CACHE INTERNAL "libcap include
 # ---------------------------------------------------------------------------
 # OpenSSL (compiled, static)
 # ---------------------------------------------------------------------------
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set(OPENSSL_TARGET "linux-aarch64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  set(OPENSSL_TARGET "linux-x86_64")
+else()
+  message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 ExternalProject_Add(openssl_ext
   URL           https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz
-  URL_HASH      SHA256=c551065efd7b21efaf9c01ddd7a131b6df6e701d99a15a0ea1825b50352629cc
+  URL_HASH      SHA256=2e8a40b01979afe8be0bbfb3de5dc1c6709fedb46d6c89c10da114ab5fc3d281
   DOWNLOAD_NAME openssl-3.3.2.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/openssl
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
@@ -290,44 +299,46 @@ ExternalProject_Add(openssl_ext
   BINARY_DIR    ${DEPS_BUILD_DIR}/openssl/build
   CONFIGURE_COMMAND
   <SOURCE_DIR>/Configure
-    --prefix=<INSTALL_DIR>
-    no-shared
-    no-tests
-    ${OPENSSL_TARGET}
-    BUILD_COMMAND   make -j4
-    INSTALL_COMMAND make install_sw
-    BUILD_BYPRODUCTS
-    <INSTALL_DIR>/lib/libssl.a
-    <INSTALL_DIR>/lib/libcrypto.a
-    LOG_DOWNLOAD  ON
-    LOG_CONFIGURE ON
-    LOG_BUILD     ON
-    LOG_OUTPUT_ON_FAILURE ON
-  )
-  ExternalProject_Get_Property(openssl_ext INSTALL_DIR)
-  set(OPENSSL_STATIC_SSL    "${INSTALL_DIR}/lib64/libssl.a"   CACHE INTERNAL "openssl ssl")
-  set(OPENSSL_STATIC_CRYPTO "${INSTALL_DIR}/lib64/libcrypto.a" CACHE INTERNAL "openssl crypto")
-  set(OPENSSL_STATIC_INC    "${INSTALL_DIR}/include"         CACHE INTERNAL "openssl include")
+  --prefix=<INSTALL_DIR>
+  --openssldir=<INSTALL_DIR>/ssl
+  --libdir=<INSTALL_DIR>/lib
+  no-shared
+  no-tests
+  ${OPENSSL_TARGET}
+  BUILD_COMMAND   make -j4
+  INSTALL_COMMAND make install_sw
+  BUILD_BYPRODUCTS
+  <INSTALL_DIR>/lib/libssl.a
+  <INSTALL_DIR>/lib/libcrypto.a
+  LOG_DOWNLOAD  ON
+  LOG_CONFIGURE ON
+  LOG_BUILD     ON
+  LOG_OUTPUT_ON_FAILURE ON
+)
+ExternalProject_Get_Property(openssl_ext INSTALL_DIR)
+set(OPENSSL_STATIC_SSL    "${INSTALL_DIR}/lib/libssl.a"    CACHE INTERNAL "openssl ssl")
+set(OPENSSL_STATIC_CRYPTO "${INSTALL_DIR}/lib/libcrypto.a" CACHE INTERNAL "openssl crypto")
+set(OPENSSL_STATIC_INC    "${INSTALL_DIR}/include"          CACHE INTERNAL "openssl include")
 
-  # ---------------------------------------------------------------------------
-  # GoogleTest (compiled, only when AGENTOS_BUILD_TESTS=ON)
-  # ---------------------------------------------------------------------------
-  if(AGENTOS_BUILD_TESTS)
-    ExternalProject_Add(googletest_ext
-      URL           https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-      URL_HASH      SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
-      DOWNLOAD_NAME googletest-v1.14.0.tar.gz
-      PREFIX        ${DEPS_BUILD_DIR}/googletest
-      DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
-      SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/googletest-src
-      STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/googletest
-      BINARY_DIR    ${DEPS_BUILD_DIR}/googletest/build
-      CMAKE_ARGS
-      -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
-      -DCMAKE_CXX_STANDARD=17
-      -DBUILD_SHARED_LIBS=OFF
-      -DINSTALL_GTEST=ON
-      -DINSTALL_GMOCK=ON
+# ---------------------------------------------------------------------------
+# GoogleTest (compiled, only when AGENTOS_BUILD_TESTS=ON)
+# ---------------------------------------------------------------------------
+if(AGENTOS_BUILD_TESTS)
+  ExternalProject_Add(googletest_ext
+    URL           https://github.com/google/googletest/archive/refs/tags/v1.17.0.tar.gz
+    URL_HASH      SHA256=65fab701d9829d38cb77c14acdc431d2108bfdbf8979e40eb8ae567edf10b27c
+    DOWNLOAD_NAME googletest-v1.17.0.tar.gz
+    PREFIX        ${DEPS_BUILD_DIR}/googletest
+    DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
+    SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/googletest-src
+    STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/googletest
+    BINARY_DIR    ${DEPS_BUILD_DIR}/googletest/build
+    CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+    -DCMAKE_CXX_STANDARD=17
+    -DBUILD_SHARED_LIBS=OFF
+    -DINSTALL_GTEST=ON
+    -DINSTALL_GMOCK=ON
     BUILD_BYPRODUCTS
     <INSTALL_DIR>/lib/libgtest.a
     <INSTALL_DIR>/lib/libgtest_main.a

@@ -135,7 +135,16 @@ namespace agentos
           host = host.substr (7);
 
         spdlog::info ("[llm_proxy] connecting to host: '{}'", host);
+
+        const char *ca_cert_env = std::getenv ("AGENTOS_CA_CERT_PATH");
+        const std::string ca_cert_path
+          = ca_cert_env && *ca_cert_env ? ca_cert_env
+          : "/etc/ssl/certs/ca-certificates.crt";
+
         auto cli = std::make_unique<httplib::Client> (req.base_url);
+        cli->set_ca_cert_path (ca_cert_path);
+        cli->set_connection_timeout (timeout_s, 0);
+        cli->set_read_timeout (timeout_s, 0);
 
         cli->set_connection_timeout (timeout_s, 0);
         cli->set_read_timeout (timeout_s, 0);
@@ -295,16 +304,16 @@ namespace agentos
       }
 
       try
-        {
-          // Perform the actual call (blocking, with retries)
-          auto res = agentos::perform_call (item.request, timeout_s_);
-          item.promise.set_value (std::move (res));
-        }
+      {
+        // Perform the actual call (blocking, with retries)
+        auto res = agentos::perform_call (item.request, timeout_s_);
+        item.promise.set_value (std::move (res));
+      }
       catch (...)
-        {
-          OPENSSL_thread_stop ();
-          item.promise.set_exception (std::current_exception ());
-        }
+      {
+        OPENSSL_thread_stop ();
+        item.promise.set_exception (std::current_exception ());
+      }
     }
 
   failed:

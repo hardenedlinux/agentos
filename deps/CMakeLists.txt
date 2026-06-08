@@ -161,12 +161,13 @@ set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src"
 # ---------------------------------------------------------------------------
 # toml++ (header-only, single file download)
 # ---------------------------------------------------------------------------
-set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
-if(NOT EXISTS "${TOMLPLUSPLUS_DIR}/toml.hpp")
-  file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DIR}")
+set(TOMLPLUSPLUS_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
+set(TOMLPLUSPLUS_FILE "${TOMLPLUSPLUS_DOWNLOAD_DIR}/toml.hpp")
+if(NOT EXISTS "${TOMLPLUSPLUS_FILE}")
+  file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DOWNLOAD_DIR}")
   file(DOWNLOAD
     https://raw.githubusercontent.com/marzer/tomlplusplus/v3.4.0/toml.hpp
-    "${TOMLPLUSPLUS_DIR}/toml.hpp"
+    "${TOMLPLUSPLUS_FILE}"
     STATUS download_status
     LOG    download_log
   )
@@ -175,23 +176,47 @@ if(NOT EXISTS "${TOMLPLUSPLUS_DIR}/toml.hpp")
     message(FATAL_ERROR "Failed to download toml.hpp: ${download_log}")
   endif()
 endif()
+# Copy to deps-src/tomlplusplus/ for include path stability
+set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
+file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DIR}")
+file(COPY "${TOMLPLUSPLUS_FILE}" DESTINATION "${TOMLPLUSPLUS_DIR}")
 set(TOMLPLUSPLUS_INC "${TOMLPLUSPLUS_DIR}" CACHE INTERNAL "tomlplusplus include path")
 
 # ---------------------------------------------------------------------------
 # SQLite3 amalgamation (compiled directly into agentos_core)
+# Downloaded at configure time so src/core/CMakeLists.txt can find sqlite3.c
+# during the same configure pass. Tarball is cached in deps-src/downloads/.
 # ---------------------------------------------------------------------------
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
-FetchContent_Declare(sqlite3_amalgamation
-  URL        https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
-  SOURCE_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src"
-)
-message(STATUS "Fetching sqlite3 amalgamation...")
-FetchContent_MakeAvailable(sqlite3_amalgamation)
-if(NOT sqlite3_amalgamation_POPULATED)
-  message(FATAL_ERROR "Failed to fetch sqlite3 amalgamation")
+set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src"
+    CACHE INTERNAL "sqlite3 source directory")
+set(SQLITE3_DOWNLOAD_PATH
+    "${CMAKE_SOURCE_DIR}/deps-src/downloads/sqlite3-amalgamation-3460000.zip")
+
+if(NOT EXISTS "${SQLITE3_SRC_DIR}/sqlite3.c")
+  if(NOT EXISTS "${SQLITE3_DOWNLOAD_PATH}")
+    file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/deps-src/downloads")
+    message(STATUS "Downloading sqlite3 amalgamation...")
+    file(DOWNLOAD
+      https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+      "${SQLITE3_DOWNLOAD_PATH}"
+      STATUS download_status
+      LOG    download_log
+    )
+    list(GET download_status 0 download_code)
+    if(NOT download_code EQUAL 0)
+      message(FATAL_ERROR "Failed to download sqlite3: ${download_log}")
+    endif()
+  endif()
+  message(STATUS "Extracting sqlite3 amalgamation...")
+  file(ARCHIVE_EXTRACT
+    INPUT "${SQLITE3_DOWNLOAD_PATH}"
+    DESTINATION "${CMAKE_SOURCE_DIR}/deps-src"
+  )
+  file(RENAME
+    "${CMAKE_SOURCE_DIR}/deps-src/sqlite-amalgamation-3460000"
+    "${SQLITE3_SRC_DIR}"
+  )
 endif()
-set(SQLITE3_SRC_DIR "${sqlite3_amalgamation_SOURCE_DIR}"
-  CACHE INTERNAL "sqlite3 source directory")
 
 # ---------------------------------------------------------------------------
 # libseccomp (C only, autoconf/make)
@@ -250,6 +275,46 @@ ExternalProject_Add(libcap_ext
 ExternalProject_Get_Property(libcap_ext INSTALL_DIR)
 set(CAP_LIB         "${INSTALL_DIR}/lib/libcap.a" CACHE INTERNAL "libcap static library")
 set(CAP_INCLUDE_DIR "${INSTALL_DIR}/include"      CACHE INTERNAL "libcap include dir")
+
+# ---------------------------------------------------------------------------
+# OpenSSL (compiled, static)
+# ---------------------------------------------------------------------------
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set(OPENSSL_TARGET "linux-aarch64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  set(OPENSSL_TARGET "linux-x86_64")
+else()
+  message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+ExternalProject_Add(openssl_ext
+  URL           https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz
+  URL_HASH      SHA256=23c666d0edf20f14249b3d8f0368acaee9ab585b09e1de82107c66e1f3ec9533
+  DOWNLOAD_NAME openssl-3.0.15.tar.gz
+  DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
+  SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/openssl-src
+  STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/openssl
+  CONFIGURE_COMMAND
+  <SOURCE_DIR>/Configure
+  --prefix=<INSTALL_DIR>
+  no-shared
+  no-tests
+  linux-x86_64
+  BUILD_COMMAND   make -j4
+  INSTALL_COMMAND make install_sw
+  BUILD_BYPRODUCTS
+  <INSTALL_DIR>/lib/libssl.a
+  <INSTALL_DIR>/lib/libcrypto.a
+  LOG_DOWNLOAD  ON
+  LOG_CONFIGURE ON
+  LOG_BUILD     ON
+  LOG_OUTPUT_ON_FAILURE ON
+)
+ExternalProject_Get_Property(openssl_ext INSTALL_DIR)
+message(STATUS "OpenSSL INSTALL_DIR: ${INSTALL_DIR}")
+set(OPENSSL_STATIC_SSL    "${DEPS_BUILD_DIR}/openssl/lib/libssl.a"    CACHE INTERNAL "")
+set(OPENSSL_STATIC_CRYPTO "${DEPS_BUILD_DIR}/openssl/lib/libcrypto.a" CACHE INTERNAL "")
+set(OPENSSL_STATIC_INC    "${DEPS_BUILD_DIR}/openssl/include"          CACHE INTERNAL "")
 
 # ---------------------------------------------------------------------------
 # GoogleTest (compiled, only when AGENTOS_BUILD_TESTS=ON)

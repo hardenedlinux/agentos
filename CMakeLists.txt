@@ -54,10 +54,6 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 set(CMAKE_EP_STAMP_DIR    "${DEPS_BUILD_DIR}/stamps")
 set(CMAKE_EP_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
 
-# OpenSSL — system library, required for HTTPS in cpp-httplib
-set(OPENSSL_USE_STATIC_LIBS ON)
-find_package(OpenSSL REQUIRED)
-
 # All third-party dependencies
 add_subdirectory(deps)
 

@@ -43,6 +43,7 @@ target_include_directories(agentos_core SYSTEM PUBLIC
   ${TOMLPLUSPLUS_INC}
   ${SECCOMP_INCLUDE_DIR}
   ${CAP_INCLUDE_DIR}
+  ${OPENSSL_STATIC_INC}
 )
 
 target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
@@ -72,8 +73,8 @@ target_link_libraries(agentos_core PUBLIC
   ${ZMQ_LIB}
   ${SECCOMP_LIB}
   ${CAP_LIB}
-  OpenSSL::SSL
-  OpenSSL::Crypto
+  ${OPENSSL_STATIC_SSL}
+  ${OPENSSL_STATIC_CRYPTO}
 )
 
 target_include_directories(agentos_core PUBLIC
@@ -81,7 +82,7 @@ target_include_directories(agentos_core PUBLIC
   ${CAP_INCLUDE_DIR}
 )
 
-add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext)
+add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext openssl_ext)
 
 target_link_libraries(agentos_core PRIVATE sqlite3)
 

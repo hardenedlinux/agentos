@@ -18,9 +18,8 @@
 #   ./scripts/build.sh --clean-all      # Clean both build/ and deps-build/
 #
 # Prerequisites:
-#   Ubuntu/Debian:  sudo apt install cmake ninja-build build-essential git
-#   macOS:          brew install cmake ninja
-#   Musl (optional): sudo apt install musl-tools
+#   Ubuntu/Debian:  sudo apt install cmake ninja-build build-essential git perl
+#   (OpenSSL build requires perl; no system libssl-dev needed)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -64,20 +63,58 @@ fi
 mkdir -p "$BUILD_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dependency check: inspect stamp files rather than .a paths, because stamp
-# files live in deps-build/ and survive rm -rf build/.  The .a check below
-# is a secondary sanity guard.
+# Dependency check.
+#
+# Strategy:
+#   1. Check stamp files (in deps-build/stamps/, survive rm -rf build/)
+#   2. Check library files as secondary sanity guard
+#
+# Deps managed by ExternalProject (compiled, produce .a):
+#   spdlog, libzmq, libseccomp, libcap, openssl
+#
+# Deps managed by ExternalProject (header-only, no .a):
+#   httplib, rapidjson, cppzmq, sqlite3_amalgamation
+#
+# Deps managed by file(DOWNLOAD) (single file, no stamp):
+#   tomlplusplus → deps-src/downloads/toml.hpp
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Stamp check for ExternalProject deps
 deps_stamp_ok=true
-for dep in spdlog libzmq libseccomp libcap; do
+
+# Compiled deps
+for dep in spdlog libzmq libseccomp libcap openssl; do
   if [ ! -f "$DEPS_BUILD_DIR/stamps/$dep/${dep}_ext-install" ]; then
     deps_stamp_ok=false
     break
   fi
 done
 
-# Also verify the actual libraries are present (stamps can exist without libs
-# if a previous install step was interrupted)
+# Header-only deps (no install step — check download stamp)
+if $deps_stamp_ok; then
+  for dep in httplib rapidjson cppzmq; do
+    if [ ! -f "$DEPS_BUILD_DIR/stamps/$dep/${dep}_ext-download" ]; then
+      deps_stamp_ok=false
+      break
+    fi
+  done
+fi
+
+# SQLite amalgamation (header-only, ExternalProject)
+if $deps_stamp_ok; then
+  if [ ! -f "$DEPS_BUILD_DIR/stamps/sqlite3/sqlite3_amalgamation_ext-download" ]; then
+    deps_stamp_ok=false
+  fi
+fi
+
+# toml++ single-file download (no stamp — check file presence)
+if $deps_stamp_ok; then
+  if [ ! -f "$ROOT_DIR/deps-src/downloads/toml.hpp" ]; then
+    deps_stamp_ok=false
+  fi
+fi
+
+# Library file check (compiled deps only)
 deps_libs_ok=true
 for lib in spdlog libzmq libseccomp libcap; do
   if [ ! -f "$DEPS_BUILD_DIR/$lib/lib/lib$lib.a" ]; then
@@ -85,7 +122,15 @@ for lib in spdlog libzmq libseccomp libcap; do
     break
   fi
 done
+# OpenSSL produces two libraries
+if $deps_libs_ok; then
+  if [ ! -f "$DEPS_BUILD_DIR/openssl/lib/libssl.a" ] || \
+     [ ! -f "$DEPS_BUILD_DIR/openssl/lib/libcrypto.a" ]; then
+    deps_libs_ok=false
+  fi
+fi
 
+# GoogleTest (only when tests enabled)
 if [ "$BUILD_TESTS" = "ON" ]; then
   if [ ! -f "$DEPS_BUILD_DIR/stamps/googletest/googletest_ext-install" ] || \
      [ ! -f "$DEPS_BUILD_DIR/googletest/lib/libgtest.a" ] || \
@@ -106,9 +151,6 @@ fi
 # Always re-configure if:
 #   (a) deps are not yet built, OR
 #   (b) build/ was deleted (CMakeCache.txt is absent)
-#
-# This ensures that deleting only build/ triggers a re-configure (which is
-# fast — deps are already built) without re-downloading or rebuilding deps.
 # ─────────────────────────────────────────────────────────────────────────────
 needs_configure=false
 if ! $deps_built; then
@@ -135,8 +177,6 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if $DEPS_ONLY; then
   echo "→ Building deps only ($JOBS jobs)"
-  # Build all ExternalProject targets; agentos core is excluded by convention
-  # because it depends on the dep targets which cmake will now skip (already built)
   cmake --build "$BUILD_DIR" --parallel "$JOBS"
   echo "✓ Deps built. Run without --deps-only to build agentos core."
   exit 0

@@ -87,9 +87,9 @@ set(HTTPLIB_INC "${CMAKE_SOURCE_DIR}/deps-src/httplib-src"
 # RapidJSON (header-only)
 # ---------------------------------------------------------------------------
 ExternalProject_Add(rapidjson_ext
-  URL           https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
-  URL_HASH      SHA256=bf7ced29704a1e696fbccf2a2b4ea068e7774fa37f6d7dd4039d0787f8bed98e
-  DOWNLOAD_NAME rapidjson-v1.1.0.tar.gz
+  URL           https://github.com/Tencent/rapidjson/archive/24b5e7a8b27f42fa16b96fc70aade9106cf7102f.tar.gz
+  URL_HASH      SHA256=2d2601a82d2d3b7e143a3c8d43ef616671391034bc46891a9816b79cf2d3e7a8
+  DOWNLOAD_NAME rapidjson-24b5e7a.tar.gz
   PREFIX        ${DEPS_BUILD_DIR}/rapidjson
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/rapidjson-src

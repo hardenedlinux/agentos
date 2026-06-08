@@ -15,27 +15,14 @@
 
 namespace agentos
 {
-  static bool namespace_isolation_available ()
-  {
-    int status = 0;
-    pid_t pid = fork ();
-
-    if (pid == 0)
-      {
-        int ret = unshare (CLONE_NEWNS | CLONE_NEWNET);
-        _exit (ret == 0 ? 0 : 1);
-      }
-
-    waitpid (pid, &status, 0);
-    return WIFEXITED (status) && WEXITSTATUS (status) == 0;
-  }
+  bool namespace_isolation_available ();
 
   enum class CapabilityVerdict
-  {
-    Approve,
-    Reject,
-    Escalate
-  };
+    {
+      Approve,
+      Reject,
+      Escalate
+    };
 
   struct CapabilityResult
   {

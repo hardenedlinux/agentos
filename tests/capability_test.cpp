@@ -3,105 +3,127 @@
  *
  * Unit tests for ADR-006 Layer 2 capability validation.
  */
-
-#include <gtest/gtest.h>
 #include "agentos/capability.h"
 #include "agentos/types.h"
+
+#include <gtest/gtest.h>
 
 using namespace agentos;
 
 // ---------------------------------------------------------------------------
 // validate_capability
+//
+// Returns std::expected<CapabilityResult, Error>.
+// CapabilityResult.verdict is Approve / Reject / Escalate.
 // ---------------------------------------------------------------------------
 
-TEST(CapabilityTest, NetworkTrueRejected) {
-    CapabilityDeclaration decl;
-    decl.network = true;
-    EXPECT_FALSE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, NetworkTrue_Rejected)
+{
+  CapabilityDeclaration decl;
+  decl.network = true;
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Reject);
 }
 
-TEST(CapabilityTest, ExecTrueRejected) {
-    CapabilityDeclaration decl;
-    decl.exec = true;
-    EXPECT_FALSE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, ExecTrue_Rejected)
+{
+  CapabilityDeclaration decl;
+  decl.exec = true;
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Reject);
 }
 
-TEST(CapabilityTest, NetworkAndExecBothRejected) {
-    CapabilityDeclaration decl;
-    decl.network = true;
-    decl.exec = true;
-    EXPECT_FALSE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, NetworkAndExecBoth_Rejected)
+{
+  CapabilityDeclaration decl;
+  decl.network = true;
+  decl.exec = true;
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Reject);
 }
 
-TEST(CapabilityTest, MinimalAllowed) {
-    CapabilityDeclaration decl;
-    // network=false, exec=false, no fs_read, no fs_write
-    EXPECT_TRUE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, Minimal_Approved)
+{
+  CapabilityDeclaration decl;
+  // network=false, exec=false, no fs_read, no fs_write
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Approve);
 }
 
-TEST(CapabilityTest, FsReadInsideJobDir) {
-    CapabilityDeclaration decl;
-    decl.fs_read.push_back("/tmp/job/input.txt");
-    EXPECT_TRUE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, FsReadInsideJobDir_Approved)
+{
+  CapabilityDeclaration decl;
+  decl.fs_read.push_back ("/tmp/job/input.txt");
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Approve);
 }
 
-TEST(CapabilityTest, FsReadOutsideJobDir) {
-    CapabilityDeclaration decl;
-    decl.fs_read.push_back("/etc/passwd");
-    EXPECT_FALSE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, FsReadOutsideJobDir_Escalated)
+{
+  // ADR-006: fs_read outside job directory → Escalate, not hard Reject
+  CapabilityDeclaration decl;
+  decl.fs_read.push_back ("/etc/passwd");
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Escalate);
 }
 
-TEST(CapabilityTest, FsReadRelativeInside) {
-    CapabilityDeclaration decl;
-    decl.fs_read.push_back("input.txt");
-    EXPECT_TRUE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, FsReadRelativeInside_Approved)
+{
+  CapabilityDeclaration decl;
+  decl.fs_read.push_back ("input.txt");
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Approve);
 }
 
-TEST(CapabilityTest, FsReadRelativeOutside) {
-    CapabilityDeclaration decl;
-    decl.fs_read.push_back("../etc/passwd");
-    EXPECT_FALSE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, FsReadRelativeOutside_Escalated)
+{
+  CapabilityDeclaration decl;
+  decl.fs_read.push_back ("../etc/passwd");
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Escalate);
 }
 
-TEST(CapabilityTest, FsWriteNotChecked) {
-    CapabilityDeclaration decl;
-    decl.fs_write.push_back("/etc/passwd");
-    // fs_write is not checked, so should still pass
-    EXPECT_TRUE(validate_capability(decl, "/tmp/job"));
+TEST (CapabilityTest, TcpConnectPorts_NetworkFalse_Rejected)
+{
+  // ADR-015: tcp_connect_ports + network:false is mutually exclusive
+  CapabilityDeclaration decl;
+  decl.network = false;
+  decl.tcp_connect_ports.push_back (443);
+  auto result = validate_capability (decl, "/tmp/job");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Reject);
 }
 
-TEST(CapabilityTest, EmptyJobDir) {
-    CapabilityDeclaration decl;
-    // job_dir empty, absolute paths should be outside
-    decl.fs_read.push_back("/tmp/job/input.txt");
-    // relative to empty job_dir, the path is absolute, so relative will be
-    // the full path, which is not inside empty dir -> rejected
-    EXPECT_FALSE(validate_capability(decl, ""));
+TEST (CapabilityTest, EmptyJobDir_AbsolutePath_Escalated)
+{
+  CapabilityDeclaration decl;
+  decl.fs_read.push_back ("/tmp/job/input.txt");
+  auto result = validate_capability (decl, "");
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->verdict, CapabilityVerdict::Escalate);
 }
 
 // ---------------------------------------------------------------------------
 // determine_tier
+//
+// ADR-006: Tier-0 = pre-approved catalog worker (forge_generated=false)
+//          Tier-1 = forge-generated worker       (forge_generated=true)
 // ---------------------------------------------------------------------------
 
-TEST(CapabilityTest, DetermineTierAlwaysTier1) {
-    CapabilityDeclaration decl;
-    EXPECT_EQ(determine_tier(decl), SandboxTier::Tier1);
+TEST (CapabilityTest, DetermineTier_ForgeGenerated_Tier1)
+{
+  EXPECT_EQ (determine_tier (true), SandboxTier::Tier1);
 }
 
-TEST(CapabilityTest, DetermineTierWithNetwork) {
-    CapabilityDeclaration decl;
-    decl.network = true;
-    EXPECT_EQ(determine_tier(decl), SandboxTier::Tier1);
-}
-
-TEST(CapabilityTest, DetermineTierWithExec) {
-    CapabilityDeclaration decl;
-    decl.exec = true;
-    EXPECT_EQ(determine_tier(decl), SandboxTier::Tier1);
-}
-
-TEST(CapabilityTest, DetermineTierWithFsRead) {
-    CapabilityDeclaration decl;
-    decl.fs_read.push_back("/tmp/job/input.txt");
-    EXPECT_EQ(determine_tier(decl), SandboxTier::Tier1);
+TEST (CapabilityTest, DetermineTier_PreApproved_Tier0)
+{
+  EXPECT_EQ (determine_tier (false), SandboxTier::Tier0);
 }

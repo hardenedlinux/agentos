@@ -209,7 +209,7 @@ TEST_F (ForgePipelineTest, FinalizeWorkerPromotion_WritesCodeFile)
   db_->store_forge_pipeline_job (job);
 
   reg.finalize_worker_promotion (job, "def main(): pass\n",
-                                 make_cap_json ("forge-w1"));
+                                 make_cap_json ("forge-w1"), *db_);
 
   auto code_path = home_ / "workers" / "forge-w1" / "worker.py";
   ASSERT_TRUE (fs::exists (code_path)) << "worker code file not created";
@@ -228,7 +228,7 @@ TEST_F (ForgePipelineTest, FinalizeWorkerPromotion_UpdatesJobStatusToPromoted)
   db_->store_forge_pipeline_job (job);
 
   reg.finalize_worker_promotion (job, "def main(): pass\n",
-                                 make_cap_json ("forge-w2"));
+                                 make_cap_json ("forge-w2"), *db_);
 
   auto updated = db_->load_forge_pipeline_job ("forge-w2");
   ASSERT_TRUE (updated.has_value ());
@@ -244,7 +244,7 @@ TEST_F (ForgePipelineTest, FinalizeWorkerPromotion_RegistersWorkerInRegistry)
   db_->store_forge_pipeline_job (job);
 
   reg.finalize_worker_promotion (job, "def main(): pass\n",
-                                 make_cap_json ("forge-w3"));
+                                 make_cap_json ("forge-w3"), *db_);
 
   EXPECT_EQ (reg.worker_count (), before + 1);
 }
@@ -257,7 +257,7 @@ TEST_F (ForgePipelineTest, FinalizeWorkerPromotion_WorkerIsDispatchable)
   db_->store_forge_pipeline_job (job);
 
   reg.finalize_worker_promotion (job, "def main(): pass\n",
-                                 make_cap_json ("forge-w4"));
+                                 make_cap_json ("forge-w4"), *db_);
 
   // The capability declared in make_cap_json is "example.run"
   auto found = reg.find_worker_for_command ("example.run");
@@ -347,11 +347,11 @@ TEST_F (ForgeLlmTest, CodeReviewerAcceptsCorrectCode)
   auto skill_path = home_ / "advisers/code-reviewer/skill.md";
   std::ofstream (skill_path)
     << "You are a code reviewer for AgentOS.\n"
-    "Review the submitted code for correctness against the requirement.\n"
-    "You MUST respond with a JSON object only, no markdown, no "
-    "explanation.\n"
-    "Schema: {\"status\": \"accept\" | \"reject\", \"reason\": "
-    "\"<string>\"}\n";
+       "Review the submitted code for correctness against the requirement.\n"
+       "You MUST respond with a JSON object only, no markdown, no "
+       "explanation.\n"
+       "Schema: {\"status\": \"accept\" | \"reject\", \"reason\": "
+       "\"<string>\"}\n";
   setenv ("AGENTOS_ADVISER_SKILL_PATH", skill_path.c_str (), 1);
 
   // Arrange: create forge job directory so sandbox probe can write temp files

@@ -1,350 +1,319 @@
-#include <gtest/gtest.h>
-#include <gmock/gmock.h>
-#include <filesystem>
+/**
+ * tests/test_worker_run.cpp
+ *
+ * Unit tests for:
+ *   - Worker filesystem isolation (ADR-016)
+ *   - GC run layers (ADR-016)
+ *   - Database worker_runs methods (ADR-016)
+ *   - ForgeDatabase last_code_path (ADR-016/019)
+ *   - Orchestrator::resume_in_flight (ADR-005)
+ */
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
+#include <filesystem>
 #include <sys/types.h>
+#include <unistd.h>
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include "agentos/database/database.h"
-#include "agentos/sandbox.h"
-#include "agentos/forge/forge_database.h"
-#include "agentos/orchestrator.h"
-#include "agentos/home_init.h"
-#include "agentos/registry.h"
-#include "agentos/verifier.h"
-#include "agentos/scheduler.h"
 #include "agentos/dispatcher.h"
+#include "agentos/forge/forge_database.h"
+#include "agentos/home_init.h"
+#include "agentos/orchestrator.h"
+#include "agentos/registry.h"
+#include "agentos/sandbox.h"
+#include "agentos/scheduler.h"
 #include "agentos/types.h"
+#include "agentos/verifier.h"
 
 using namespace agentos;
+namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
-// Helper: create a temporary directory and set AGENTOS_HOME to it
+// Helper: temporary AGENTOS_HOME directory
 // ---------------------------------------------------------------------------
-class TempHome {
+class TempHome
+{
 public:
-    TempHome() {
-        char tmpl[] = "/tmp/agentos_test_XXXXXX";
-        char* dir = mkdtemp(tmpl);
-        if (!dir) throw std::runtime_error("mkdtemp failed");
-        path_ = dir;
-        old_home_ = std::getenv("AGENTOS_HOME") ? std::getenv("AGENTOS_HOME") : "";
-        setenv("AGENTOS_HOME", path_.c_str(), 1);
-    }
-    ~TempHome() {
-        if (!old_home_.empty())
-            setenv("AGENTOS_HOME", old_home_.c_str(), 1);
-        else
-            unsetenv("AGENTOS_HOME");
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-    const std::string& path() const { return path_; }
+  TempHome ()
+  {
+    char tmpl[] = "/tmp/agentos_test_XXXXXX";
+    char *dir = mkdtemp (tmpl);
+    if (!dir)
+      throw std::runtime_error ("mkdtemp failed");
+    path_ = dir;
+    old_home_
+      = std::getenv ("AGENTOS_HOME") ? std::getenv ("AGENTOS_HOME") : "";
+    setenv ("AGENTOS_HOME", path_.c_str (), 1);
+  }
+
+  ~TempHome ()
+  {
+    if (!old_home_.empty ())
+      setenv ("AGENTOS_HOME", old_home_.c_str (), 1);
+    else
+      unsetenv ("AGENTOS_HOME");
+    std::error_code ec;
+    fs::remove_all (path_, ec);
+  }
+
+  const std::string &path () const
+  {
+    return path_;
+  }
+
 private:
-    std::string path_;
-    std::string old_home_;
+  std::string path_;
+  std::string old_home_;
 };
 
 // ---------------------------------------------------------------------------
-// Dummy stubs for Orchestrator dependencies
+// Common fixture: in-memory Database + real Registry/Scheduler/Orchestrator
 // ---------------------------------------------------------------------------
-class DummyRegistry : public Registry {
-public:
-    DummyRegistry() : Registry() {}
+class WorkerRunTest : public ::testing::Test
+{
+protected:
+  class InMemoryDatabase : public Database
+  {
+  public:
+    InMemoryDatabase () : Database (":memory:") {}
+  };
+
+  // Declaration order = initialisation order.
+  InMemoryDatabase db;
+  Registry registry{db};
+  Verifier verifier{registry};
+  Dispatcher dispatcher{"/tmp"};
+  SchedulerConfig schedConfig{};
+  Scheduler scheduler{registry, dispatcher, schedConfig, db};
+  Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, db};
 };
 
-class DummyVerifier : public Verifier {
-public:
-    DummyVerifier(const Registry& r) : Verifier(r) {}
-};
-
-class DummyScheduler : public Scheduler {
-public:
-    DummyScheduler(const Registry& r, Dispatcher& d, const SchedulerConfig& c = SchedulerConfig{})
-        : Scheduler(r, d, c) {}
-};
-
-class DummyDispatcher : public Dispatcher {
-public:
-    DummyDispatcher() : Dispatcher("/tmp") {}
-};
-
 // ===========================================================================
-// Tests for apply_worker_filesystem
+// apply_worker_filesystem
 // ===========================================================================
-TEST(WorkerRunTest, ApplyWorkerFilesystemCreatesDirectories) {
-    // This test requires root privileges because it calls mount/pivot_root.
-    // Skip if not root.
-    if (geteuid() != 0) {
-        GTEST_SKIP() << "Skipping test that requires root privileges";
-    }
+TEST (ApplyWorkerFilesystemTest, CreatesRequiredDirectories)
+{
+  if (geteuid () != 0)
+    GTEST_SKIP () << "Requires root (mount/pivot_root)";
 
-    TempHome home;
-    std::string worker_id = "test_worker";
-    std::string run_id = "test_run_001";
+  TempHome home;
+  const std::string worker_id = "test_worker";
+  const std::string run_id = "test_run_001";
 
-    // Call the function
-    bool result = apply_worker_filesystem(worker_id, run_id);
-    EXPECT_TRUE(result);
+  EXPECT_TRUE (apply_worker_filesystem (worker_id, run_id));
 
-    // Verify directories were created
-    std::filesystem::path base(home.path());
-    std::filesystem::path layers_dir = base / "layers" / "runs" / run_id;
-    std::filesystem::path upper_dir = layers_dir / "upper";
-    std::filesystem::path work_dir  = layers_dir / "work";
-    std::filesystem::path log_dir  = base / "logs" / "runs" / run_id;
+  const fs::path base = home.path ();
+  const fs::path layers_dir = base / "layers" / "runs" / run_id;
 
-    EXPECT_TRUE(std::filesystem::exists(upper_dir));
-    EXPECT_TRUE(std::filesystem::exists(work_dir));
-    EXPECT_TRUE(std::filesystem::exists(log_dir));
+  EXPECT_TRUE (fs::exists (layers_dir / "upper"));
+  EXPECT_TRUE (fs::exists (layers_dir / "work"));
+  EXPECT_TRUE (fs::exists (base / "logs" / "runs" / run_id));
 }
 
 // ===========================================================================
-// Tests for gc_run_layers
+// gc_run_layers
 // ===========================================================================
-TEST(WorkerRunTest, GcRunLayersRemovesNonRunningLayers) {
-    TempHome home;
+TEST (GcRunLayersTest, RemovesCompletedLayerDirectory)
+{
+  TempHome home;
 
-    // Create a temporary layer directory
-    std::string layer_path = home.path() + "/layers/runs/test_run_gc";
-    std::filesystem::create_directories(layer_path);
-    ASSERT_TRUE(std::filesystem::exists(layer_path));
+  const std::string layer_path = home.path () + "/layers/runs/test_run_gc";
+  fs::create_directories (layer_path);
+  ASSERT_TRUE (fs::exists (layer_path));
 
-    // Create a WorkerRun with status "completed"
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  WorkerRun run;
+  run.run_id = "test_run_gc";
+  run.worker_id = "test_worker";
+  run.status = "completed";
+  run.layer_path = layer_path;
+  run.log_path = home.path () + "/logs/runs/test_run_gc/output.log";
+  db.insert_worker_run (run);
+
+  gc_run_layers (db);
+
+  EXPECT_FALSE (fs::exists (layer_path));
+}
+
+TEST (GcRunLayersTest, PreservesRunningLayerDirectory)
+{
+  TempHome home;
+
+  const std::string layer_path = home.path () + "/layers/runs/test_run_running";
+  fs::create_directories (layer_path);
+  ASSERT_TRUE (fs::exists (layer_path));
+
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  WorkerRun run;
+  run.run_id = "test_run_running";
+  run.worker_id = "test_worker";
+  run.status = "running";
+  run.layer_path = layer_path;
+  run.log_path = home.path () + "/logs/runs/test_run_running/output.log";
+  db.insert_worker_run (run);
+
+  gc_run_layers (db);
+
+  EXPECT_TRUE (fs::exists (layer_path));
+}
+
+// ===========================================================================
+// Database worker_runs
+// ===========================================================================
+TEST (DatabaseWorkerRunTest, InsertAndGetActiveRuns)
+{
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  WorkerRun run;
+  run.run_id = "run_001";
+  run.worker_id = "worker_1";
+  run.pid = 1234;
+  run.started_at = 1000;
+  run.status = "running";
+  run.layer_path = "/tmp/layers/runs/run_001";
+  run.log_path = "/tmp/logs/runs/run_001/output.log";
+  db.insert_worker_run (run);
+
+  const auto active = db.get_active_worker_runs ();
+  ASSERT_EQ (active.size (), 1u);
+  EXPECT_EQ (active[0].run_id, "run_001");
+  EXPECT_EQ (active[0].status, "running");
+}
+
+TEST (DatabaseWorkerRunTest, UpdateStatusToCompleted)
+{
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  WorkerRun run;
+  run.run_id = "run_002";
+  run.worker_id = "worker_2";
+  run.pid = 5678;
+  run.started_at = 2000;
+  run.status = "running";
+  run.layer_path = "/tmp/layers/runs/run_002";
+  run.log_path = "/tmp/logs/runs/run_002/output.log";
+  db.insert_worker_run (run);
+
+  run.status = "completed";
+  run.ended_at = 3000;
+  run.exit_code = 0;
+  db.update_worker_run (run);
+
+  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
+}
+
+TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
+{
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  for (const auto &[id, pid] :
+       std::initializer_list<std::pair<std::string, int>>{{"run_a", 111},
+                                                          {"run_b", 222}})
+  {
     WorkerRun run;
-    run.run_id = "test_run_gc";
-    run.worker_id = "test_worker";
-    run.status = "completed";
-    run.layer_path = layer_path;
-    run.log_path = home.path() + "/logs/runs/test_run_gc/output.log";
-
-    // Use a real Database with in-memory SQLite
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    // Insert the run
-    db.insert_worker_run(run);
-
-    // Call gc_run_layers
-    gc_run_layers(db);
-
-    // The layer directory should be removed
-    EXPECT_FALSE(std::filesystem::exists(layer_path));
-}
-
-TEST(WorkerRunTest, GcRunLayersDoesNotRemoveRunningLayers) {
-    TempHome home;
-
-    std::string layer_path = home.path() + "/layers/runs/test_run_running";
-    std::filesystem::create_directories(layer_path);
-    ASSERT_TRUE(std::filesystem::exists(layer_path));
-
-    WorkerRun run;
-    run.run_id = "test_run_running";
-    run.worker_id = "test_worker";
-    run.status = "running";
-    run.layer_path = layer_path;
-    run.log_path = home.path() + "/logs/runs/test_run_running/output.log";
-
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-    db.insert_worker_run(run);
-
-    gc_run_layers(db);
-
-    // The layer directory should still exist
-    EXPECT_TRUE(std::filesystem::exists(layer_path));
-
-    // Cleanup
-    std::filesystem::remove_all(layer_path);
-}
-
-// ===========================================================================
-// Tests for Database worker_runs methods
-// ===========================================================================
-TEST(WorkerRunTest, DatabaseInsertAndGetActiveWorkerRuns) {
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    WorkerRun run;
-    run.run_id = "run_001";
-    run.worker_id = "worker_1";
-    run.pid = 1234;
-    run.started_at = 1000;
-    run.status = "running";
-    run.layer_path = "/tmp/layers/runs/run_001";
-    run.log_path = "/tmp/logs/runs/run_001/output.log";
-
-    db.insert_worker_run(run);
-
-    auto active = db.get_active_worker_runs();
-    ASSERT_EQ(active.size(), 1);
-    EXPECT_EQ(active[0].run_id, "run_001");
-    EXPECT_EQ(active[0].status, "running");
-}
-
-TEST(WorkerRunTest, DatabaseUpdateWorkerRun) {
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    WorkerRun run;
-    run.run_id = "run_002";
-    run.worker_id = "worker_2";
-    run.pid = 5678;
-    run.started_at = 2000;
-    run.status = "running";
-    run.layer_path = "/tmp/layers/runs/run_002";
-    run.log_path = "/tmp/logs/runs/run_002/output.log";
-
-    db.insert_worker_run(run);
-
-    // Update status to completed
-    run.status = "completed";
-    run.ended_at = 3000;
-    run.exit_code = 0;
-    db.update_worker_run(run);
-
-    auto active = db.get_active_worker_runs();
-    EXPECT_TRUE(active.empty()); // because status is no longer 'running'
-}
-
-TEST(WorkerRunTest, DatabaseMarkAllRunningAsCrashed) {
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    WorkerRun run1;
-    run1.run_id = "run_a";
-    run1.worker_id = "w1";
-    run1.pid = 111;
-    run1.started_at = 100;
-    run1.status = "running";
-    run1.layer_path = "/tmp/layers/runs/run_a";
-    run1.log_path = "/tmp/logs/runs/run_a/output.log";
-
-    WorkerRun run2;
-    run2.run_id = "run_b";
-    run2.worker_id = "w2";
-    run2.pid = 222;
-    run2.started_at = 200;
-    run2.status = "running";
-    run2.layer_path = "/tmp/layers/runs/run_b";
-    run2.log_path = "/tmp/logs/runs/run_b/output.log";
-
-    db.insert_worker_run(run1);
-    db.insert_worker_run(run2);
-
-    db.mark_all_running_as_crashed();
-
-    auto active = db.get_active_worker_runs();
-    EXPECT_TRUE(active.empty());
-}
-
-// ===========================================================================
-// Tests for ForgeDatabase last_code_path
-// ===========================================================================
-TEST(WorkerRunTest, ForgeDatabaseInsertAndGetWithLastCodePath) {
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    ForgeDatabase fdb(db);
-    fdb.create_tables();
-
-    ForgeJob job;
-    job.id = ForgeJobId("forge_test_001");
-    job.method = "test_method";
-    job.requirement = "test requirement";
-    job.phase = "Drafting";
-    job.last_code = "print('hello')";
-    job.last_code_path = "/tmp/forge/forge_test_001/attempt_1.py";
-    job.created_at = 1000;
-    job.updated_at = 1000;
-
-    fdb.insert_job(job);
-
-    auto opt = fdb.get_job("forge_test_001");
-    ASSERT_TRUE(opt.has_value());
-    EXPECT_EQ(opt->last_code_path, "/tmp/forge/forge_test_001/attempt_1.py");
-}
-
-TEST(WorkerRunTest, ForgeDatabaseUpdateLastCodePath) {
-    Database db(":memory:");
-    ASSERT_TRUE(db.open());
-
-    ForgeDatabase fdb(db);
-    fdb.create_tables();
-
-    ForgeJob job;
-    job.id = ForgeJobId("forge_test_002");
-    job.method = "test_method";
-    job.requirement = "test requirement";
-    job.phase = "Drafting";
-    job.last_code = "print('hello')";
-    job.last_code_path = "/tmp/forge/forge_test_002/attempt_1.py";
-    job.created_at = 2000;
-    job.updated_at = 2000;
-
-    fdb.insert_job(job);
-
-    // Update last_code_path
-    job.last_code_path = "/tmp/forge/forge_test_002/attempt_2.py";
-    job.updated_at = 3000;
-    fdb.update_job(job);
-
-    auto opt = fdb.get_job("forge_test_002");
-    ASSERT_TRUE(opt.has_value());
-    EXPECT_EQ(opt->last_code_path, "/tmp/forge/forge_test_002/attempt_2.py");
-}
-
-// ===========================================================================
-// Tests for Orchestrator::resume_in_flight calling mark_all_running_as_crashed
-// ===========================================================================
-TEST(WorkerRunTest, OrchestratorResumeInFlightCallsMarkAllRunningAsCrashed) {
-    // Create dummy dependencies
-    DummyRegistry registry;
-    DummyVerifier verifier(registry);
-    DummyDispatcher dispatcher;
-    DummyScheduler scheduler(registry, dispatcher);
-
-    // Use a real Database
-    Database realDb(":memory:");
-    ASSERT_TRUE(realDb.open());
-
-    // Insert a running run
-    WorkerRun run;
-    run.run_id = "orchestrator_test_run";
-    run.worker_id = "test_worker";
-    run.pid = 999;
+    run.run_id = id;
+    run.worker_id = "w";
+    run.pid = pid;
     run.started_at = 100;
     run.status = "running";
-    run.layer_path = "/tmp/layers/runs/orchestrator_test_run";
-    run.log_path = "/tmp/logs/runs/orchestrator_test_run/output.log";
-    realDb.insert_worker_run(run);
+    run.layer_path = "/tmp/layers/runs/" + id;
+    run.log_path = "/tmp/logs/runs/" + id + "/output.log";
+    db.insert_worker_run (run);
+  }
 
-    // Create Orchestrator with this database
-    // We need to pass the db_path to Orchestrator constructor.
-    // But Orchestrator opens its own Database. We'll use a temporary file.
-    std::string db_path = "/tmp/agentos_test_orchestrator.db";
-    {
-        Orchestrator orchestrator(registry, verifier, scheduler, dispatcher, db_path);
-        // The constructor calls resume_in_flight which should mark runs as crashed.
-    }
+  db.mark_all_running_as_crashed ();
 
-    // Reopen the database and check that the run is now crashed
-    Database checkDb(db_path);
-    ASSERT_TRUE(checkDb.open());
-    auto active = checkDb.get_active_worker_runs();
-    EXPECT_TRUE(active.empty());
-
-    // Cleanup
-    std::filesystem::remove(db_path);
+  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
 }
 
 // ===========================================================================
-// Main
+// ForgeDatabase last_code_path
 // ===========================================================================
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    ::testing::InitGoogleMock(&argc, argv);
-    return RUN_ALL_TESTS();
+TEST (ForgeDatabaseTest, InsertAndGetLastCodePath)
+{
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  ForgeDatabase fdb (db);
+  fdb.create_tables ();
+
+  ForgeJob job;
+  job.id = ForgeJobId ("forge_test_001");
+  job.method = "test_method";
+  job.requirement = "test requirement";
+  job.phase = "drafting";
+  job.last_code = "print('hello')";
+  job.last_code_path = "/tmp/forge/forge_test_001/attempt_1.py";
+  job.created_at = 1000;
+  job.updated_at = 1000;
+  fdb.insert_job (job);
+
+  const auto opt = fdb.get_job ("forge_test_001");
+  ASSERT_TRUE (opt.has_value ());
+  EXPECT_EQ (opt->last_code_path, "/tmp/forge/forge_test_001/attempt_1.py");
+}
+
+TEST (ForgeDatabaseTest, UpdateLastCodePath)
+{
+  Database db (":memory:");
+  ASSERT_TRUE (db.open ());
+
+  ForgeDatabase fdb (db);
+  fdb.create_tables ();
+
+  ForgeJob job;
+  job.id = ForgeJobId ("forge_test_002");
+  job.method = "test_method";
+  job.requirement = "test requirement";
+  job.phase = "drafting";
+  job.last_code = "print('hello')";
+  job.last_code_path = "/tmp/forge/forge_test_002/attempt_1.py";
+  job.created_at = 2000;
+  job.updated_at = 2000;
+  fdb.insert_job (job);
+
+  job.last_code_path = "/tmp/forge/forge_test_002/attempt_2.py";
+  job.updated_at = 3000;
+  fdb.update_job (job);
+
+  const auto opt = fdb.get_job ("forge_test_002");
+  ASSERT_TRUE (opt.has_value ());
+  EXPECT_EQ (opt->last_code_path, "/tmp/forge/forge_test_002/attempt_2.py");
+}
+
+// ===========================================================================
+// Orchestrator::resume_in_flight (ADR-005)
+// ===========================================================================
+TEST_F (WorkerRunTest, ResumeInFlight_MarksRunningAsCrashed)
+{
+  WorkerRun run;
+  run.run_id = "orchestrator_test_run";
+  run.worker_id = "test_worker";
+  run.pid = 999;
+  run.started_at = 100;
+  run.status = "running";
+  run.layer_path = "/tmp/layers/runs/orchestrator_test_run";
+  run.log_path = "/tmp/logs/runs/orchestrator_test_run/output.log";
+  db.insert_worker_run (run);
+
+  orchestrator.resume_in_flight ();
+
+  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
+}
+
+TEST_F (WorkerRunTest, ResumeInFlight_NoRunningRuns_NoOp)
+{
+  // No runs inserted — resume_in_flight should complete without error.
+  EXPECT_NO_THROW (orchestrator.resume_in_flight ());
+  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
 }

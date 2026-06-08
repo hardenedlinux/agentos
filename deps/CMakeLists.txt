@@ -279,62 +279,55 @@ set(CAP_INCLUDE_DIR "${INSTALL_DIR}/include"      CACHE INTERNAL "libcap include
 # ---------------------------------------------------------------------------
 # OpenSSL (compiled, static)
 # ---------------------------------------------------------------------------
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-  set(OPENSSL_TARGET "linux-aarch64")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-  set(OPENSSL_TARGET "linux-x86_64")
-else()
-  message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-endif()
-
 ExternalProject_Add(openssl_ext
-  URL           https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz
-  URL_HASH      SHA256=23c666d0edf20f14249b3d8f0368acaee9ab585b09e1de82107c66e1f3ec9533
-  DOWNLOAD_NAME openssl-3.0.15.tar.gz
+  URL           https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz
+  URL_HASH      SHA256=c551065efd7b21efaf9c01ddd7a131b6df6e701d99a15a0ea1825b50352629cc
+  DOWNLOAD_NAME openssl-3.3.2.tar.gz
+  PREFIX        ${DEPS_BUILD_DIR}/openssl
   DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
   SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/openssl-src
   STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/openssl
+  BINARY_DIR    ${DEPS_BUILD_DIR}/openssl/build
   CONFIGURE_COMMAND
   <SOURCE_DIR>/Configure
-  --prefix=<INSTALL_DIR>
-  no-shared
-  no-tests
-  linux-x86_64
-  BUILD_COMMAND   make -j4
-  INSTALL_COMMAND make install_sw
-  BUILD_BYPRODUCTS
-  <INSTALL_DIR>/lib/libssl.a
-  <INSTALL_DIR>/lib/libcrypto.a
-  LOG_DOWNLOAD  ON
-  LOG_CONFIGURE ON
-  LOG_BUILD     ON
-  LOG_OUTPUT_ON_FAILURE ON
-)
-ExternalProject_Get_Property(openssl_ext INSTALL_DIR)
-message(STATUS "OpenSSL INSTALL_DIR: ${INSTALL_DIR}")
-set(OPENSSL_STATIC_SSL    "${DEPS_BUILD_DIR}/openssl/lib/libssl.a"    CACHE INTERNAL "")
-set(OPENSSL_STATIC_CRYPTO "${DEPS_BUILD_DIR}/openssl/lib/libcrypto.a" CACHE INTERNAL "")
-set(OPENSSL_STATIC_INC    "${DEPS_BUILD_DIR}/openssl/include"          CACHE INTERNAL "")
+    --prefix=<INSTALL_DIR>
+    no-shared
+    no-tests
+    ${OPENSSL_TARGET}
+    BUILD_COMMAND   make -j4
+    INSTALL_COMMAND make install_sw
+    BUILD_BYPRODUCTS
+    <INSTALL_DIR>/lib/libssl.a
+    <INSTALL_DIR>/lib/libcrypto.a
+    LOG_DOWNLOAD  ON
+    LOG_CONFIGURE ON
+    LOG_BUILD     ON
+    LOG_OUTPUT_ON_FAILURE ON
+  )
+  ExternalProject_Get_Property(openssl_ext INSTALL_DIR)
+  set(OPENSSL_STATIC_SSL    "${INSTALL_DIR}/lib64/libssl.a"   CACHE INTERNAL "openssl ssl")
+  set(OPENSSL_STATIC_CRYPTO "${INSTALL_DIR}/lib64/libcrypto.a" CACHE INTERNAL "openssl crypto")
+  set(OPENSSL_STATIC_INC    "${INSTALL_DIR}/include"         CACHE INTERNAL "openssl include")
 
-# ---------------------------------------------------------------------------
-# GoogleTest (compiled, only when AGENTOS_BUILD_TESTS=ON)
-# ---------------------------------------------------------------------------
-if(AGENTOS_BUILD_TESTS)
-  ExternalProject_Add(googletest_ext
-    URL           https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-    URL_HASH      SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
-    DOWNLOAD_NAME googletest-v1.14.0.tar.gz
-    PREFIX        ${DEPS_BUILD_DIR}/googletest
-    DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
-    SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/googletest-src
-    STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/googletest
-    BINARY_DIR    ${DEPS_BUILD_DIR}/googletest/build
-    CMAKE_ARGS
-    -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
-    -DCMAKE_CXX_STANDARD=17
-    -DBUILD_SHARED_LIBS=OFF
-    -DINSTALL_GTEST=ON
-    -DINSTALL_GMOCK=ON
+  # ---------------------------------------------------------------------------
+  # GoogleTest (compiled, only when AGENTOS_BUILD_TESTS=ON)
+  # ---------------------------------------------------------------------------
+  if(AGENTOS_BUILD_TESTS)
+    ExternalProject_Add(googletest_ext
+      URL           https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+      URL_HASH      SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+      DOWNLOAD_NAME googletest-v1.14.0.tar.gz
+      PREFIX        ${DEPS_BUILD_DIR}/googletest
+      DOWNLOAD_DIR  ${CMAKE_SOURCE_DIR}/deps-src/downloads
+      SOURCE_DIR    ${CMAKE_SOURCE_DIR}/deps-src/googletest-src
+      STAMP_DIR     ${DEPS_BUILD_DIR}/stamps/googletest
+      BINARY_DIR    ${DEPS_BUILD_DIR}/googletest/build
+      CMAKE_ARGS
+      -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+      -DCMAKE_CXX_STANDARD=17
+      -DBUILD_SHARED_LIBS=OFF
+      -DINSTALL_GTEST=ON
+      -DINSTALL_GMOCK=ON
     BUILD_BYPRODUCTS
     <INSTALL_DIR>/lib/libgtest.a
     <INSTALL_DIR>/lib/libgtest_main.a

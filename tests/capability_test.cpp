@@ -102,13 +102,14 @@ TEST (CapabilityTest, TcpConnectPorts_NetworkFalse_Rejected)
   EXPECT_EQ (result->verdict, CapabilityVerdict::Reject);
 }
 
-TEST (CapabilityTest, EmptyJobDir_AbsolutePath_Escalated)
+TEST (CapabilityTest, EmptyJobDir_ReturnsError)
 {
   CapabilityDeclaration decl;
   decl.fs_read.push_back ("/tmp/job/input.txt");
   auto result = validate_capability (decl, "");
-  ASSERT_TRUE (result.has_value ());
-  EXPECT_EQ (result->verdict, CapabilityVerdict::Escalate);
+  // Empty worker_dir is a caller contract violation → Error, not a policy
+  // verdict
+  EXPECT_FALSE (result.has_value ());
 }
 
 // ---------------------------------------------------------------------------

@@ -36,37 +36,37 @@ namespace agentos
     if (!obj.IsObject ())
       return result;
     for (auto it = obj.MemberBegin (); it != obj.MemberEnd (); ++it)
+    {
+      ArgSchema arg;
+      // The value can be a simple string (type) or an object with "type" and
+      // optional "required" fields.
+      if (it->value.IsString ())
       {
-        ArgSchema arg;
-        // The value can be a simple string (type) or an object with "type" and
-        // optional "required" fields.
-        if (it->value.IsString ())
-          {
-            arg.type = it->value.GetString ();
-            arg.required = true;
-          }
-        else if (it->value.IsObject ())
-          {
-            const auto &val = it->value;
-            if (val.HasMember ("type") && val["type"].IsString ())
-              arg.type = val["type"].GetString ();
-            else
-              arg.type = "string";
-            if (val.HasMember ("required") && val["required"].IsBool ())
-              arg.required = val["required"].GetBool ();
-            else
-              arg.required = true;
-            if (val.HasMember ("description") && val["description"].IsString ())
-              arg.description = val["description"].GetString ();
-          }
-        else
-          {
-            // fallback
-            arg.type = "string";
-            arg.required = true;
-          }
-        result[it->name.GetString ()] = std::move (arg);
+        arg.type = it->value.GetString ();
+        arg.required = true;
       }
+      else if (it->value.IsObject ())
+      {
+        const auto &val = it->value;
+        if (val.HasMember ("type") && val["type"].IsString ())
+          arg.type = val["type"].GetString ();
+        else
+          arg.type = "string";
+        if (val.HasMember ("required") && val["required"].IsBool ())
+          arg.required = val["required"].GetBool ();
+        else
+          arg.required = true;
+        if (val.HasMember ("description") && val["description"].IsString ())
+          arg.description = val["description"].GetString ();
+      }
+      else
+      {
+        // fallback
+        arg.type = "string";
+        arg.required = true;
+      }
+      result[it->name.GetString ()] = std::move (arg);
+    }
     return result;
   }
 
@@ -84,10 +84,10 @@ namespace agentos
     rapidjson::Document doc;
     doc.Parse (manifest_json.c_str ());
     if (doc.HasParseError () || !doc.IsObject ())
-      {
-        spdlog::error ("[registry] invalid manifest for agent '{}'", agent_id);
-        return false;
-      }
+    {
+      spdlog::error ("[registry] invalid manifest for agent '{}'", agent_id);
+      return false;
+    }
 
     // Common fields
     std::string name = agent_id;
@@ -99,21 +99,21 @@ namespace agentos
 
     std::vector<std::string> domains;
     if (doc.HasMember ("domains") && doc["domains"].IsArray ())
-      {
-        for (const auto &d : doc["domains"].GetArray ())
+    {
+      for (const auto &d : doc["domains"].GetArray ())
         if (d.IsString ())
           domains.push_back (d.GetString ());
-      }
+    }
 
     if (role == "adviser")
-      {
-        out_adviser.id = ClientId (agent_id);
-        out_adviser.name = name;
-        out_adviser.version = version;
-        out_adviser.skill_path = binary_path;
-        out_adviser.domains = std::move (domains);
-        return true;
-      }
+    {
+      out_adviser.id = ClientId (agent_id);
+      out_adviser.name = name;
+      out_adviser.version = version;
+      out_adviser.skill_path = binary_path;
+      out_adviser.domains = std::move (domains);
+      return true;
+    }
 
     // role == "worker"
     out_worker.id = ClientId (agent_id);
@@ -122,43 +122,43 @@ namespace agentos
     out_worker.binary_path = binary_path;
 
     if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())
-      {
-        spdlog::warn ("[registry] worker '{}' has no capabilities", agent_id);
-        return true; // still valid, just no commands
-      }
+    {
+      spdlog::warn ("[registry] worker '{}' has no capabilities", agent_id);
+      return true; // still valid, just no commands
+    }
 
     for (const auto &cap : doc["capabilities"].GetArray ())
+    {
+      if (!cap.IsObject ())
+        continue;
+      CommandSchema schema;
+      if (cap.HasMember ("method") && cap["method"].IsString ())
+        schema.name = cap["method"].GetString ();
+      else
+        continue; // skip entries without a method name
+
+      if (cap.HasMember ("description") && cap["description"].IsString ())
+        schema.description = cap["description"].GetString ();
+
+      if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
+        schema.input = parse_arg_schema (cap["input_schema"]);
+
+      if (cap.HasMember ("output_schema") && cap["output_schema"].IsObject ())
+        schema.output = parse_arg_schema (cap["output_schema"]);
+
+      // resource_hints -> limits (optional)
+      if (cap.HasMember ("resource_hints") && cap["resource_hints"].IsObject ())
       {
-        if (!cap.IsObject ())
-          continue;
-        CommandSchema schema;
-        if (cap.HasMember ("method") && cap["method"].IsString ())
-          schema.name = cap["method"].GetString ();
-        else
-          continue; // skip entries without a method name
-
-        if (cap.HasMember ("description") && cap["description"].IsString ())
-          schema.description = cap["description"].GetString ();
-
-        if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
-          schema.input = parse_arg_schema (cap["input_schema"]);
-
-        if (cap.HasMember ("output_schema") && cap["output_schema"].IsObject ())
-          schema.output = parse_arg_schema (cap["output_schema"]);
-
-        // resource_hints -> limits (optional)
-        if (cap.HasMember ("resource_hints") && cap["resource_hints"].IsObject ())
-          {
-            const auto &hints = cap["resource_hints"];
-            if (hints.HasMember ("timeout_ms") && hints["timeout_ms"].IsInt ())
-              schema.limits.timeout_ms = hints["timeout_ms"].GetInt ();
-            if (hints.HasMember ("max_input_len")
-                && hints["max_input_len"].IsInt ())
-              schema.limits.max_input_len = hints["max_input_len"].GetInt ();
-          }
-
-        out_worker.commands.push_back (std::move (schema));
+        const auto &hints = cap["resource_hints"];
+        if (hints.HasMember ("timeout_ms") && hints["timeout_ms"].IsInt ())
+          schema.limits.timeout_ms = hints["timeout_ms"].GetInt ();
+        if (hints.HasMember ("max_input_len")
+            && hints["max_input_len"].IsInt ())
+          schema.limits.max_input_len = hints["max_input_len"].GetInt ();
       }
+
+      out_worker.commands.push_back (std::move (schema));
+    }
     return true;
   }
 
@@ -169,29 +169,29 @@ namespace agentos
   Registry::Registry (Database &db) : impl_ (std::make_unique<Impl> ())
   {
     for (const auto &row : db.load_enabled_agents ())
-      {
-        RegisteredAdviser adviser;
-        RegisteredExecutor worker;
-        if (!parse_manifest (row.manifest, row.id, row.role, row.binary_path,
-                             adviser, worker))
-          continue;
+    {
+      RegisteredAdviser adviser;
+      RegisteredExecutor worker;
+      if (!parse_manifest (row.manifest, row.id, row.role, row.binary_path,
+                           adviser, worker))
+        continue;
 
-        if (row.role == "adviser")
-          impl_->advisers[row.id] = std::move (adviser);
-        else if (row.role == "worker")
-          {
-            impl_->workers[row.id] = worker;
-            for (const auto &cmd : worker.commands)
-              {
-                impl_->command_to_worker[cmd.name] = row.id;
-                impl_->command_schemas[cmd.name] = cmd;
-              }
-          }
+      if (row.role == "adviser")
+        impl_->advisers[row.id] = std::move (adviser);
+      else if (row.role == "worker")
+      {
+        impl_->workers[row.id] = worker;
+        for (const auto &cmd : worker.commands)
+        {
+          impl_->command_to_worker[cmd.name] = row.id;
+          impl_->command_schemas[cmd.name] = cmd;
+        }
       }
+    }
   }
 
   Registry::Registry (Registry &&other) noexcept
-  : impl_ (std::move (other.impl_))
+    : impl_ (std::move (other.impl_))
   {
   }
 
@@ -202,9 +202,7 @@ namespace agentos
     return *this;
   }
 
-  Registry::~Registry ()
-  {
-  }
+  Registry::~Registry () {}
 
   void Registry::register_adviser (const RegisteredAdviser & /*adviser*/)
   {
@@ -229,15 +227,15 @@ namespace agentos
     // Return the first adviser whose domains list contains the requested
     // domain (or any adviser if domain is empty)
     for (const auto &[id, adviser] : impl_->advisers)
+    {
+      if (domain.empty ())
+        return adviser;
+      for (const auto &d : adviser.domains)
       {
-        if (domain.empty ())
+        if (d == domain)
           return adviser;
-        for (const auto &d : adviser.domains)
-          {
-            if (d == domain)
-              return adviser;
-          }
       }
+    }
     return std::nullopt;
   }
 
@@ -294,93 +292,126 @@ namespace agentos
   // -----------------------------------------------------------------------
   // ADR-019: worker registration after forge pipeline promotes
   // -----------------------------------------------------------------------
-  void Registry::finalize_worker_promotion(const ForgePipelineJob& job,
-                                           const std::string& worker_code,
-                                           const std::string& capability_json,
-                                           Database& db)
+  void Registry::finalize_worker_promotion (const ForgePipelineJob &job,
+                                            const std::string &worker_code,
+                                            const std::string &capability_json,
+                                            Database &db)
   {
-    auto home       = agentos_home();
+    auto home = agentos_home ();
     auto worker_dir = home / "workers" / job.id;
     std::error_code ec;
-    std::filesystem::create_directories(worker_dir, ec);
+    std::filesystem::create_directories (worker_dir, ec);
     if (ec)
-      {
-        spdlog::error("[registry] cannot create worker directory {}: {}",
-                      worker_dir.string(), ec.message());
-        return;
-      }
+    {
+      spdlog::error ("[registry] cannot create worker directory {}: {}",
+                     worker_dir.string (), ec.message ());
+      return;
+    }
 
     // Write worker source file
     auto code_path = worker_dir / "worker.py";
     {
-      std::ofstream out(code_path);
+      std::ofstream out (code_path);
       if (!out)
-        {
-          spdlog::error("[registry] cannot write worker code to {}",
-                        code_path.string());
-          return;
-        }
+      {
+        spdlog::error ("[registry] cannot write worker code to {}",
+                       code_path.string ());
+        return;
+      }
       out << worker_code;
     }
 
     // Write manifest.json
     auto manifest_path = worker_dir / "manifest.json";
     {
-      std::ofstream out(manifest_path);
+      std::ofstream out (manifest_path);
       if (!out)
-        {
-          spdlog::error("[registry] cannot write manifest to {}",
-                        manifest_path.string());
-          return;
-        }
+      {
+        spdlog::error ("[registry] cannot write manifest to {}",
+                       manifest_path.string ());
+        return;
+      }
       out << capability_json;
     }
 
     // Insert agent record
-    db.insert_agent(job.id, "worker", code_path.string(), capability_json);
+    db.insert_agent (job.id, "worker", code_path.string (), capability_json);
 
     // Insert capability rows
     rapidjson::Document cap_doc;
-    cap_doc.Parse(capability_json.c_str());
-    if (!cap_doc.HasParseError() && cap_doc.HasMember("capabilities")
-        && cap_doc["capabilities"].IsArray())
+    cap_doc.Parse (capability_json.c_str ());
+    if (!cap_doc.HasParseError () && cap_doc.HasMember ("capabilities")
+        && cap_doc["capabilities"].IsArray ())
+    {
+      for (const auto &cap : cap_doc["capabilities"].GetArray ())
       {
-        for (const auto& cap : cap_doc["capabilities"].GetArray())
-          {
-            if (!cap.IsObject())
-              continue;
+        if (!cap.IsObject ())
+          continue;
 
-            if (!cap.HasMember("method") || !cap["method"].IsString())
-              continue;
+        if (!cap.HasMember ("method") || !cap["method"].IsString ())
+          continue;
 
-            const std::string method = cap["method"].GetString();
-            const std::string desc   = cap.HasMember("description")
-                                       && cap["description"].IsString()
-                                       ? cap["description"].GetString()
-                                       : "";
+        const std::string method = cap["method"].GetString ();
+        const std::string desc
+          = cap.HasMember ("description") && cap["description"].IsString ()
+              ? cap["description"].GetString ()
+              : "";
 
-            std::string input_schema = "{}";
-            if (cap.HasMember("input_schema") && cap["input_schema"].IsObject())
-              {
-                rapidjson::StringBuffer              ibuf;
-                rapidjson::Writer<rapidjson::StringBuffer> iw(ibuf);
-                cap["input_schema"].Accept(iw);
-                input_schema = ibuf.GetString();
-              }
+        std::string input_schema = "{}";
+        if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
+        {
+          rapidjson::StringBuffer ibuf;
+          rapidjson::Writer<rapidjson::StringBuffer> iw (ibuf);
+          cap["input_schema"].Accept (iw);
+          input_schema = ibuf.GetString ();
+        }
 
-            db.insert_capability(job.id, method, desc, input_schema);
-          }
+        db.insert_capability (job.id, method, desc, input_schema);
       }
+    }
     else
-      {
-        spdlog::warn("[registry] no capabilities in manifest for worker '{}'",
-                     job.id);
-      }
+    {
+      spdlog::warn ("[registry] no capabilities in manifest for worker '{}'",
+                    job.id);
+    }
 
     // Update forge job status to promoted
-    db.update_forge_pipeline_job_status(job.id, "promoted");
+    db.update_forge_pipeline_job_status (job.id, "promoted");
 
-    spdlog::info("[registry] worker '{}' promoted and registered", job.id);
+    // Sync in-memory registry
+    RegisteredExecutor executor;
+    executor.id = ClientId (job.id);
+    executor.name = job.id;
+    executor.binary_path = code_path.string ();
+
+    // Parse commands from capability_json
+    if (!cap_doc.HasParseError () && cap_doc.HasMember ("capabilities")
+        && cap_doc["capabilities"].IsArray ())
+    {
+      for (const auto &cap : cap_doc["capabilities"].GetArray ())
+      {
+        if (!cap.IsObject () || !cap.HasMember ("method")
+            || !cap["method"].IsString ())
+          continue;
+        CommandSchema cmd;
+        cmd.name = cap["method"].GetString ();
+        cmd.description
+          = cap.HasMember ("description") && cap["description"].IsString ()
+          ? cap["description"].GetString ()
+          : "";
+        executor.commands.push_back (std::move (cmd));
+      }
+    }
+
+    for (const auto &cmd : executor.commands)
+      {
+        impl_->command_to_worker[cmd.name] = job.id;
+        impl_->command_schemas[cmd.name] = cmd;
+      }
+
+    impl_->workers[job.id] = std::move (executor);
+
+    spdlog::info ("[registry] worker '{}' promoted and registered", job.id);
   }
 
   std::optional<RegisteredAdviser>

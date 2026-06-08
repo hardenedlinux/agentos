@@ -53,9 +53,9 @@ namespace agentos
     {
       workers_.reserve (pool_size);
       for (int i = 0; i < pool_size; ++i)
-      {
-        workers_.emplace_back (&LlmProxy::worker_loop, this);
-      }
+        {
+          workers_.emplace_back (&LlmProxy::worker_loop, this);
+        }
     }
 
     ~LlmProxy ()
@@ -66,9 +66,9 @@ namespace agentos
       }
       cv_.notify_all ();
       for (auto &t : workers_)
-      {
-        if (t.joinable ())
-          t.join ();
+        {
+          if (t.joinable ())
+            t.join ();
       }
     }
 

@@ -125,7 +125,18 @@ namespace agentos
         // ----------------------------------------------------
         // httplib::Client handles both http:// and https:// when built with
         // SSL support
+
+        // Drop scheme prefix, httplib::Client only accepts
+        // host, not complete url scheme.
+        std::string host = req.base_url;
+        if (host.substr (0, 8) == "https://")
+          host = host.substr (8);
+        else if (host.substr (0, 7) == "http://")
+          host = host.substr (7);
+
+        spdlog::info ("[llm_proxy] connecting to host: '{}'", host);
         auto cli = std::make_unique<httplib::Client> (req.base_url);
+
         cli->set_connection_timeout (timeout_s, 0);
         cli->set_read_timeout (timeout_s, 0);
 
@@ -272,27 +283,32 @@ namespace agentos
   void LlmProxy::worker_loop ()
   {
     while (true)
+    {
+      LlmWorkItem item;
       {
-        LlmWorkItem item;
-        {
-          std::unique_lock<std::mutex> lk (mtx_);
-          cv_.wait (lk, [this] { return stop_ || !queue_.empty (); });
-          if (stop_ && queue_.empty ())
-            return;
-          item = std::move (queue_.front ());
-          queue_.pop ();
-        }
-
-        try
-          {
-            // Perform the actual call (blocking, with retries)
-            auto res = agentos::perform_call (item.request, timeout_s_);
-            item.promise.set_value (std::move (res));
-          }
-        catch (...)
-          {
-            item.promise.set_exception (std::current_exception ());
-          }
+        std::unique_lock<std::mutex> lk (mtx_);
+        cv_.wait (lk, [this] { return stop_ || !queue_.empty (); });
+        if (stop_ && queue_.empty ())
+          goto failed;
+        item = std::move (queue_.front ());
+        queue_.pop ();
       }
+
+      try
+        {
+          // Perform the actual call (blocking, with retries)
+          auto res = agentos::perform_call (item.request, timeout_s_);
+          item.promise.set_value (std::move (res));
+        }
+      catch (...)
+        {
+          OPENSSL_thread_stop ();
+          item.promise.set_exception (std::current_exception ());
+        }
+    }
+
+  failed:
+    OPENSSL_thread_stop ();
+    return;
   }
 } // namespace agentos

@@ -190,7 +190,7 @@ TEST_F (ForgePipelineTest, LoadInFlight_ExcludesTerminalStates)
 TEST_F (ForgePipelineTest, LoadInFlight_EmptyWhenAllTerminal)
 {
   db_->store_forge_pipeline_job (make_job ("j1", "promoted"));
-  db_->store_forge_pipeline_job (make_job ("j2", "failed"));
+  db_->store_forge_pipeline_job (make_job ("j2", "rejected"));
 
   auto in_flight = db_->load_in_flight_forge_pipeline_jobs ();
   EXPECT_TRUE (in_flight.empty ());

@@ -22,19 +22,23 @@
 using namespace agentos;
 
 // -----------------------------------------------------------------------
-// Mock Database that provides a real sqlite3 handle for testing
+// MockDatabase — in-memory SQLite, open result recorded for SetUp checks
 // -----------------------------------------------------------------------
 class MockDatabase : public Database
 {
 public:
-  MockDatabase () : Database (":memory:")
-  {
-    open ();
-  }
+  MockDatabase () : Database (":memory:"), open_ok_ (open ()) {}
   ~MockDatabase ()
   {
     close ();
   }
+  bool is_open_ok () const
+  {
+    return open_ok_;
+  }
+
+private:
+  bool open_ok_;
 };
 
 // -----------------------------------------------------------------------
@@ -89,13 +93,13 @@ protected:
 
   void SetUp () override
   {
+    ASSERT_TRUE (mockDb.is_open_ok ());
     forgeDb.create_tables ();
   }
 };
 
 TEST_F (ForgeDatabaseTest, CreateTables)
 {
-  // Should not throw
   forgeDb.create_tables ();
 }
 
@@ -172,16 +176,16 @@ TEST_F (ForgeDatabaseTest, GetJobsByPhase)
   job2.updated_at = 2;
   forgeDb.insert_job (job2);
 
-  auto draftingJobs = forgeDb.get_jobs_by_phase ("Drafting");
-  EXPECT_EQ (draftingJobs.size (), 1);
-  EXPECT_EQ (draftingJobs[0].id.value (), "j1");
+  auto drafting = forgeDb.get_jobs_by_phase ("Drafting");
+  EXPECT_EQ (drafting.size (), 1u);
+  EXPECT_EQ (drafting[0].id.value (), "j1");
 
-  auto humanReviewJobs = forgeDb.get_jobs_by_phase ("HumanReview");
-  EXPECT_EQ (humanReviewJobs.size (), 1);
-  EXPECT_EQ (humanReviewJobs[0].id.value (), "j2");
+  auto human = forgeDb.get_jobs_by_phase ("HumanReview");
+  EXPECT_EQ (human.size (), 1u);
+  EXPECT_EQ (human[0].id.value (), "j2");
 
-  auto approvedJobs = forgeDb.get_jobs_by_phase ("Approved");
-  EXPECT_TRUE (approvedJobs.empty ());
+  auto approved = forgeDb.get_jobs_by_phase ("Approved");
+  EXPECT_TRUE (approved.empty ());
 }
 
 TEST_F (ForgeDatabaseTest, GetAllJobs)
@@ -205,7 +209,7 @@ TEST_F (ForgeDatabaseTest, GetAllJobs)
   forgeDb.insert_job (job2);
 
   auto all = forgeDb.get_all_jobs ();
-  EXPECT_EQ (all.size (), 2);
+  EXPECT_EQ (all.size (), 2u);
 }
 
 // -----------------------------------------------------------------------
@@ -311,7 +315,7 @@ TEST (ForgeStateMachineTest, HumanReviewCallsCallback)
 }
 
 // -----------------------------------------------------------------------
-// Test ForgeManager (requires full mock of Registry, Dispatcher, etc.)
+// Test ForgeManager
 // -----------------------------------------------------------------------
 class ForgeManagerTest : public ::testing::Test
 {
@@ -321,13 +325,14 @@ protected:
   Verifier verifier{registry};
   Dispatcher dispatcher{"/tmp/forge_test"};
   SchedulerConfig schedConfig;
-  Scheduler scheduler{registry, dispatcher, schedConfig, mockDb}; // 4个参数
+  Scheduler scheduler{registry, dispatcher, schedConfig, mockDb};
   Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, mockDb};
   ObsBus obsBus;
   ForgeManager forgeManager{mockDb, registry, dispatcher, orchestrator, obsBus};
 
   void SetUp () override
   {
+    ASSERT_TRUE (mockDb.is_open_ok ());
     forgeManager.initialize ();
   }
 };
@@ -336,7 +341,7 @@ TEST_F (ForgeManagerTest, CreateJob)
 {
   std::string id = forgeManager.create_job ("test_method", "test_requirement");
   EXPECT_FALSE (id.empty ());
-  EXPECT_TRUE (id.find ("forge_") == 0);
+  EXPECT_EQ (id.find ("forge_"), 0u);
 }
 
 TEST_F (ForgeManagerTest, GetJob)
@@ -356,7 +361,6 @@ TEST_F (ForgeManagerTest, ProcessJob)
   forgeManager.process_job (id);
   auto opt = forgeManager.get_job (id);
   ASSERT_TRUE (opt.has_value ());
-  // After processing, phase should be Reviewing (since Drafting -> Reviewing)
   EXPECT_EQ (opt->phase, "Reviewing");
   EXPECT_EQ (opt->attempt, 1);
 }
@@ -366,29 +370,26 @@ TEST_F (ForgeManagerTest, ListJobs)
   forgeManager.create_job ("m1", "r1");
   forgeManager.create_job ("m2", "r2");
   auto jobs = forgeManager.list_jobs ();
-  EXPECT_EQ (jobs.size (), 2);
+  EXPECT_EQ (jobs.size (), 2u);
 }
 
 TEST_F (ForgeManagerTest, ListHumanReviewJobs)
 {
-  // Create a job and manually set its phase to HumanReview
   std::string id = forgeManager.create_job ("m3", "r3");
   auto opt = forgeManager.get_job (id);
   ASSERT_TRUE (opt.has_value ());
   opt->phase = "HumanReview";
-  // Use forgeDb directly to update
   ForgeDatabase forgeDb (mockDb);
   forgeDb.update_job (*opt);
 
   auto humanJobs = forgeManager.list_human_review_jobs ();
-  EXPECT_EQ (humanJobs.size (), 1);
+  EXPECT_EQ (humanJobs.size (), 1u);
   EXPECT_EQ (humanJobs[0].id.value (), id);
 }
 
 TEST_F (ForgeManagerTest, ApproveHumanReview)
 {
   std::string id = forgeManager.create_job ("m4", "r4");
-  // Manually set phase to HumanReview
   ForgeDatabase forgeDb (mockDb);
   auto opt = forgeDb.get_job (id);
   ASSERT_TRUE (opt.has_value ());
@@ -398,7 +399,6 @@ TEST_F (ForgeManagerTest, ApproveHumanReview)
   forgeManager.approve_human_review (id);
   auto updated = forgeManager.get_job (id);
   ASSERT_TRUE (updated.has_value ());
-  // After approval, process_job moves from Approved to Promoted
   EXPECT_EQ (updated->phase, "Promoted");
 }
 
@@ -414,8 +414,6 @@ TEST_F (ForgeManagerTest, RejectHumanReview)
   forgeManager.reject_human_review (id, "bad code");
   auto updated = forgeManager.get_job (id);
   ASSERT_TRUE (updated.has_value ());
-  // After rejection, process_job moves from Drafting to Reviewing
   EXPECT_EQ (updated->phase, "Reviewing");
-  // last_feedback is cleared by draft callback
   EXPECT_TRUE (updated->last_feedback.empty ());
 }

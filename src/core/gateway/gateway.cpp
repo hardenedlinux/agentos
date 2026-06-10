@@ -77,28 +77,53 @@ void Gateway::run()
 
         // ── 1. Drain all outbound messages first (inproc → external) ──────
         while (running_) {
-            zmq::message_t msg;
-            if (!inproc_pull_.recv(msg, zmq::recv_flags::dontwait))
+            // Receive the first part of the multipart message pushed onto inproc.
+            // The sender (Orchestrator / PeriodicExecutor) is responsible for
+            // sending the complete ZMQ ROUTER‑compatible multipart:
+            //   [identity frame] [empty delimiter frame] [payload]
+            zmq::message_t part;
+            if (!inproc_pull_.recv(part, zmq::recv_flags::dontwait))
                 break;
-            // Outbound messages pushed onto inproc://gateway-out are expected
-            // to already contain the ZMQ identity frame as the first part.
-            agentos_sock_.send(std::move(msg), zmq::send_flags::none);
+
+            bool more = part.more();
+            agentos_sock_.send(std::move(part),
+                               more ? zmq::send_flags::sndmore
+                                    : zmq::send_flags::none);
+
+            // Forward any remaining parts of the multipart.
+            while (more) {
+                zmq::message_t next;
+                if (!inproc_pull_.recv(next, zmq::recv_flags::dontwait)) {
+                    // Unexpected end of multipart; break to avoid blocking.
+                    break;
+                }
+                more = next.more();
+                agentos_sock_.send(std::move(next),
+                                   more ? zmq::send_flags::sndmore
+                                        : zmq::send_flags::none);
+            }
         }
 
         // ── 2. Handle at most one inbound message per cycle ──────────────
         if (running_) {
-            zmq::message_t msg;
-            if (agentos_sock_.recv(msg, zmq::recv_flags::dontwait)) {
+            zmq::message_t identity_msg;
+            if (agentos_sock_.recv(identity_msg, zmq::recv_flags::dontwait)) {
                 // The first part from a ROUTER socket is always the identity.
-                std::string identity = msg.to_string();
+                std::string identity = identity_msg.to_string();
 
-                // The next part is the JSON-RPC payload.
-                zmq::message_t payload;
-                bool have_payload = agentos_sock_.recv(payload, zmq::recv_flags::dontwait);
-                if (have_payload) {
+                // Discard the empty delimiter frame that the ROUTER socket inserts.
+                zmq::message_t delim_msg;
+                bool has_delim = agentos_sock_.recv(delim_msg, zmq::recv_flags::dontwait);
+
+                // The next part is the actual JSON‑RPC payload.
+                zmq::message_t payload_msg;
+                bool has_payload = has_delim &&
+                                   agentos_sock_.recv(payload_msg, zmq::recv_flags::dontwait);
+
+                if (has_payload) {
                     GatewayInbound inbound;
                     inbound.identity = identity;
-                    inbound.message = payload.to_string();
+                    inbound.message = payload_msg.to_string();
 
                     // Forward *exactly* the raw bytes to the Orchestrator.
                     // Authentication / rate‑limiting happen there (ADR‑022).

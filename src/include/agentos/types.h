@@ -218,4 +218,20 @@ namespace agentos
     std::string message;  // raw JSON-RPC 2.0 message
   };
 
+  // ADR-020: Access key record (schema defined in ADR-020)
+  struct AccessKey
+  {
+    std::string id;
+    std::string key;            // plaintext for display
+    std::string key_hash;       // SHA-256(key || salt)
+    std::string key_salt;       // per-key random salt (16 bytes base64url)
+    std::string description;
+    std::string role;           // admin | operator | readonly
+    int64_t created_at = 0;
+    std::optional<int64_t> expires_at;
+    std::optional<int64_t> last_used_at;
+    std::optional<int64_t> revoked_at;
+    std::optional<std::string> revoked_reason;
+  };
+
 } // namespace agentos

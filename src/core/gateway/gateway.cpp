@@ -3,11 +3,17 @@
  *
  * ADR-020 implementation — pure byte-pushing I/O thread for the external ZMQ
  * ROUTER.
+ *
+ * Frame layout:
+ *   Inbound  (DEALER → ROUTER): ROUTER sees [identity][payload]  (2 frames)
+ *   Outbound (inproc → ROUTER → DEALER): push [identity][payload], DEALER gets
+ * [payload]
+ *
+ * DEALER sockets do NOT insert an empty delimiter frame.
+ * The empty delimiter is a REQ/REP convention only.
  */
 #include "agentos/gateway.h"
-#include "agentos/central.h"      // Central::send<Orchestrator>(...)
-#include "agentos/home_init.h"    // agentos_home()
-#include "agentos/orchestrator.h" // GatewayInbound forwarding target
+#include "agentos/home_init.h"
 
 #include <chrono>
 #include <spdlog/spdlog.h>
@@ -15,9 +21,10 @@
 namespace agentos
 {
 
-  Gateway::Gateway (zmq::context_t &zmq_ctx, Central &central)
+  Gateway::Gateway (zmq::context_t &zmq_ctx, ForwardFn forward_fn)
     : zmq_ctx_ (zmq_ctx), agentos_sock_ (zmq_ctx, zmq::socket_type::router),
-      inproc_pull_ (zmq_ctx, zmq::socket_type::pull), central_ (central)
+      inproc_pull_ (zmq_ctx, zmq::socket_type::pull),
+      forward_fn_ (std::move (forward_fn))
   {
   }
 
@@ -26,13 +33,13 @@ namespace agentos
     stop ();
   }
 
+  void Gateway::bind_inproc ()
+  {
+    inproc_pull_.bind ("inproc://gateway-out");
+  }
+
   void Gateway::start ()
   {
-    // inproc://gateway-out PULL is bound by Central before this call (ADR-024).
-    // Central guarantees the bind happens before any actor that may PUSH to it
-    // starts.
-
-    // Bind external ROUTER socket.
     const std::string socket_path
       = (agentos_home () / "run" / "agentos.sock").string ();
     agentos_sock_.bind ("ipc://" + socket_path);
@@ -64,7 +71,6 @@ namespace agentos
 
   void Gateway::run ()
   {
-    // Poll timeout chosen short enough to keep the `running_` flag responsive.
     static constexpr int poll_timeout_ms = 100;
 
     while (running_)
@@ -83,6 +89,8 @@ namespace agentos
       }
 
       // ── 1. Drain all outbound messages first (inproc → external) ──────
+      // Sender pushes [identity][payload]; forward both frames verbatim.
+      // ROUTER uses the identity frame to route; DEALER receives [payload].
       if (items[1].revents & ZMQ_POLLIN)
       {
         while (running_)
@@ -94,7 +102,6 @@ namespace agentos
           bool more = part.more ();
           agentos_sock_.send (std::move (part), more ? zmq::send_flags::sndmore
                                                      : zmq::send_flags::none);
-
           while (more)
           {
             zmq::message_t next;
@@ -110,38 +117,26 @@ namespace agentos
       }
 
       // ── 2. Handle at most one inbound message per cycle ──────────────
+      // ROUTER receives [identity][payload] from a DEALER — exactly 2 frames.
+      // No empty delimiter: DEALER does not use the REQ/REP envelope
+      // convention.
       if (running_ && (items[0].revents & ZMQ_POLLIN))
       {
         zmq::message_t identity_msg;
-        if (agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
-              .has_value ())
-        {
-          std::string identity = identity_msg.to_string ();
+        if (!agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
+               .has_value ())
+          continue;
 
-          // Discard the empty delimiter frame that ROUTER inserts.
-          zmq::message_t delim_msg;
-          const bool has_delim
-            = agentos_sock_.recv (delim_msg, zmq::recv_flags::dontwait)
-                .has_value ();
+        std::string identity = identity_msg.to_string ();
 
-          // The next part is the actual JSON-RPC payload.
-          zmq::message_t payload_msg;
-          const bool has_payload
-            = has_delim
-            && agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
-            .has_value ();
+        // Second frame is the payload — no delimiter to skip.
+        zmq::message_t payload_msg;
+        if (!agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
+            .has_value ())
+          continue;
 
-          if (has_payload)
-            {
-              GatewayInbound inbound;
-              inbound.identity = identity;
-              inbound.message = payload_msg.to_string ();
-
-              // Forward raw bytes to Orchestrator — no parsing, no auth
-              // (ADR-022).
-              central_.send<Orchestrator> (inbound);
-            }
-        }
+        forward_fn_ (GatewayInbound{.identity = std::move (identity),
+                                    .message = payload_msg.to_string ()});
       }
     }
   }

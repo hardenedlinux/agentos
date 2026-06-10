@@ -211,4 +211,11 @@ namespace agentos
     } llm;
   };
 
+  // ADR-020: Gateway inbound message (identity + raw JSON‑RPC payload)
+  struct GatewayInbound
+  {
+    std::string identity; // ZMQ identity frame
+    std::string message;  // raw JSON-RPC 2.0 message
+  };
+
 } // namespace agentos

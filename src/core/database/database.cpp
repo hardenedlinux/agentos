@@ -172,6 +172,24 @@ namespace agentos
     if (!exec_ddl (schema))
       return false;
 
+    // ADR-022: add columns to tasks table (idempotent)
+    {
+      auto maybe_add_column = [this] (const char *ddl) {
+        char *err = nullptr;
+        sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
+        if (err)
+        {
+          spdlog::debug ("[database] migration DDL '{}': {}", ddl, err);
+          sqlite3_free (err);
+        }
+      };
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN result TEXT");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN description TEXT");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN step_order INTEGER");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN started_at INTEGER");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN completed_at INTEGER");
+    }
+
     spdlog::info ("[database] opened {}", db_path_);
     return true;
   }
@@ -447,6 +465,66 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_task: {}", sqlite3_errmsg (db_));
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-022 pipeline step persistence
+  // ---------------------------------------------------------------------------
+
+  void Database::store_pipeline_task (const TaskId &job_id,
+                                      const PipelinePlanStep &step,
+                                      int step_order)
+  {
+    if (!db_)
+      return;
+
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO tasks
+          (id, job_id, agent_id, method, params,
+           description, step_order, status)
+      VALUES (?, ?, '', ?, ?, ?, ?, 'pending')
+    )"));
+    if (!stmt.s)
+      return;
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    for (const auto &[k, v] : step.params)
+    {
+      w.Key (k.c_str ());
+      w.String (v.c_str ());
+    }
+    w.EndObject ();
+
+    sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, step.command.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 6, step_order);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] store_pipeline_task: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::string Database::load_step_result (const std::string &step_id)
+  {
+    if (!db_)
+      return "";
+
+    Stmt stmt (prepare ("SELECT result FROM tasks WHERE id = ?"));
+    if (!stmt.s)
+      return "";
+
+    sqlite3_bind_text (stmt, 1, step_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return column_text_or_empty (stmt, 0);
+    return "";
   }
 
   // ---------------------------------------------------------------------------

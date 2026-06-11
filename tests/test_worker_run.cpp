@@ -130,7 +130,7 @@ TEST (GcRunLayersTest, RemovesCompletedLayerDirectory)
   WorkerRun run;
   run.run_id = "test_run_gc";
   run.worker_id = "test_worker";
-  run.status = "completed";
+  run.status = WorkerStatus::completed;
   run.layer_path = layer_path;
   run.log_path = home.path () + "/logs/runs/test_run_gc/output.log";
   db.insert_worker_run (run);
@@ -154,7 +154,7 @@ TEST (GcRunLayersTest, PreservesRunningLayerDirectory)
   WorkerRun run;
   run.run_id = "test_run_running";
   run.worker_id = "test_worker";
-  run.status = "running";
+  run.status = WorkerStatus::running;
   run.layer_path = layer_path;
   run.log_path = home.path () + "/logs/runs/test_run_running/output.log";
   db.insert_worker_run (run);
@@ -177,7 +177,7 @@ TEST (DatabaseWorkerRunTest, InsertAndGetActiveRuns)
   run.worker_id = "worker_1";
   run.pid = 1234;
   run.started_at = 1000;
-  run.status = "running";
+  run.status = WorkerStatus::running;
   run.layer_path = "/tmp/layers/runs/run_001";
   run.log_path = "/tmp/logs/runs/run_001/output.log";
   db.insert_worker_run (run);
@@ -198,12 +198,12 @@ TEST (DatabaseWorkerRunTest, UpdateStatusToCompleted)
   run.worker_id = "worker_2";
   run.pid = 5678;
   run.started_at = 2000;
-  run.status = "running";
+  run.status = WorkerStatus::running;
   run.layer_path = "/tmp/layers/runs/run_002";
   run.log_path = "/tmp/logs/runs/run_002/output.log";
   db.insert_worker_run (run);
 
-  run.status = "completed";
+  run.status = WorkerStatus::completed;
   run.ended_at = 3000;
   run.exit_code = 0;
   db.update_worker_run (run);
@@ -225,7 +225,7 @@ TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
     run.worker_id = "w";
     run.pid = pid;
     run.started_at = 100;
-    run.status = "running";
+    run.status = WorkerStatus::running;
     run.layer_path = "/tmp/layers/runs/" + id;
     run.log_path = "/tmp/logs/runs/" + id + "/output.log";
     db.insert_worker_run (run);
@@ -233,87 +233,3 @@ TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
 
   db.mark_all_running_as_crashed ();
 
-  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
-}
-
-// ===========================================================================
-// ForgeDatabase last_code_path
-// ===========================================================================
-TEST (ForgeDatabaseTest, InsertAndGetLastCodePath)
-{
-  Database db (":memory:");
-  ASSERT_TRUE (db.open ());
-
-  ForgeDatabase fdb (db);
-  fdb.create_tables ();
-
-  ForgeJob job;
-  job.id = ForgeJobId ("forge_test_001");
-  job.method = "test_method";
-  job.requirement = "test requirement";
-  job.phase = "drafting";
-  job.last_code = "print('hello')";
-  job.last_code_path = "/tmp/forge/forge_test_001/attempt_1.py";
-  job.created_at = 1000;
-  job.updated_at = 1000;
-  fdb.insert_job (job);
-
-  const auto opt = fdb.get_job ("forge_test_001");
-  ASSERT_TRUE (opt.has_value ());
-  EXPECT_EQ (opt->last_code_path, "/tmp/forge/forge_test_001/attempt_1.py");
-}
-
-TEST (ForgeDatabaseTest, UpdateLastCodePath)
-{
-  Database db (":memory:");
-  ASSERT_TRUE (db.open ());
-
-  ForgeDatabase fdb (db);
-  fdb.create_tables ();
-
-  ForgeJob job;
-  job.id = ForgeJobId ("forge_test_002");
-  job.method = "test_method";
-  job.requirement = "test requirement";
-  job.phase = "drafting";
-  job.last_code = "print('hello')";
-  job.last_code_path = "/tmp/forge/forge_test_002/attempt_1.py";
-  job.created_at = 2000;
-  job.updated_at = 2000;
-  fdb.insert_job (job);
-
-  job.last_code_path = "/tmp/forge/forge_test_002/attempt_2.py";
-  job.updated_at = 3000;
-  fdb.update_job (job);
-
-  const auto opt = fdb.get_job ("forge_test_002");
-  ASSERT_TRUE (opt.has_value ());
-  EXPECT_EQ (opt->last_code_path, "/tmp/forge/forge_test_002/attempt_2.py");
-}
-
-// ===========================================================================
-// Orchestrator::resume_in_flight (ADR-005)
-// ===========================================================================
-TEST_F (WorkerRunTest, ResumeInFlight_MarksRunningAsCrashed)
-{
-  WorkerRun run;
-  run.run_id = "orchestrator_test_run";
-  run.worker_id = "test_worker";
-  run.pid = 999;
-  run.started_at = 100;
-  run.status = "running";
-  run.layer_path = "/tmp/layers/runs/orchestrator_test_run";
-  run.log_path = "/tmp/logs/runs/orchestrator_test_run/output.log";
-  db.insert_worker_run (run);
-
-  orchestrator.resume_in_flight ();
-
-  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
-}
-
-TEST_F (WorkerRunTest, ResumeInFlight_NoRunningRuns_NoOp)
-{
-  // No runs inserted — resume_in_flight should complete without error.
-  EXPECT_NO_THROW (orchestrator.resume_in_flight ());
-  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
-}

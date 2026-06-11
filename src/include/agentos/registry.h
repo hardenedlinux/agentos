@@ -12,7 +12,7 @@
  * The Registry never touches the network. It is pure in-memory state.
  */
 
-#include "agentos/forge_pipeline_job.h" // ADR-019
+#include "agentos/forge/forge_pipeline_job.h" // ADR-019
 #include "agentos/types.h"
 #include <memory>
 #include <optional>

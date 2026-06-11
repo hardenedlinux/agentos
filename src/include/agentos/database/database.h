@@ -1,6 +1,6 @@
 #pragma once
 
-#include "agentos/forge_pipeline_job.h"
+#include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/types.h"
 #include <filesystem>
 #include <optional>
@@ -33,14 +33,8 @@ namespace agentos
       inline constexpr std::string_view crashed = "crashed";
     } // namespace worker_status
 
-    namespace forge_status
-    {
-      inline constexpr std::string_view drafting = "drafting";
-      inline constexpr std::string_view reviewing = "reviewing";
-      inline constexpr std::string_view promoted = "promoted";
-      inline constexpr std::string_view rejected = "rejected";
-      inline constexpr std::string_view human_review = "human_review";
-    } // namespace forge_status
+    // forge_status string constants removed — use ForgeStatus enum
+    // (forge_pipeline_job.h) and store as INTEGER in SQLite.
   } // namespace db
 
   // ---------------------------------------------------------------------------
@@ -125,7 +119,7 @@ namespace agentos
     void store_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job_status (const std::string &forge_id,
-                                           const std::string &status);
+                                           ForgeStatus status);
     std::optional<ForgePipelineJob>
     load_forge_pipeline_job (const std::string &forge_id);
     std::vector<ForgePipelineJob> load_in_flight_forge_pipeline_jobs ();

@@ -29,22 +29,11 @@ class DatabasePipelineTest : public ::testing::Test
 protected:
   void SetUp () override
   {
-    // Create a unique temporary file name in the system temp directory.
-    // On Linux /tmp is a suitable location; we rely on std::tmpnam.
-    std::string tmpl = (fs::temp_directory_path () / "agentos_test_XXXXXX")
-                         .string ();
-    // After std::tmpnam the string is set.
-    char buftmp[L_tmpnam];
-    std::tmpnam (buftmp);
-    // tmpnam may yield a filename in current directory; we prefer a fixed
-    // prefix inside temp dir.
-    // Simpler: use a deterministic file name inside /tmp that is unlikely to
-    // collide during the unit test run.
-    db_path_ = (fs::temp_directory_path () / "agentos_pipeline_test.db")
-                 .string ();
-
-    // Remove any leftover from previous runs.
-    std::remove (db_path_.c_str ());
+    char tmpl[] = "/tmp/agentos_pipeline_test_XXXXXX";
+    int fd = mkstemp (tmpl);
+    ASSERT_NE (fd, -1);
+    close (fd);
+    db_path_ = tmpl;
 
     db_ = std::make_unique<agentos::Database> (db_path_);
     ASSERT_TRUE (db_->open ()) << "Failed to open test database";
@@ -81,6 +70,14 @@ static void exec_sql (sqlite3 *handle, const char *sql)
 TEST_F (DatabasePipelineTest, StorePipelineTask_InsertNewStep)
 {
   auto job_id = agentos::TaskId ("job-01");
+
+  // tasks has a FOREIGN KEY on jobs(id) — insert parent row first.
+  agentos::Task task;
+  task.id = job_id;
+  task.goal = "test goal";
+  task.input_json = "{}";
+  db_->store_job (task);
+
   agentos::PipelinePlanStep step;
   step.id = "step-1";
   step.command = "extract.text";
@@ -134,6 +131,13 @@ TEST_F (DatabasePipelineTest, StorePipelineTask_InsertNewStep)
 TEST_F (DatabasePipelineTest, LoadStepResult_ReturnsStoredResult)
 {
   auto job_id = agentos::TaskId ("job-load");
+
+  agentos::Task task;
+  task.id = job_id;
+  task.goal = "test goal";
+  task.input_json = "{}";
+  db_->store_job (task);
+
   agentos::PipelinePlanStep step;
   step.id = "load-step";
   step.command = "transform.map";
@@ -223,6 +227,13 @@ TEST_F (DatabasePipelineTest, TasksTableHasNewColumns)
 TEST_F (DatabasePipelineTest, StorePipelineTask_Overwrite)
 {
   auto job_id = agentos::TaskId ("j-overwrite");
+
+  agentos::Task task;
+  task.id = job_id;
+  task.goal = "test goal";
+  task.input_json = "{}";
+  db_->store_job (task);
+
   agentos::PipelinePlanStep step1;
   step1.id = "step-ow";
   step1.command = "cmd.one";

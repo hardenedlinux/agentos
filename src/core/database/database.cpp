@@ -1,5 +1,5 @@
 #include "agentos/database/database.h"
-#include "agentos/forge_pipeline_job.h"
+#include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/home_init.h"
 #include <chrono>
 #include <cstring>
@@ -117,7 +117,7 @@ namespace agentos
     CREATE TABLE IF NOT EXISTS forge_pipeline_jobs (
         id                    TEXT PRIMARY KEY,
         task_id               TEXT NOT NULL,
-        status                TEXT NOT NULL DEFAULT 'drafting',
+        status                INTEGER NOT NULL DEFAULT 0,
         requirement_json      TEXT,
         writer_output_json    TEXT,
         reviewer_verdict_json TEXT,
@@ -174,7 +174,8 @@ namespace agentos
 
     // ADR-022: add columns to tasks table (idempotent)
     {
-      auto maybe_add_column = [this] (const char *ddl) {
+      auto maybe_add_column = [this] (const char *ddl)
+      {
         char *err = nullptr;
         sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
         if (err)
@@ -498,8 +499,7 @@ namespace agentos
     w.EndObject ();
 
     sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1,
-                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, step.command.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
@@ -679,7 +679,7 @@ namespace agentos
     ForgePipelineJob fj;
     fj.id = column_text_or_empty (stmt, 0);
     fj.task_id = column_text_or_empty (stmt, 1);
-    fj.status = column_text_or_empty (stmt, 2);
+    fj.status = static_cast<ForgeStatus> (sqlite3_column_int (stmt, 2));
     fj.requirement_json = column_text_or_empty (stmt, 3);
     fj.writer_output_json = column_text_or_empty (stmt, 4);
     fj.reviewer_verdict_json = column_text_or_empty (stmt, 5);
@@ -709,7 +709,7 @@ namespace agentos
     const int64_t ts = now_unix ();
     sqlite3_bind_text (stmt, 1, job.id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, job.task_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 3, job.status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 3, static_cast<int> (job.status));
     sqlite3_bind_text (stmt, 4, job.requirement_json.c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, job.writer_output_json.c_str (), -1,
@@ -743,7 +743,7 @@ namespace agentos
     if (!stmt.s)
       return;
 
-    sqlite3_bind_text (stmt, 1, job.status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 1, static_cast<int> (job.status));
     sqlite3_bind_text (stmt, 2, job.requirement_json.c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, job.writer_output_json.c_str (), -1,
@@ -764,7 +764,7 @@ namespace agentos
   }
 
   void Database::update_forge_pipeline_job_status (const std::string &forge_id,
-                                                   const std::string &status)
+                                                   ForgeStatus status)
   {
     if (!db_)
       return;
@@ -773,7 +773,7 @@ namespace agentos
     if (!stmt.s)
       return;
 
-    sqlite3_bind_text (stmt, 1, status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 1, static_cast<int> (status));
     sqlite3_bind_int64 (stmt, 2, now_unix ());
     sqlite3_bind_text (stmt, 3, forge_id.c_str (), -1, SQLITE_TRANSIENT);
 
@@ -816,7 +816,7 @@ namespace agentos
              feedback, attempt, max_attempts,
              last_code_path, created_at, updated_at
       FROM forge_pipeline_jobs
-      WHERE status NOT IN ('promoted','rejected','human_review')
+      WHERE status NOT IN (2, 3, 4)
   )"));
     if (!stmt.s)
       return jobs;

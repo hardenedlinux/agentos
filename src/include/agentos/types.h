@@ -234,4 +234,59 @@ namespace agentos
     std::optional<std::string> revoked_reason;
   };
 
+  // ADR-022 — Pipeline Plan (Master‑generated, serial steps)
+  struct PipelinePlanStep
+  {
+    std::string id;
+    std::string command;      // capability method name
+    std::string description;  // natural language (Master‑generated)
+    std::unordered_map<std::string, std::string> params;
+  };
+
+  struct PipelinePlan
+  {
+    TaskId task_id;
+    std::vector<PipelinePlanStep> steps; // ordered; steps[0] executes first
+  };
+
+  // ADR-022 — Orchestrator event queue entries
+  struct OrchestratorEvent
+  {
+    enum class Kind
+    {
+        GatewayInbound,  // raw message from Gateway
+        WorkerDone,      // Dispatcher reports Worker completed
+        WorkerFailed,    // Dispatcher reports Worker failed
+        AdviserDone,     // Adviser thread completed successfully
+        AdviserFailed,   // Adviser thread exited with error
+        MasterDecision,  // Master has reached a decision
+        TimerFired,      // from PeriodicExecutor (scheduled task)
+    };
+
+    Kind        kind;
+    std::string payload_json;
+    TaskId      task_id;
+  };
+
+  // ADR-022 — In‑memory execution state per step and per job
+  struct StepState
+  {
+    PipelinePlanStep step;
+    std::string status;       // "pending" | "running" | "done" | "failed"
+    std::string result_json;  // filled on completion
+    int worker_attempt = 0;
+  };
+
+  struct JobExecution
+  {
+    TaskId task_id;
+    std::string type;             // "oneshot" | "scheduled" | "loop"
+    std::vector<StepState> steps; // ordered pipeline
+    int current_step = 0;
+
+    // loop job state
+    int current_iteration = 0;
+    int current_repairs = 0;
+  };
+
 } // namespace agentos

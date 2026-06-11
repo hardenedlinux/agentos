@@ -107,6 +107,11 @@ namespace agentos
 
     void store_task (const TaskId &job_id, const PlanStep &step);
 
+    // ADR-022 – Pipeline step persistence and retrieval
+    void store_pipeline_task (const TaskId &job_id,
+                              const PipelinePlanStep &step, int step_order);
+    std::string load_step_result (const std::string &step_id);
+
     // -- WorkerRun table ------------------------------------------------------
 
     void insert_worker_run (const WorkerRun &run);

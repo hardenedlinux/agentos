@@ -53,6 +53,52 @@ Dispatcher::build_argv (const std::string &binary_path)
   return {binary_path};
 }
 
+void Dispatcher::set_reap_callback (ReapCallback cb)
+{
+  std::lock_guard<std::mutex> lk (mutex_);
+  reap_cb_ = std::move (cb);
+}
+
+// ---------------------------------------------------------------------------
+// reap — called by PeriodicExecutor every 5 seconds
+// ---------------------------------------------------------------------------
+
+void Dispatcher::reap ()
+{
+  while (true)
+    {
+      int   status = 0;
+      pid_t pid    = waitpid (-1, &status, WNOHANG);
+
+      if (pid <= 0)
+        break; // no more exited children
+
+      const int exit_code = WIFEXITED (status) ? WEXITSTATUS (status) : -1;
+
+      InFlight entry;
+      ReapCallback cb;
+      {
+        std::lock_guard<std::mutex> lk (mutex_);
+        auto it = in_flight_.find (static_cast<int> (pid));
+        if (it == in_flight_.end ())
+          {
+            // Not our child (or already reaped) — ignore.
+            continue;
+          }
+        entry = it->second;
+        in_flight_.erase (it);
+        cb = reap_cb_;
+      }
+
+      spdlog::info ("[dispatcher] reaped pid={} run_id={} exit_code={}",
+                    pid, entry.run_id, exit_code);
+
+      if (cb)
+        cb (WorkerExited{entry.run_id, entry.step_id, exit_code,
+                         entry.job_dir});
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fork_exec
 // ---------------------------------------------------------------------------
@@ -197,6 +243,12 @@ DispatchResult Dispatcher::fork_exec (const DispatchRequest &req)
 
   spdlog::info ("[dispatcher] forked run_id={} pid={} step_id={} binary={}",
                 req.run_id, pid, req.step_id, req.binary_path);
+
+  // Record in-flight entry — protected by mutex (reap() runs on another thread).
+  {
+    std::lock_guard<std::mutex> lk (mutex_);
+    in_flight_[pid] = InFlight{req.run_id, req.step_id, job_dir.string ()};
+  }
 
   return {true, pid, job_dir.string (), log_path.string (), {}};
 }

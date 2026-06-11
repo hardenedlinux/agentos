@@ -1,14 +1,13 @@
 set(AGENTOS_CORE_SOURCES
-  dispatcher/dispatcher.cpp
-  dispatcher/rpc.cpp
-  registry/registry.cpp
-  verifier/verifier.cpp
-  scheduler/scheduler.cpp
-  master/master.cpp
-  orchestrator/orchestrator.cpp
-  obs_bus/obs_bus.cpp
-  database/database.cpp
-  capability/capability.cpp
+  dispatcher.cpp
+  registry.cpp
+  verifier.cpp
+  scheduler.cpp
+  master.cpp
+  periodic_executor.cpp
+  orchestrator.cpp
+  database.cpp
+  capability.cpp
   enforce_layer.cpp
   sandbox/sandbox.cpp
   llm/llm_proxy.cpp

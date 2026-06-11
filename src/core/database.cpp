@@ -1,5 +1,5 @@
 #include "agentos/database/database.h"
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
 #include <chrono>
 #include <cstring>
@@ -110,7 +110,7 @@ namespace agentos
         started_at INTEGER NOT NULL,
         ended_at   INTEGER,
         exit_code  INTEGER,
-        status     TEXT NOT NULL DEFAULT 'running',
+        status     INTEGER NOT NULL DEFAULT 0,
         layer_path TEXT NOT NULL,
         log_path   TEXT NOT NULL
     );
@@ -174,8 +174,7 @@ namespace agentos
 
     // ADR-022: add columns to tasks table (idempotent)
     {
-      auto maybe_add_column = [this] (const char *ddl)
-      {
+      auto maybe_add_column = [this] (const char *ddl) {
         char *err = nullptr;
         sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
         if (err)
@@ -499,7 +498,8 @@ namespace agentos
     w.EndObject ();
 
     sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1,
+                       SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, step.command.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
@@ -527,8 +527,22 @@ namespace agentos
     return "";
   }
 
-  // ---------------------------------------------------------------------------
-  // WorkerRun table
+  void Database::update_step_result (const std::string &step_id,
+                                     const std::string &result_json)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE tasks SET result = ?, status = 'done', completed_at = ? "
+      "WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text  (stmt, 1, result_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text  (stmt, 3, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_step_result: {}", sqlite3_errmsg (db_));
+  }
   // types.h WorkerRun uses magic numbers (ended_at==0, exit_code==-1).
   // We map these to NULL in the database and restore them on read.
   // ---------------------------------------------------------------------------
@@ -546,7 +560,7 @@ namespace agentos
     run.exit_code = sqlite3_column_type (stmt, 5) == SQLITE_NULL
                       ? -1
                       : sqlite3_column_int (stmt, 5);
-    run.status = column_text_or_empty (stmt, 6);
+    run.status = static_cast<WorkerStatus> (sqlite3_column_int (stmt, 6));
     run.layer_path = column_text_or_empty (stmt, 7);
     run.log_path = column_text_or_empty (stmt, 8);
     return run;
@@ -580,7 +594,7 @@ namespace agentos
     else
       sqlite3_bind_int (stmt, 6, run.exit_code);
 
-    sqlite3_bind_text (stmt, 7, run.status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (stmt, 7, static_cast<int> (run.status));
     sqlite3_bind_text (stmt, 8, run.layer_path.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 9, run.log_path.c_str (), -1, SQLITE_TRANSIENT);
 
@@ -607,7 +621,7 @@ namespace agentos
     else
       sqlite3_bind_int (stmt, 2, run.exit_code);
 
-    sqlite3_bind_text (stmt, 3, run.status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (stmt, 3, static_cast<int> (run.status));
     sqlite3_bind_text (stmt, 4, run.run_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
@@ -623,7 +637,7 @@ namespace agentos
     Stmt stmt (prepare (R"(
       SELECT run_id, worker_id, pid, started_at, ended_at, exit_code,
              status, layer_path, log_path
-      FROM worker_runs WHERE status = 'running'
+      FROM worker_runs WHERE status = 0
   )"));
     if (!stmt.s)
       return runs;
@@ -656,8 +670,8 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare ("UPDATE worker_runs SET status='crashed', ended_at=? "
-                        "WHERE status='running'"));
+    Stmt stmt (prepare ("UPDATE worker_runs SET status=3, ended_at=? "
+                        "WHERE status=0"));
     if (!stmt.s)
       return;
 
@@ -709,7 +723,7 @@ namespace agentos
     const int64_t ts = now_unix ();
     sqlite3_bind_text (stmt, 1, job.id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, job.task_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int (stmt, 3, static_cast<int> (job.status));
+    sqlite3_bind_int  (stmt, 3, static_cast<int> (job.status));
     sqlite3_bind_text (stmt, 4, job.requirement_json.c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, job.writer_output_json.c_str (), -1,
@@ -743,7 +757,7 @@ namespace agentos
     if (!stmt.s)
       return;
 
-    sqlite3_bind_int (stmt, 1, static_cast<int> (job.status));
+    sqlite3_bind_int  (stmt, 1, static_cast<int> (job.status));
     sqlite3_bind_text (stmt, 2, job.requirement_json.c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, job.writer_output_json.c_str (), -1,
@@ -773,7 +787,7 @@ namespace agentos
     if (!stmt.s)
       return;
 
-    sqlite3_bind_int (stmt, 1, static_cast<int> (status));
+    sqlite3_bind_int  (stmt, 1, static_cast<int> (status));
     sqlite3_bind_int64 (stmt, 2, now_unix ());
     sqlite3_bind_text (stmt, 3, forge_id.c_str (), -1, SQLITE_TRANSIENT);
 

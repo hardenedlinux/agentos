@@ -1,10 +1,4 @@
 add_library(agentos_forge
-  forge_job.cpp
-  forge_database.cpp
-  forge_state_machine.cpp
-  forge_manager.cpp
-  forge_rpc.cpp
-  forge_cli.cpp
   forge_coordinator.cpp
   code_writer.cpp
   code_reviewer.cpp

@@ -85,7 +85,7 @@ protected:
   InMemoryDatabase db;
   Registry registry{db};
   Verifier verifier{registry};
-  Dispatcher dispatcher{"/tmp"};
+  Dispatcher dispatcher{};
   SchedulerConfig schedConfig{};
   Scheduler scheduler{registry, dispatcher, schedConfig, db};
   Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, db};

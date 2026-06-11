@@ -2,85 +2,120 @@
 /**
  * agentos/dispatcher.h
  *
- * Dispatcher — owns the ZeroMQ sockets per ADR-003.
+ * Dispatcher — pure stateless utility class (ADR-022).
  *
- * Socket layout:
- *   PULL  ipc:///var/run/agentos/results.sock   ← all agents push results here
- *   PUB   ipc:///var/run/agentos/events.sock    ← daemon broadcasts state events
- *   PUSH  ipc:///var/run/agentos/tasks/{task_id}.sock ← one per dispatched task,
- *                                                         created on demand,
- *                                                         torn down after agent exits
+ * Responsibilities:
+ *   - fork/exec Worker binaries with sandbox stack applied
+ *   - Pass task JSON to Worker via stdin
+ *   - Redirect stdout/stderr to log file (ADR-016)
+ *   - Return {run_id, pid} to Orchestrator for DB recording
+ *   - Collect result.json after Orchestrator is notified of Worker exit
  *
- * The Dispatcher knows nothing about agents, workers, plans, or tasks.
- * It only manages ZMQ sockets and message framing.
+ * Dispatcher owns no threads, no queues, no sockets.
+ * All state lives in the Database (worker_runs table, ADR-016).
+ * Worker exit detection is handled by the PeriodicExecutor reaper task.
  *
- * Message framing:
- *   [ 4 bytes: uint32 little-endian payload length ][ UTF-8 JSON payload ]
+ * Path conventions (ADR-016):
+ *   job_dir  = ~/.agentos/layers/runs/<run-id>/
+ *   log_path = ~/.agentos/logs/runs/<run-id>/output.log
+ * Both are derived internally from run_id; callers need not supply them.
  */
 
+#include "agentos/home_init.h"
 #include "agentos/types.h"
-#include "agentos/rpc.h"
-#include <functional>
+
+#include <filesystem>
+#include <optional>
 #include <string>
-#include <unordered_map>
-#include <zmq.hpp>
+#include <vector>
 
 namespace agentos
 {
 
+  // ---------------------------------------------------------------------------
+  // DispatchRequest — what Orchestrator hands to Dispatcher
+  // ---------------------------------------------------------------------------
+  struct DispatchRequest
+  {
+    std::string run_id;    // pre-generated UUID (Orchestrator owns generation)
+    std::string step_id;   // pipeline step this Worker is executing
+    std::string worker_id; // identifies the worker binary in Registry
+    std::string
+      binary_path;         // absolute path to worker executable (.py/.scm/ELF)
+    std::string task_json; // full task payload, written to Worker stdin
+
+    // Capability declaration from worker manifest (ADR-015)
+    std::vector<std::string> fs_read;
+    std::vector<std::string> fs_write;
+    std::vector<int> tcp_connect_ports;
+    bool network = false;
+  };
+
+  // ---------------------------------------------------------------------------
+  // DispatchResult — returned synchronously to Orchestrator after fork
+  // ---------------------------------------------------------------------------
+  struct DispatchResult
+  {
+    bool ok = false;
+    int pid = -1;         // child PID; -1 on failure
+    std::string job_dir;  // ~/.agentos/layers/runs/<run-id>/
+    std::string log_path; // ~/.agentos/logs/runs/<run-id>/output.log
+    std::string error;
+  };
+
+  // ---------------------------------------------------------------------------
+  // CollectResult — returned after Worker exit, result file read
+  // ---------------------------------------------------------------------------
+  struct CollectResult
+  {
+    bool ok = false;
+    int exit_code = -1;
+    std::string result_json;
+    std::string error;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Dispatcher
+  // ---------------------------------------------------------------------------
   class Dispatcher
   {
   public:
-    explicit Dispatcher (const std::string &socket_dir);
-    ~Dispatcher ();
+    Dispatcher () = default;
+    ~Dispatcher () = default;
 
-    // Bind the PULL and PUB sockets (called once at startup)
-    bool bind ();
+    Dispatcher (const Dispatcher &) = delete;
+    Dispatcher &operator= (const Dispatcher &) = delete;
 
-    // Start the event loop for the PULL socket (blocks until stop() is called)
-    bool listen ();
+    // Fork and exec the Worker binary described by req.
+    // Derives job_dir and log_path from req.run_id internally.
+    // Applies sandbox stack before exec (ADR-015, ADR-016).
+    // Writes req.task_json to Worker stdin.
+    // Returns immediately after fork — does NOT wait for Worker to exit.
+    [[nodiscard]]
+    DispatchResult fork_exec (const DispatchRequest &req);
 
-    // Create a per-task PUSH socket, bind it, and return its path.
-    // The caller should pass the path to the agent via environment variable.
-    std::string create_task_push (const std::string &task_id);
-
-    // Close and destroy a per-task PUSH socket (after agent exits)
-    void close_task_push (const std::string &task_id);
-
-    // Send a task JSON to a worker via the per-task PUSH socket.
-    void send_task (const std::string &task_id, const std::string &task_json);
-
-    // Receive a result JSON from the PULL socket (blocks).
-    // Returns empty string on error or stop.
-    std::string receive_result ();
-
-    // Broadcast an event JSON via the PUB socket.
-    void broadcast_event (const std::string &event_json);
-
-    // Send a JSON-RPC request to a specific client (adviser) and invoke
-    // callback with response. This is used for adviser communication.
-    // For now, we use a simple synchronous approach.
-    void send_request (const ClientId &client_id, const std::string &method,
-                       const std::string &params_json,
-                       std::function<void (const std::string &result_json,
-                                           const std::string &error_json)>
-                         callback);
-
-    void stop ();
+    // Read the result file written by the Worker.
+    // Called by Orchestrator after receiving WorkerExited notification.
+    // job_dir is taken from the DispatchResult returned by fork_exec.
+    [[nodiscard]]
+    CollectResult collect (const std::string &run_id,
+                           const std::string &job_dir, int exit_code);
 
   private:
-    std::string socket_dir_;
-    zmq::context_t *context_;
-    zmq::socket_t *pull_socket_;
-    zmq::socket_t *pub_socket_;
-    std::unordered_map<std::string, zmq::socket_t *> task_push_sockets_;
-    bool running_;
+    // Derive the run layer directory from run_id (ADR-016).
+    static std::filesystem::path run_dir (const std::string &run_id);
 
-    // Pending requests: request_id -> callback (for adviser communication)
-    std::unordered_map<std::string,
-                       std::function<void (const std::string &,
-                                           const std::string &)>>
-      pending_requests_;
+    // Derive the log file path from run_id (ADR-016).
+    static std::filesystem::path log_file (const std::string &run_id);
+
+    // Select the interpreter argv for a given binary_path.
+    // Returns {"/usr/bin/env", "python3", binary_path} for .py, etc.
+    static std::vector<std::string> build_argv (const std::string &binary_path);
+
+    // Apply sandbox stack in child process after fork, before exec.
+    // Returns false if any sandbox step fails (child must then _exit).
+    bool apply_child_sandbox (const DispatchRequest &req,
+                              const std::string &job_dir);
   };
 
 } // namespace agentos

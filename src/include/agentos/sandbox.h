@@ -35,12 +35,11 @@ bool apply_worker_filesystem(const std::string& worker_id,
 void gc_run_layers(Database& db);
 
 // ADR-015: Worker sandbox with implicit grants and network control.
-// This function applies the full sandbox stack (cgroup, mount namespace,
-// network namespace if network==false, Landlock rules derived from the
-// explicit fs_read/fs_write/tcp_connect_ports lists plus implicit grants
-// for job_dir and skills directory, seccomp, and capability drop).
-// run_id is the UUID of this worker instance (ADR-016).
-void apply_worker_sandbox(const std::string& job_dir,
+// Called in child process after fork, before exec.
+// Returns true on success; false means child must _exit().
+// Handles: overlayfs+pivot_root, cgroup join, mount namespace,
+// network namespace (if network==false), Landlock, seccomp, cap drop.
+bool apply_worker_sandbox(const std::string& job_dir,
                           const std::vector<std::string>& fs_read,
                           const std::vector<std::string>& fs_write,
                           const std::vector<int>& tcp_connect_ports,

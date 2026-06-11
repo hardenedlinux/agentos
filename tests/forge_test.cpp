@@ -323,7 +323,7 @@ protected:
   MockDatabase mockDb;
   Registry registry{mockDb};
   Verifier verifier{registry};
-  Dispatcher dispatcher{"/tmp/forge_test"};
+  Dispatcher dispatcher{};
   SchedulerConfig schedConfig;
   Scheduler scheduler{registry, dispatcher, schedConfig, mockDb};
   Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, mockDb};

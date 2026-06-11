@@ -505,7 +505,7 @@ void gc_run_layers(Database& db) {
     }
 }
 
-void apply_worker_sandbox(const std::string& job_dir,
+bool apply_worker_sandbox(const std::string& job_dir,
                           const std::vector<std::string>& fs_read,
                           const std::vector<std::string>& fs_write,
                           const std::vector<int>& tcp_connect_ports,
@@ -513,13 +513,12 @@ void apply_worker_sandbox(const std::string& job_dir,
                           const std::string& run_id) {
     spdlog::info("[sandbox] applying worker sandbox for job_dir={}", job_dir);
 
-    // ADR-016: Apply filesystem isolation (overlayfs + pivot_root)
-    // This must be done before other sandbox steps because it changes the root.
-    // The worker_id is derived from job_dir (last component).
+    // ADR-016: Apply filesystem isolation (overlayfs + pivot_root).
+    // worker_id is the last path component of job_dir.
     std::string worker_id = std::filesystem::path(job_dir).filename().string();
     if (!apply_worker_filesystem(worker_id, run_id)) {
         spdlog::error("[sandbox] worker filesystem isolation failed");
-        return;
+        return false;
     }
 
     // 1. cgroup v2
@@ -530,50 +529,50 @@ void apply_worker_sandbox(const std::string& job_dir,
     // 2. mount namespace (always)
     if (unshare(CLONE_NEWNS) != 0) {
         spdlog::error("[sandbox] unshare CLONE_NEWNS failed: {}", strerror(errno));
-        return;
+        return false;
     }
 
-    // 3. network namespace (only if network false)
+    // 3. network namespace (only if network:false)
     if (!network) {
         if (unshare(CLONE_NEWNET) != 0) {
             spdlog::error("[sandbox] unshare CLONE_NEWNET failed: {}", strerror(errno));
-            return;
+            return false;
         }
     }
 
     // 4. mount tmpfs and bind mounts
     std::vector<std::string> read_paths = fs_read;
     std::vector<std::string> write_paths = fs_write;
-    // Implicit: job_dir read+write
+    // Implicit grants (ADR-015): job_dir read+write, skills read-only
     write_paths.push_back(job_dir);
-    // Implicit: skills read
     std::filesystem::path home = agentos_home();
     read_paths.push_back((home / "skills").string());
 
     if (!setup_mounts(job_dir, read_paths, write_paths)) {
         spdlog::error("[sandbox] mount setup failed");
-        return;
+        return false;
     }
 
     // 5. Landlock ruleset
     if (!apply_landlock(read_paths, write_paths, tcp_connect_ports)) {
         spdlog::error("[sandbox] Landlock setup failed");
-        return;
+        return false;
     }
 
     // 6. seccomp
     if (!apply_seccomp()) {
         spdlog::error("[sandbox] seccomp setup failed");
-        return;
+        return false;
     }
 
     // 7. drop capabilities
     if (!drop_capabilities()) {
         spdlog::error("[sandbox] capability drop failed");
-        return;
+        return false;
     }
 
     spdlog::info("[sandbox] worker sandbox applied successfully");
+    return true;
 }
 
 } // namespace agentos

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "agentos/forge_pipeline_job.h"
+#include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/types.h"
 #include <filesystem>
 #include <optional>

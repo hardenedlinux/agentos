@@ -1,9 +1,8 @@
 #include "agentos/scheduler.h"
 #include "agentos/capability.h"
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/home_init.h"
 #include "agentos/registry.h"
-#include "agentos/rpc.h"
 #include "agentos/sandbox.h"
 #include <chrono>
 #include <rapidjson/document.h>
@@ -212,26 +211,26 @@ namespace agentos
     }
 
     switch (result->verdict)
-      {
-      case CapabilityVerdict::Approve:
-        return "";
+    {
+    case CapabilityVerdict::Approve:
+      return "";
 
-      case CapabilityVerdict::Reject:
-        return "capability rejected for step '" + step.id
-          + "': " + result->reason;
+    case CapabilityVerdict::Reject:
+      return "capability rejected for step '" + step.id
+             + "': " + result->reason;
 
-      case CapabilityVerdict::Escalate:
-        return "capability escalated for step '" + step.id
-          + "' (pending human review): " + result->reason;
-      }
+    case CapabilityVerdict::Escalate:
+      return "capability escalated for step '" + step.id
+             + "' (pending human review): " + result->reason;
+    }
 
     // Unreachable; silence compiler warning.
     return "unknown capability verdict";
   }
 
   std::string Scheduler::interpolate_args (
-                                           const std::unordered_map<std::string, std::string> &args,
-                                           const StepResultMap &results) const
+    const std::unordered_map<std::string, std::string> &args,
+    const StepResultMap &results) const
   {
     static const std::regex ref_pattern (R"(\{\{(\w+)\.(\w+)\}\})");
 

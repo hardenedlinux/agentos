@@ -31,7 +31,7 @@
  * Dependencies injected at construction; ForgeCoordinator owns none of them.
  */
 
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/registry.h"

@@ -1,5 +1,5 @@
 #include "agentos/registry.h"
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/home_init.h"
 #include <algorithm>
 #include <chrono>

@@ -26,13 +26,12 @@
 #include <sqlite3.h>
 #include <zmq.hpp>
 
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/dispatcher.h"
 #include "agentos/home_init.h"
 #include "agentos/llm_client.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/master.h"
-#include "agentos/obs_bus.h"
 #include "agentos/registry.h"
 #include "agentos/scheduler.h"
 #include "agentos/types.h"

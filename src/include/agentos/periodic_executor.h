@@ -16,7 +16,7 @@
 
 #include "agentos/actor.h"
 #include "agentos/config.h"
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/dispatcher.h"
 #include "agentos/types.h"
 

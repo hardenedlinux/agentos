@@ -16,7 +16,7 @@
  * It receives a validated Plan and a Dispatcher, and drives execution.
  */
 
-#include "agentos/database/database.h" // ADR-019: Database for forge worker persistence
+#include "agentos/database.h" // ADR-019: Database for forge worker persistence
 #include "agentos/dispatcher.h"
 #include "agentos/types.h"
 #include <functional>

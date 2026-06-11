@@ -178,17 +178,25 @@ namespace agentos
   };
 
   // ADR-016: Worker run record
+  enum class WorkerStatus : int
+  {
+    running   = 0,
+    completed = 1,
+    failed    = 2,
+    crashed   = 3,
+  };
+
   struct WorkerRun
   {
-    std::string run_id;    // UUID
-    std::string worker_id; // worker identifier
-    int pid = 0;
-    int64_t started_at = 0;
-    int64_t ended_at = 0;
-    int exit_code = -1;
-    std::string status;     // running | completed | failed | crashed
-    std::string layer_path; // ~/.agentos/layers/runs/<run-id>/
-    std::string log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
+    std::string  run_id;    // UUID
+    std::string  worker_id; // worker identifier
+    int          pid        = 0;
+    int64_t      started_at = 0;
+    int64_t      ended_at   = 0;
+    int          exit_code  = -1;
+    WorkerStatus status     = WorkerStatus::running;
+    std::string  layer_path; // ~/.agentos/layers/runs/<run-id>/
+    std::string  log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
   };
 
   // ADR-018: Adviser skill package manifest
@@ -255,8 +263,8 @@ namespace agentos
     enum class Kind
     {
         GatewayInbound,  // raw message from Gateway
-        WorkerDone,      // Dispatcher reports Worker completed
-        WorkerFailed,    // Dispatcher reports Worker failed
+        WorkerDone,      // Dispatcher reaper: Worker completed
+        WorkerFailed,    // Dispatcher reaper: Worker failed
         AdviserDone,     // Adviser thread completed successfully
         AdviserFailed,   // Adviser thread exited with error
         MasterDecision,  // Master has reached a decision
@@ -265,28 +273,79 @@ namespace agentos
 
     Kind        kind;
     std::string payload_json;
-    TaskId      task_id;
+    std::string job_id;   // associated job (replaces TaskId where relevant)
   };
 
-  // ADR-022 — In‑memory execution state per step and per job
+  // ADR-024 — Master event queue entries
+  struct MasterEvent
+  {
+    enum class Kind
+    {
+        JobSubmit,        // Orchestrator: new job needs planning
+        WorkerExhausted,  // Orchestrator: no Worker can handle a step
+        AdviserFailed,    // Orchestrator: Adviser thread failed
+        ScheduledTask,    // PeriodicExecutor: periodic review / follow-up
+    };
+
+    Kind        kind;
+    std::string payload_json;
+    std::string job_id;
+  };
+
+  // ADR-020 — Gateway outbound message (response or notification to client)
+  struct GatewayOutbound
+  {
+    std::string identity;    // ZMQ identity frame of the target client
+                             // empty = broadcast to all connected clients
+    std::string message;     // raw JSON-RPC 2.0 payload
+  };
+
+  // ADR-020 — Gateway event queue entries
+  struct GatewayEvent
+  {
+    enum class Kind
+    {
+        Outbound,   // push message to client(s)
+    };
+
+    Kind           kind;
+    GatewayOutbound outbound;
+  };
+
+  // ADR-023 — PeriodicExecutor control messages (register / cancel tasks)
+  struct PeriodicControl
+  {
+    enum class Kind { Register, Cancel };
+
+    struct Task
+    {
+      std::string id;
+      int64_t     interval_s  = 0;   // 0 = one-shot
+      int64_t     next_fire   = 0;   // Unix seconds
+      std::string target;            // "gateway" | "orchestrator" | "master"
+      std::string payload_json;
+    };
+
+    Kind        kind;
+    Task        task;          // used for Register
+    std::string cancel_id;     // used for Cancel
+  };
+
+  enum class StepStatus : int
+  {
+    pending = 0,
+    running = 1,
+    done    = 2,
+    failed  = 3,
+  };
+
+  // ADR-022 — In-memory execution state per step (used by DB layer)
   struct StepState
   {
     PipelinePlanStep step;
-    std::string status;       // "pending" | "running" | "done" | "failed"
-    std::string result_json;  // filled on completion
-    int worker_attempt = 0;
-  };
-
-  struct JobExecution
-  {
-    TaskId task_id;
-    std::string type;             // "oneshot" | "scheduled" | "loop"
-    std::vector<StepState> steps; // ordered pipeline
-    int current_step = 0;
-
-    // loop job state
-    int current_iteration = 0;
-    int current_repairs = 0;
+    StepStatus       status      = StepStatus::pending;
+    std::string      result_json; // filled on completion
+    int              worker_attempt = 0;
   };
 
 } // namespace agentos

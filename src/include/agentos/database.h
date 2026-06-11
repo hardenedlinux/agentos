@@ -1,6 +1,6 @@
 #pragma once
 
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/types.h"
 #include <filesystem>
 #include <optional>
@@ -33,8 +33,14 @@ namespace agentos
       inline constexpr std::string_view crashed = "crashed";
     } // namespace worker_status
 
-    // forge_status string constants removed — use ForgeStatus enum
-    // (forge_pipeline_job.h) and store as INTEGER in SQLite.
+    namespace forge_status
+    {
+      inline constexpr std::string_view drafting = "drafting";
+      inline constexpr std::string_view reviewing = "reviewing";
+      inline constexpr std::string_view promoted = "promoted";
+      inline constexpr std::string_view rejected = "rejected";
+      inline constexpr std::string_view human_review = "human_review";
+    } // namespace forge_status
   } // namespace db
 
   // ---------------------------------------------------------------------------
@@ -105,6 +111,8 @@ namespace agentos
     void store_pipeline_task (const TaskId &job_id,
                               const PipelinePlanStep &step, int step_order);
     std::string load_step_result (const std::string &step_id);
+    void update_step_result (const std::string &step_id,
+                             const std::string &result_json);
 
     // -- WorkerRun table ------------------------------------------------------
 
@@ -119,7 +127,7 @@ namespace agentos
     void store_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job_status (const std::string &forge_id,
-                                           ForgeStatus status);
+                                           const std::string &status);
     std::optional<ForgePipelineJob>
     load_forge_pipeline_job (const std::string &forge_id);
     std::vector<ForgePipelineJob> load_in_flight_forge_pipeline_jobs ();

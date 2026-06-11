@@ -1,57 +1,140 @@
 #pragma once
 /**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * agentos/master.h
  *
- * Master — the sole decision-maker and resource arbiter (ADR-002, ADR-009).
+ * Master — Mind Layer Actor (ADR-002, ADR-009, ADR-024).
  *
- * Responsibilities (Mind Layer):
- *   - Receive user tasks
- *   - Use LLM to understand the task and select an appropriate Adviser
- *   - Spawn the Adviser and obtain a Plan
- *   - Use LLM to review the Plan for soundness
- *   - Delegate execution to Orchestrator
+ * Responsibilities:
+ *   - Select Adviser for a job (LLM call, detached thread)
+ *   - Review plan produced by Adviser (LLM call, detached thread)
+ *   - Decide response to WorkerExhausted (trigger Forge or fail job)
+ *   - Decide response to AdviserFailed (retry or fail job)
  *
- * The Master does not drive the job state machine or touch the database
- * directly; those are Orchestrator's responsibilities.
+ * All on_message() handlers return immediately.
+ * LLM calls run in detached threads and enqueue results back to Master.
+ * Master never touches Database or drives state machines.
  */
-#include "agentos/config.h"
-#include "agentos/dispatcher.h"
+
+#include "agentos/actor.h"
 #include "agentos/llm_client.h"
-#include "agentos/orchestrator.h"
 #include "agentos/registry.h"
 #include "agentos/types.h"
-#include <optional>
+
+#include <functional>
 #include <string>
 
 namespace agentos
 {
 
-  class Master
-  {
-  public:
-    Master (LlmClient &llm, Orchestrator &orchestrator, Registry &registry);
+// ---------------------------------------------------------------------------
+// Extended MasterEvent kinds for internal LLM result flow
+// ---------------------------------------------------------------------------
+// NOTE: MasterEvent::Kind in types.h defines the external-facing kinds.
+// Internal kinds are handled by casting payload_json — we reuse the same
+// struct to avoid a separate internal event type.
+//
+// Internal payload convention (kind == MasterDecision repurposed):
+//   {"_internal":"adviser_selected","job_id":"...","adviser_id":"..."}
+//   {"_internal":"plan_reviewed","job_id":"...","approved":true,"reason":"..."}
+//   {"_internal":"forge_decision","job_id":"...","trigger_forge":true,"command":"..."}
 
-    // Submit a task for execution. Blocking — returns when complete.
-    TaskResult submit (const Task &task);
+class Master : public Actor<MasterEvent>
+{
+public:
+  using SendToOrchestrator = std::function<void(OrchestratorEvent)>;
 
-  private:
-    // Mind Layer: use LLM to select the best Adviser for this task.
-    // Returns the adviser id, or empty string if none found.
-    std::string select_adviser (const Task &task);
+  Master (LlmClient          &llm,
+          Registry           &registry,
+          SendToOrchestrator  send_to_orchestrator);
 
-    // Mind Layer: use LLM to review the Plan produced by the Adviser.
-    // Returns empty string on approval, or a rejection reason.
-    std::string review_plan (const Task &task, const Plan &plan);
+  ~Master () = default;
 
-    // Build the system prompt for adviser selection.
-    std::string build_selection_prompt (const Task &task) const;
+  Master (const Master &)            = delete;
+  Master &operator= (const Master &) = delete;
 
-    // Build the system prompt for plan review.
-    std::string build_review_prompt (const Task &task, const Plan &plan) const;
+private:
+  // ---------------------------------------------------------------------------
+  // Actor interface — all return immediately
+  // ---------------------------------------------------------------------------
+  void on_message (MasterEvent msg) override;
 
-    LlmClient &llm_;
-    Orchestrator &orchestrator_;
-    Registry &registry_;
-  };
+  // ---------------------------------------------------------------------------
+  // External event handlers
+  // ---------------------------------------------------------------------------
+
+  // Received from Orchestrator: new job needs an Adviser selected.
+  // Spawns detached thread to call LLM, enqueues AdviserSelected result.
+  void handle_job_submit (MasterEvent msg);
+
+  // Received from Orchestrator: no Worker for a step.
+  // Spawns detached thread to decide Forge vs fail.
+  void handle_worker_exhausted (MasterEvent msg);
+
+  // Received from Orchestrator: Adviser thread failed.
+  // Decides retry or fail.
+  void handle_adviser_failed (MasterEvent msg);
+
+  // Received from PeriodicExecutor: scheduled review or follow-up.
+  void handle_scheduled_task (MasterEvent msg);
+
+  // ---------------------------------------------------------------------------
+  // Internal result handlers (enqueued by detached LLM threads)
+  // ---------------------------------------------------------------------------
+
+  // LLM has selected an Adviser — tell Orchestrator to spawn it.
+  void handle_adviser_selected (const std::string &payload_json);
+
+  // LLM has reviewed a plan — tell Orchestrator to proceed or fail.
+  void handle_plan_reviewed (const std::string &payload_json);
+
+  // LLM has decided on Forge — tell Orchestrator to trigger or fail.
+  void handle_forge_decision (const std::string &payload_json);
+
+  // ---------------------------------------------------------------------------
+  // LLM helpers (called inside detached threads)
+  // ---------------------------------------------------------------------------
+
+  // Use LLM to select the best Adviser for a job goal.
+  // Returns adviser_id or empty string on failure.
+  std::string select_adviser (const std::string &job_id,
+                              const std::string &goal);
+
+  // Use LLM to review a plan.
+  // Returns empty string on approval, rejection reason otherwise.
+  std::string review_plan (const std::string &job_id,
+                           const std::string &plan_json);
+
+  // Use LLM to decide whether to trigger Forge for a missing Worker.
+  // Returns true if Forge should be triggered.
+  bool decide_forge (const std::string &job_id,
+                     const std::string &command);
+
+  // Build adviser list context for LLM prompt.
+  std::string build_adviser_context () const;
+
+  // ---------------------------------------------------------------------------
+  // Members
+  // ---------------------------------------------------------------------------
+  LlmClient          &llm_;
+  Registry           &registry_;
+  SendToOrchestrator  send_to_orchestrator_;
+};
 
 } // namespace agentos

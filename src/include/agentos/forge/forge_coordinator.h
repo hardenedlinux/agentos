@@ -114,6 +114,13 @@ public:
   // Thread-safe; callable from Orchestrator thread.
   void post(ForgeRequest req);
 
+  // Register the callback invoked when a forge job completes.
+  // Must be called before start(). Thread-safe.
+  void set_completion_callback(CompletionCallback cb)
+  {
+    on_complete_ = std::move(cb);
+  }
+
 private:
   // ---------------------------------------------------------------------------
   // Thread entry point

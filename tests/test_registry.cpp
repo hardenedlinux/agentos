@@ -22,8 +22,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "agentos/database.h"
 #include "agentos/forge/forge_pipeline_job.h"
-#include "agentos/database/database.h"
 #include "agentos/registry.h"
 
 using namespace agentos;

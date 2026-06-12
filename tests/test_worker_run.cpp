@@ -17,9 +17,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/dispatcher.h"
-#include "agentos/forge/forge_database.h"
 #include "agentos/home_init.h"
 #include "agentos/orchestrator.h"
 #include "agentos/registry.h"
@@ -232,4 +231,3 @@ TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
   }
 
   db.mark_all_running_as_crashed ();
-

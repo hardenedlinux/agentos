@@ -27,7 +27,6 @@ include(GoogleTest)
 # Project headers — warnings here are ours to fix, so NOT marked SYSTEM.
 set(AGENTOS_TEST_INCLUDES
   ${CMAKE_SOURCE_DIR}/src/include
-  ${CMAKE_SOURCE_DIR}/src/include/agentos
 )
 
 # Third-party headers — marked SYSTEM so their warnings (e.g. spdlog's

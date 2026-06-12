@@ -8,7 +8,7 @@
 
 #include <gtest/gtest.h>
 
-#include "agentos/database/database.h"
+#include "agentos/database.h"
 #include "agentos/home_init.h"
 #include "agentos/types.h"
 
@@ -156,8 +156,7 @@ TEST_F (DatabasePipelineTest, LoadStepResult_ReturnsStoredResult)
                                    "UPDATE tasks SET result = ? WHERE id = ?",
                                    -1, &stmt, nullptr),
                SQLITE_OK);
-    sqlite3_bind_text (stmt, 1, expected_result.c_str (), -1,
-                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, expected_result.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, step.id.c_str (), -1, SQLITE_TRANSIENT);
     ASSERT_EQ (sqlite3_step (stmt), SQLITE_DONE);
     sqlite3_finalize (stmt);
@@ -184,9 +183,9 @@ TEST_F (DatabasePipelineTest, TasksTableHasNewColumns)
   ASSERT_NE (h, nullptr);
 
   sqlite3_stmt *stmt = nullptr;
-  ASSERT_EQ (sqlite3_prepare_v2 (h, "PRAGMA table_info('tasks')", -1, &stmt,
-                                 nullptr),
-             SQLITE_OK);
+  ASSERT_EQ (
+    sqlite3_prepare_v2 (h, "PRAGMA table_info('tasks')", -1, &stmt, nullptr),
+    SQLITE_OK);
 
   bool has_result = false;
   bool has_description = false;

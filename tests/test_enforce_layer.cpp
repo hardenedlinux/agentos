@@ -4,9 +4,9 @@
  * Unit tests for EnforceLayer (ADR-006, ADR-008/019, ADR-009, ADR-011).
  * These are pure unit tests — no LLM calls, no network, no filesystem writes.
  */
+#include "agentos/database.h"
 #include "agentos/enforce_layer.h"
 #include "agentos/registry.h"
-#include "database/database.h"
 
 #include <gtest/gtest.h>
 

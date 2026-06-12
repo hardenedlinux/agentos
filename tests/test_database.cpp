@@ -1,3 +1,19 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #include "agentos/database.h"
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -43,19 +59,6 @@ TEST_F (DatabaseTest, StoreAndLoadJob)
   db->update_job_plan ("job1", plan_json);
   std::string loaded = db->load_plan_json ("job1");
   EXPECT_EQ (loaded, plan_json);
-}
-
-TEST_F (DatabaseTest, StoreTask)
-{
-  Task task;
-  task.id = "job1";
-  task.goal = "test";
-  db->store_job (task);
-  PlanStep step;
-  step.id = "step1";
-  step.command = "cmd1";
-  step.args["arg1"] = "val1";
-  db->store_task ("job1", step);
 }
 
 TEST_F (DatabaseTest, ResumeInFlight)

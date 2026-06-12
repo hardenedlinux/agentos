@@ -1,4 +1,22 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #include "agentos/types.h"
+#include "agentos/uuid.h"
+
 #include <gtest/gtest.h>
 #include <sstream>
 #include <string>
@@ -163,24 +181,24 @@ TEST (ResultTest, StringError)
 }
 
 // -----------------------------------------------------------------------
-// gen_new_uuid tests
+// gen_uuid tests
 // -----------------------------------------------------------------------
 
 TEST (UuidTest, ReturnsNonEmpty)
 {
-  std::string uuid = gen_new_uuid ();
+  std::string uuid = gen_uuid ();
   EXPECT_FALSE (uuid.empty ());
 }
 
 TEST (UuidTest, Length36)
 {
-  std::string uuid = gen_new_uuid ();
+  std::string uuid = gen_uuid ();
   EXPECT_EQ (uuid.size (), 36);
 }
 
 TEST (UuidTest, Format)
 {
-  std::string uuid = gen_new_uuid ();
+  std::string uuid = gen_uuid ();
   // UUID format: 8-4-4-4-12
   EXPECT_EQ (uuid[8], '-');
   EXPECT_EQ (uuid[13], '-');
@@ -190,19 +208,19 @@ TEST (UuidTest, Format)
 
 TEST (UuidTest, Uniqueness)
 {
-  std::string u1 = gen_new_uuid ();
-  std::string u2 = gen_new_uuid ();
+  std::string u1 = gen_uuid ();
+  std::string u2 = gen_uuid ();
   EXPECT_NE (u1, u2);
 }
 
 TEST (UuidTest, HexCharacters)
 {
-  std::string uuid = gen_new_uuid ();
+  std::string uuid = gen_uuid ();
   for (size_t i = 0; i < uuid.size (); ++i)
-  {
-    if (uuid[i] == '-')
-      continue;
-    EXPECT_TRUE ((uuid[i] >= '0' && uuid[i] <= '9')
-                 || (uuid[i] >= 'a' && uuid[i] <= 'f'));
-  }
+    {
+      if (uuid[i] == '-')
+        continue;
+      EXPECT_TRUE ((uuid[i] >= '0' && uuid[i] <= '9')
+                   || (uuid[i] >= 'a' && uuid[i] <= 'f'));
+    }
 }

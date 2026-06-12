@@ -188,6 +188,38 @@ namespace agentos
         }
       }
     }
+
+    // ADR-007: additional command -> agent entries from the capabilities
+    // table. This covers agents whose manifest does not embed a
+    // "capabilities" array (e.g. registered directly via insert_capability).
+    // Entries here take precedence over manifest-derived ones for the same
+    // method, but in practice the two are kept in sync (finalize_worker_promotion
+    // writes both).
+    for (const auto &cap : db.load_capabilities ())
+    {
+      CommandSchema schema;
+      schema.name = cap.method;
+      schema.description = cap.description;
+
+      rapidjson::Document doc;
+      doc.Parse (cap.input_schema.c_str ());
+      if (!doc.HasParseError () && doc.IsObject ())
+        schema.input = parse_arg_schema (doc);
+
+      impl_->command_to_worker[cap.method] = cap.agent_id;
+      impl_->command_schemas[cap.method] = schema;
+
+      auto it = impl_->workers.find (cap.agent_id);
+      if (it != impl_->workers.end ())
+      {
+        auto &cmds = it->second.commands;
+        if (std::find_if (cmds.begin (), cmds.end (),
+                          [&] (const CommandSchema &c)
+                          { return c.name == schema.name; })
+            == cmds.end ())
+          cmds.push_back (schema);
+      }
+    }
   }
 
   Registry::Registry (Registry &&other) noexcept

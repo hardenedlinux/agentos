@@ -1,3 +1,19 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #pragma once
 /**
  * agentos/types.h
@@ -112,16 +128,16 @@ namespace agentos
   // Sandbox tiers (ADR-006)
 
   enum class SandboxTier
-    {
-      Tier0, // pre‑approved catalog workers
-      Tier1  // generated workers
-    };
+  {
+    Tier0, // pre‑approved catalog workers
+    Tier1  // generated workers
+  };
 
   enum class NetworkMode
-    {
-      Isolated,
-      PortRestricted
-    };
+  {
+    Isolated,
+    PortRestricted
+  };
 
   // Capability declaration (ADR-006 Layer 2)
 
@@ -132,24 +148,6 @@ namespace agentos
     std::vector<std::string> fs_read;
     std::vector<std::string> fs_write;
     std::vector<int> tcp_connect_ports; // ADR-015
-  };
-
-  // Plan (produced by Adviser, validated by Verifier)
-
-  struct PlanStep
-  {
-    std::string id;      // e.g. "step_1"
-    std::string command; // e.g. "web.search"
-    std::unordered_map<std::string, std::string>
-    args;                              // key → value or "{{step_id.field}}"
-    std::vector<std::string> depends_on; // other step ids
-    std::optional<CapabilityDeclaration> capabilities; // ADR-006 Layer 2
-  };
-
-  struct Plan
-  {
-    TaskId task_id;
-    std::vector<PlanStep> steps;
   };
 
   // Task
@@ -169,34 +167,26 @@ namespace agentos
     std::string error; // populated if success == false
   };
 
-  // Verification result
-
-  struct VerifyResult
-  {
-    bool ok = false;
-    std::vector<std::string> errors; // one entry per violated constraint
-  };
-
   // ADR-016: Worker run record
   enum class WorkerStatus : int
   {
-    running   = 0,
+    running = 0,
     completed = 1,
-    failed    = 2,
-    crashed   = 3,
+    failed = 2,
+    crashed = 3,
   };
 
   struct WorkerRun
   {
-    std::string  run_id;    // UUID
-    std::string  worker_id; // worker identifier
-    int          pid        = 0;
-    int64_t      started_at = 0;
-    int64_t      ended_at   = 0;
-    int          exit_code  = -1;
-    WorkerStatus status     = WorkerStatus::running;
-    std::string  layer_path; // ~/.agentos/layers/runs/<run-id>/
-    std::string  log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
+    std::string run_id;    // UUID
+    std::string worker_id; // worker identifier
+    int pid = 0;
+    int64_t started_at = 0;
+    int64_t ended_at = 0;
+    int exit_code = -1;
+    WorkerStatus status = WorkerStatus::running;
+    std::string layer_path; // ~/.agentos/layers/runs/<run-id>/
+    std::string log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
   };
 
   // ADR-018: Adviser skill package manifest
@@ -230,11 +220,11 @@ namespace agentos
   struct AccessKey
   {
     std::string id;
-    std::string key;            // plaintext for display
-    std::string key_hash;       // SHA-256(key || salt)
-    std::string key_salt;       // per-key random salt (16 bytes base64url)
+    std::string key;      // plaintext for display
+    std::string key_hash; // SHA-256(key || salt)
+    std::string key_salt; // per-key random salt (16 bytes base64url)
     std::string description;
-    std::string role;           // admin | operator | readonly
+    std::string role; // admin | operator | readonly
     int64_t created_at = 0;
     std::optional<int64_t> expires_at;
     std::optional<int64_t> last_used_at;
@@ -246,8 +236,8 @@ namespace agentos
   struct PipelinePlanStep
   {
     std::string id;
-    std::string command;      // capability method name
-    std::string description;  // natural language (Master‑generated)
+    std::string command;     // capability method name
+    std::string description; // natural language (Master‑generated)
     std::unordered_map<std::string, std::string> params;
   };
 
@@ -262,18 +252,18 @@ namespace agentos
   {
     enum class Kind
     {
-        GatewayInbound,  // raw message from Gateway
-        WorkerDone,      // Dispatcher reaper: Worker completed
-        WorkerFailed,    // Dispatcher reaper: Worker failed
-        AdviserDone,     // Adviser thread completed successfully
-        AdviserFailed,   // Adviser thread exited with error
-        MasterDecision,  // Master has reached a decision
-        TimerFired,      // from PeriodicExecutor (scheduled task)
+      GatewayInbound, // raw message from Gateway
+      WorkerDone,     // Dispatcher reaper: Worker completed
+      WorkerFailed,   // Dispatcher reaper: Worker failed
+      AdviserDone,    // Adviser thread completed successfully
+      AdviserFailed,  // Adviser thread exited with error
+      MasterDecision, // Master has reached a decision
+      TimerFired,     // from PeriodicExecutor (scheduled task)
     };
 
-    Kind        kind;
+    Kind kind;
     std::string payload_json;
-    std::string job_id;   // associated job (replaces TaskId where relevant)
+    std::string job_id; // associated job (replaces TaskId where relevant)
   };
 
   // ADR-024 — Master event queue entries
@@ -281,13 +271,13 @@ namespace agentos
   {
     enum class Kind
     {
-        JobSubmit,        // Orchestrator: new job needs planning
-        WorkerExhausted,  // Orchestrator: no Worker can handle a step
-        AdviserFailed,    // Orchestrator: Adviser thread failed
-        ScheduledTask,    // PeriodicExecutor: periodic review / follow-up
+      JobSubmit,       // Orchestrator: new job needs planning
+      WorkerExhausted, // Orchestrator: no Worker can handle a step
+      AdviserFailed,   // Orchestrator: Adviser thread failed
+      ScheduledTask,   // PeriodicExecutor: periodic review / follow-up
     };
 
-    Kind        kind;
+    Kind kind;
     std::string payload_json;
     std::string job_id;
   };
@@ -295,9 +285,9 @@ namespace agentos
   // ADR-020 — Gateway outbound message (response or notification to client)
   struct GatewayOutbound
   {
-    std::string identity;    // ZMQ identity frame of the target client
-                             // empty = broadcast to all connected clients
-    std::string message;     // raw JSON-RPC 2.0 payload
+    std::string identity; // ZMQ identity frame of the target client
+                          // empty = broadcast to all connected clients
+    std::string message;  // raw JSON-RPC 2.0 payload
   };
 
   // ADR-020 — Gateway event queue entries
@@ -305,47 +295,51 @@ namespace agentos
   {
     enum class Kind
     {
-        Outbound,   // push message to client(s)
+      Outbound, // push message to client(s)
     };
 
-    Kind           kind;
+    Kind kind;
     GatewayOutbound outbound;
   };
 
   // ADR-023 — PeriodicExecutor control messages (register / cancel tasks)
   struct PeriodicControl
   {
-    enum class Kind { Register, Cancel };
+    enum class Kind
+    {
+      Register,
+      Cancel
+    };
 
     struct Task
     {
       std::string id;
-      int64_t     interval_s  = 0;   // 0 = one-shot
-      int64_t     next_fire   = 0;   // Unix seconds
-      std::string target;            // "gateway" | "orchestrator" | "master"
+      int64_t interval_s = 0; // 0 = one-shot
+      int64_t next_fire = 0;  // Unix seconds
+      std::string target;     // "gateway" | "orchestrator" | "master"
       std::string payload_json;
     };
 
-    Kind        kind;
-    Task        task;          // used for Register
-    std::string cancel_id;     // used for Cancel
+    Kind kind;
+    Task task;             // used for Register
+    std::string cancel_id; // used for Cancel
   };
 
   enum class StepStatus : int
   {
     pending = 0,
     running = 1,
-    done    = 2,
-    failed  = 3,
+    done = 2,
+    failed = 3,
   };
 
   // ADR-022 — In-memory execution state per step (used by DB layer)
   struct StepState
   {
     PipelinePlanStep step;
-    StepStatus       status      = StepStatus::pending;
-    std::string      result_json; // filled on completion
-    int              worker_attempt = 0;
+    StepStatus status = StepStatus::pending;
+    std::string result_json; // filled on completion
+    int worker_attempt = 0;
   };
 
 } // namespace agentos

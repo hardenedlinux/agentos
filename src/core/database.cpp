@@ -1,3 +1,19 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #include "agentos/database.h"
 #include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/home_init.h"
@@ -432,40 +448,6 @@ namespace agentos
       jobs.push_back (std::move (j));
     }
     return jobs;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Task table
-  // ---------------------------------------------------------------------------
-
-  void Database::store_task (const TaskId &job_id, const PlanStep &step)
-  {
-    if (!db_)
-      return;
-    Stmt stmt (prepare (R"(
-      INSERT OR REPLACE INTO tasks (id, job_id, agent_id, method, params, status)
-      VALUES (?, ?, '', ?, ?, 'pending')
-  )"));
-    if (!stmt.s)
-      return;
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-    w.StartObject ();
-    for (const auto &[k, v] : step.args)
-    {
-      w.Key (k.c_str ());
-      w.String (v.c_str ());
-    }
-    w.EndObject ();
-
-    sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 3, step.command.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step (stmt) != SQLITE_DONE)
-      spdlog::error ("[database] store_task: {}", sqlite3_errmsg (db_));
   }
 
   // ---------------------------------------------------------------------------
@@ -920,6 +902,34 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_capability: {}", sqlite3_errmsg (db_));
+  }
+
+  std::vector<Database::CapabilityRow> Database::load_capabilities ()
+  {
+    std::vector<CapabilityRow> rows;
+    if (!db_)
+      return rows;
+
+    Stmt stmt (prepare (R"(
+      SELECT capabilities.agent_id, capabilities.method,
+             capabilities.description, capabilities.input_schema
+      FROM capabilities
+      JOIN agents ON agents.id = capabilities.agent_id
+      WHERE agents.enabled = 1
+  )"));
+    if (!stmt.s)
+      return rows;
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      CapabilityRow row;
+      row.agent_id     = column_text_or_empty (stmt, 0);
+      row.method       = column_text_or_empty (stmt, 1);
+      row.description  = column_text_or_empty (stmt, 2);
+      row.input_schema = column_text_or_empty (stmt, 3);
+      rows.push_back (std::move (row));
+    }
+    return rows;
   }
 
   // ---------------------------------------------------------------------------

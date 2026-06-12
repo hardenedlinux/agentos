@@ -1,3 +1,19 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #pragma once
 
 #include "agentos/forge/forge_pipeline_job.h"
@@ -95,6 +111,14 @@ namespace agentos
       std::string manifest;
     };
 
+    struct CapabilityRow
+    {
+      std::string agent_id;
+      std::string method;
+      std::string description;
+      std::string input_schema; // raw JSON
+    };
+
     // -- Job table ------------------------------------------------------------
 
     void store_job (const Task &task);
@@ -104,9 +128,6 @@ namespace agentos
     std::vector<InFlightJob> resume_in_flight ();
 
     // -- Task table -----------------------------------------------------------
-
-    void store_task (const TaskId &job_id, const PlanStep &step);
-
     // ADR-022 – Pipeline step persistence and retrieval
     void store_pipeline_task (const TaskId &job_id,
                               const PipelinePlanStep &step, int step_order);
@@ -143,6 +164,11 @@ namespace agentos
                             const std::string &method,
                             const std::string &description,
                             const std::string &input_schema);
+
+    // ADR-007: capability matching index  JOIN capabilities with agents,
+    // enabled agents only. This is the single source of truth for
+    // command -> agent_id resolution, used by Registry.
+    std::vector<CapabilityRow> load_capabilities ();
 
     // -- HumanReview table ----------------------------------------------------
 

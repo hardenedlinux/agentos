@@ -1,4 +1,21 @@
 /**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * tests/test_worker_run.cpp
  *
  * Unit tests for:
@@ -17,15 +34,15 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "agentos/config.h"
 #include "agentos/database.h"
 #include "agentos/dispatcher.h"
 #include "agentos/home_init.h"
+#include "agentos/llm_proxy.h"
 #include "agentos/orchestrator.h"
 #include "agentos/registry.h"
 #include "agentos/sandbox.h"
-#include "agentos/scheduler.h"
 #include "agentos/types.h"
-#include "agentos/verifier.h"
 
 using namespace agentos;
 namespace fs = std::filesystem;
@@ -69,7 +86,8 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Common fixture: in-memory Database + real Registry/Scheduler/Orchestrator
+// Common fixture: in-memory Database + real Registry/LlmProxy/ForgeCoordinator
+// /Dispatcher/Orchestrator (ADR-022/024).
 // ---------------------------------------------------------------------------
 class WorkerRunTest : public ::testing::Test
 {
@@ -80,14 +98,26 @@ protected:
     InMemoryDatabase () : Database (":memory:") {}
   };
 
+  void SetUp () override
+  {
+    ASSERT_TRUE (db.open ());
+  }
+
   // Declaration order = initialisation order.
   InMemoryDatabase db;
+  Config config{};
+  LlmProxy llm{1, 1};
   Registry registry{db};
-  Verifier verifier{registry};
   Dispatcher dispatcher{};
-  SchedulerConfig schedConfig{};
-  Scheduler scheduler{registry, dispatcher, schedConfig, db};
-  Orchestrator orchestrator{registry, verifier, scheduler, dispatcher, db};
+  forge::ForgeCoordinator forge{db, llm, registry, [] (forge::ForgeResult) {}};
+  Orchestrator orchestrator{db,
+                            llm,
+                            registry,
+                            dispatcher,
+                            forge,
+                            config,
+                            [] (MasterEvent) {},
+                            [] (GatewayEvent) {}};
 };
 
 // ===========================================================================
@@ -184,7 +214,7 @@ TEST (DatabaseWorkerRunTest, InsertAndGetActiveRuns)
   const auto active = db.get_active_worker_runs ();
   ASSERT_EQ (active.size (), 1u);
   EXPECT_EQ (active[0].run_id, "run_001");
-  EXPECT_EQ (active[0].status, "running");
+  EXPECT_EQ (active[0].status, WorkerStatus::running);
 }
 
 TEST (DatabaseWorkerRunTest, UpdateStatusToCompleted)
@@ -231,3 +261,6 @@ TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
   }
 
   db.mark_all_running_as_crashed ();
+
+  EXPECT_TRUE (db.get_active_worker_runs ().empty ());
+}

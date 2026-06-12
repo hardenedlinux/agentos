@@ -376,8 +376,7 @@ namespace agentos
     }
 
     // Update forge job status to promoted
-    db.update_forge_pipeline_job_status (job.id,
-        std::string (agentos::db::forge_status::promoted));
+    db.update_forge_pipeline_job_status (job.id, ForgeStatus::promoted);
 
     // Sync in-memory registry
     RegisteredExecutor executor;

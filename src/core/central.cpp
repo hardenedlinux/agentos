@@ -32,6 +32,8 @@
 #include "agentos/central.h"
 #include "agentos/home_init.h"
 
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 #include <zmq.hpp>
 
@@ -47,7 +49,9 @@ namespace agentos
 Central::Central (const Config &config)
     : config_ (config),
       db_ ((agentos_home () / "agentos.db").string ()),
-      llm_proxy_ (config.llm),
+      llm_proxy_ (resolve_concurrency (config.llm.max_concurrent),
+                  config.llm.timeout_s),
+      llm_client_ (llm_proxy_, config_.llm),
       registry_ (db_),
       dispatcher_ (),
       forge_coordinator_ (db_, llm_proxy_, registry_,
@@ -112,8 +116,7 @@ void Central::run ()
       return;
     }
 
-  // 2. Start LlmProxy thread pool.
-  llm_proxy_.start ();
+  // 2. LlmProxy thread pool starts in its constructor (ADR-017).
 
   // 3. Bind inproc PULL before any thread pushes to gateway-out.
   gateway_.bind_inproc ();
@@ -165,7 +168,7 @@ void Central::stop_all ()
   master_.stop ();
   orchestrator_.stop ();
   forge_coordinator_.stop ();
-  llm_proxy_.stop ();
+  // LlmProxy worker threads are joined in its destructor (ADR-017).
   db_.close ();
 
   spdlog::info ("[central] stopped");
@@ -210,7 +213,6 @@ void Central::gateway_push (const std::string &payload,
   if (!identity.empty ())
     {
       zmq::message_t id_frame (identity.data (), identity.size ());
-      id_frame.set (ZMQ_MORE, 1);
       gateway_push_sock_.send (id_frame, zmq::send_flags::sndmore);
     }
   zmq::message_t payload_frame (payload.data (), payload.size ());

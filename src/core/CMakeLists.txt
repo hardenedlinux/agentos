@@ -7,6 +7,7 @@ set(AGENTOS_CORE_SOURCES
   orchestrator.cpp
   database.cpp
   capability.cpp
+  central.cpp
   enforce_layer.cpp
   sandbox.cpp
   llm/llm_proxy.cpp

@@ -2,7 +2,6 @@ set(AGENTOS_CORE_SOURCES
   dispatcher.cpp
   registry.cpp
   verifier.cpp
-  scheduler.cpp
   master.cpp
   periodic_executor.cpp
   orchestrator.cpp

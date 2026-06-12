@@ -127,7 +127,7 @@ namespace agentos
     void store_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job (const ForgePipelineJob &job);
     void update_forge_pipeline_job_status (const std::string &forge_id,
-                                           const std::string &status);
+                                           ForgeStatus status);
     std::optional<ForgePipelineJob>
     load_forge_pipeline_job (const std::string &forge_id);
     std::vector<ForgePipelineJob> load_in_flight_forge_pipeline_jobs ();

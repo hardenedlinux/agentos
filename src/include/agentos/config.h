@@ -34,6 +34,11 @@ struct Config {
     struct Logging {
         std::string level = "info";
     } logging;
+
+    struct Gateway {
+        int heartbeat_interval_s = 30;
+        int rate_limit_per_key   = 10;
+    } gateway;
 };
 
 // Load config from TOML file. Returns nullopt on error, with error message in `error`.

@@ -642,7 +642,7 @@ namespace agentos
     auto runs = db.get_all_worker_runs ();
     for (const auto &run : runs)
     {
-      if (run.status != "running")
+      if (run.status != WorkerStatus::running)
       {
         std::error_code ec;
         std::filesystem::remove_all (run.layer_path, ec);

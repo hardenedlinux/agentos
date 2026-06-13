@@ -69,9 +69,6 @@ Central::Central (const Config &config)
                   OrchestratorEvent ev;
                   ev.kind         = OrchestratorEvent::Kind::GatewayInbound;
                   ev.payload_json = std::move (msg.message);
-                  // Embed identity into payload so Orchestrator can reply.
-                  // (Orchestrator extracts "_identity" field.)
-                  // For simplicity we prepend identity into the JSON here.
                   send_to_orchestrator (std::move (ev));
                 }),
       orchestrator_ (db_, llm_proxy_, registry_, dispatcher_,
@@ -122,10 +119,7 @@ void Central::run ()
   gateway_.bind_inproc ();
 
   // 4. Bind gateway_push_ PUSH socket.
-  //    Must bind before any push calls (periodic executor fires heartbeat).
   gateway_push_sock_.bind ("inproc://gateway-out-push");
-  // Note: Gateway PULL binds to "inproc://gateway-out";
-  //       we push to the same endpoint from gateway_push().
 
   // 5. Init and start Orchestrator.
   orchestrator_.init ();
@@ -190,8 +184,6 @@ void Central::send_to_master (MasterEvent msg)
 
 void Central::send_to_gateway (GatewayEvent msg)
 {
-  // Push outbound message to inproc://gateway-out.
-  // Gateway's PULL socket reads it and forwards to the client.
   if (msg.kind == GatewayEvent::Kind::Outbound)
     gateway_push (msg.outbound.message, msg.outbound.identity);
 }
@@ -203,8 +195,6 @@ void Central::send_to_periodic (PeriodicControl msg)
 
 // ---------------------------------------------------------------------------
 // gateway_push — push raw JSON to inproc://gateway-out
-// Frames: [identity][payload] for targeted replies,
-//         or [payload] for broadcasts (Gateway handles both).
 // ---------------------------------------------------------------------------
 
 void Central::gateway_push (const std::string &payload,

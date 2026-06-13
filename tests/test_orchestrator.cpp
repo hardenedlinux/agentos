@@ -28,8 +28,8 @@
  *   - job.submit: persists job, replies with job_id, forwards JobSubmit to
  * Master
  *   - WorkerExhausted: no Worker registered for command → MasterEvent to Master
- *   - Pipeline dispatch: plan_ready with /bin/true worker → WorkerDone → job
- * done
+ *   - Pipeline dispatch: plan_ready with a registered worker → WorkerDone →
+ * job done
  */
 
 #include <gtest/gtest.h>
@@ -49,6 +49,7 @@
 
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -354,15 +355,34 @@ TEST_F (OrchestratorTest, PlanReady_NoWorkerForCommand_ReportsExhaustedToMaster)
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline: plan_ready with a registered worker (/bin/true) → WorkerDone → job
-// done
+// Pipeline: plan_ready with a registered worker → WorkerDone → job done
 // ---------------------------------------------------------------------------
 
 TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
 {
+  // Write a minimal worker script conforming to the Result File Wire Format
+  // (ADR-016): it must write {"status":"ok","result":...} to
+  // $AGENTOS_RUN_DIR/result.json before exiting. Placed under
+  // ~/.agentos/workers/ so it is covered by the implicit Landlock READ_FILE
+  // grant in sandbox.cpp's apply_worker_sandbox().
+  const fs::path worker_dir = home_ / "workers" / "worker-true";
+  fs::create_directories (worker_dir);
+  const fs::path worker_script = worker_dir / "worker.sh";
+  {
+    std::ofstream f (worker_script);
+    ASSERT_TRUE (f.is_open ());
+    f << "#!/bin/sh\n"
+         "echo '{\"status\":\"ok\",\"result\":{}}' "
+         "> \"$AGENTOS_RUN_DIR/result.json\"\n";
+  }
+  fs::permissions (worker_script,
+                   fs::perms::owner_all | fs::perms::group_read
+                     | fs::perms::group_exec | fs::perms::others_read
+                     | fs::perms::others_exec);
+
   // Register a worker directly via DB (Registry loads at construction,
   // so we must insert before constructing — re-create registry+orchestrator).
-  db_->insert_agent ("worker-true", "worker", "/bin/true", "{}");
+  db_->insert_agent ("worker-true", "worker", worker_script.string (), "{}");
   db_->insert_capability ("worker-true", "echo.test", "test capability", "{}");
 
   // Rebuild registry and orchestrator so the new agent is loaded.

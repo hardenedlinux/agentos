@@ -4,10 +4,12 @@
  *
  * MessageQueue<T> — thread-safe blocking queue used by Actor<T>.
  *
- * push()     — non-blocking; callable from any thread.
- * pop()      — blocks until an item is available or sentinel is pushed.
- * try_pop()  — non-blocking; returns nullopt if empty.
+ * push()          — non-blocking; callable from any thread.
+ * pop()           — blocks until an item is available or sentinel is pushed.
+ * try_pop()       — non-blocking; returns nullopt if empty.
  * push_sentinel() — unblocks any thread blocked in pop(); signals shutdown.
+ * reset()         — clears sentinel and drains queue; call before restarting
+ *                   an Actor so the new thread does not see a stale sentinel.
  */
 
 #include <condition_variable>
@@ -80,6 +82,18 @@ public:
       sentinel_ = true;
     }
     cv_.notify_all ();
+  }
+
+  // Reset sentinel and drain any residual messages.
+  // Must be called before restarting an Actor (i.e. before start() is called
+  // again after stop()), otherwise the new thread sees sentinel_=true and
+  // exits immediately from loop() without processing any messages.
+  void reset ()
+  {
+    std::lock_guard<std::mutex> lk (mutex_);
+    std::queue<T> empty;
+    std::swap (queue_, empty);
+    sentinel_ = false;
   }
 
   bool empty () const

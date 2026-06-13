@@ -22,69 +22,69 @@
 namespace agentos
 {
 
-template <typename MsgType>
-class Actor
-{
-public:
-  Actor ()          = default;
-  virtual ~Actor () = default;
-
-  Actor (const Actor &)            = delete;
-  Actor &operator= (const Actor &) = delete;
-
-  // Enqueue a message for processing. Thread-safe.
-  void enqueue (MsgType msg)
+  template <typename MsgType> class Actor
   {
-    queue_.push (std::move (msg));
-  }
+  public:
+    Actor () = default;
+    virtual ~Actor () = default;
 
-  // Start the actor's thread. Call once at daemon startup.
-  void start ()
-  {
-    running_ = true;
-    thread_  = std::thread ([this] { loop (); });
-  }
+    Actor (const Actor &) = delete;
+    Actor &operator= (const Actor &) = delete;
 
-  // Signal the actor to stop and join its thread.
-  void stop ()
-  {
-    running_ = false;
-    queue_.push_sentinel ();
-    if (thread_.joinable ())
-      thread_.join ();
-  }
+    // Enqueue a message for processing. Thread-safe.
+    void enqueue (MsgType msg)
+    {
+      queue_.push (std::move (msg));
+    }
 
-protected:
-  // Implement in subclass. Called serially on the Actor thread.
-  virtual void on_message (MsgType msg) = 0;
+    // Start the actor's thread. Call once at daemon startup.
+    void start ()
+    {
+      queue_.reset (); // clear sentinel from previous stop(), allow restart
+      running_ = true;
+      thread_ = std::thread ([this] { loop (); });
+    }
 
-  // Subclasses that need periodic work (e.g. PeriodicExecutor) may override
-  // loop() to use pop_for() instead of the default blocking pop().
-  // The default loop blocks on pop() and calls on_message() for each message.
-  virtual void loop ()
-  {
-    while (running_)
+    // Signal the actor to stop and join its thread.
+    void stop ()
+    {
+      running_ = false;
+      queue_.push_sentinel ();
+      if (thread_.joinable ())
+        thread_.join ();
+    }
+
+  protected:
+    // Implement in subclass. Called serially on the Actor thread.
+    virtual void on_message (MsgType msg) = 0;
+
+    // Subclasses that need periodic work (e.g. PeriodicExecutor) may override
+    // loop() to use pop_for() instead of the default blocking pop().
+    // The default loop blocks on pop() and calls on_message() for each message.
+    virtual void loop ()
+    {
+      while (running_)
       {
         auto msg = queue_.pop ();
         if (!msg)
           break;
         on_message (std::move (*msg));
       }
-  }
+    }
 
-  // Non-blocking timed pop — for use in overridden loop().
-  template <typename Rep, typename Period>
-  std::optional<MsgType>
-  pop_for (const std::chrono::duration<Rep, Period> &timeout)
-  {
-    return queue_.pop_for (timeout);
-  }
+    // Non-blocking timed pop — for use in overridden loop().
+    template <typename Rep, typename Period>
+    std::optional<MsgType>
+    pop_for (const std::chrono::duration<Rep, Period> &timeout)
+    {
+      return queue_.pop_for (timeout);
+    }
 
-  std::atomic<bool> running_{ false };
+    std::atomic<bool> running_{false};
 
-private:
-  MessageQueue<MsgType> queue_;
-  std::thread           thread_;
-};
+  private:
+    MessageQueue<MsgType> queue_;
+    std::thread thread_;
+  };
 
 } // namespace agentos

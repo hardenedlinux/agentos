@@ -119,15 +119,16 @@ TEST_F (DispatcherTest, Collect_ResultJsonPresent_ReturnsContent)
   const std::string job_dir  = (home_ / "layers" / "runs" / run_id).string ();
   fs::create_directories (job_dir);
 
-  const std::string expected = R"({"status":"ok","value":42})";
+  // ADR-016 Result File Wire Format: result.json is a {status,result,error}
+  // envelope; collect() returns just the serialised `result` field.
   {
     std::ofstream f (job_dir + "/result.json");
-    f << expected;
+    f << R"({"status":"ok","result":{"value":42}})";
   }
 
   auto res = dispatcher_.collect (run_id, job_dir, 0);
   EXPECT_TRUE (res.ok);
-  EXPECT_EQ (res.result_json, expected);
+  EXPECT_EQ (res.result_json, R"({"value":42})");
   EXPECT_EQ (res.exit_code, 0);
 }
 
@@ -137,11 +138,14 @@ TEST_F (DispatcherTest, Collect_NonZeroExitCode_Propagated)
   const std::string job_dir = (home_ / "layers" / "runs" / run_id).string ();
   fs::create_directories (job_dir);
 
-  std::ofstream (job_dir + "/result.json") << R"({"error":"oops"})";
+  std::ofstream (job_dir + "/result.json") << R"({"status":"ok","result":{}})";
 
+  // ADR-016: a non-zero exit code is a hard failure regardless of
+  // result.json content — result.json is not even read.
   auto res = dispatcher_.collect (run_id, job_dir, 1);
-  EXPECT_TRUE (res.ok);
+  EXPECT_FALSE (res.ok);
   EXPECT_EQ (res.exit_code, 1);
+  EXPECT_FALSE (res.error.empty ());
 }
 
 // ---------------------------------------------------------------------------

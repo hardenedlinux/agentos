@@ -28,7 +28,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <sched.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <gmock/gmock.h>
@@ -123,16 +125,66 @@ protected:
 // ===========================================================================
 // apply_worker_filesystem
 // ===========================================================================
-TEST (ApplyWorkerFilesystemTest, CreatesRequiredDirectories)
-{
-  if (geteuid () != 0)
-    GTEST_SKIP () << "Requires root (mount/pivot_root)";
 
+// --unsafe / community strategy: no namespaces, no mounts, no pivot_root --
+// safe to call directly in the test process. Requires no special
+// privileges, exercised in normal CI.
+TEST (ApplyWorkerFilesystemTest, UnsafeCreatesWorkerAndLogDirectories)
+{
   TempHome home;
   const std::string worker_id = "test_worker";
   const std::string run_id = "test_run_001";
 
-  EXPECT_TRUE (apply_worker_filesystem (worker_id, run_id));
+  ASSERT_TRUE (apply_worker_filesystem (worker_id, run_id, /*privileged=*/false));
+
+  const fs::path base = home.path ();
+
+  EXPECT_TRUE (fs::exists (base / "workers" / worker_id));
+  EXPECT_TRUE (fs::exists (base / "logs" / "runs" / run_id));
+  EXPECT_TRUE (fs::exists (base / "layers" / "runs" / run_id));
+
+  const char *worker_home = std::getenv ("AGENTOS_WORKER_HOME");
+  ASSERT_NE (worker_home, nullptr);
+  EXPECT_EQ (fs::path (worker_home), base / "workers" / worker_id);
+
+  unsetenv ("AGENTOS_WORKER_HOME");
+}
+
+// Privileged (enterprise) strategy: native overlayfs + pivot_root. Requires
+// real CAP_SYS_ADMIN (e.g. `sudo setcap cap_sys_admin+ep` on the test
+// binary). Skipped otherwise -- this is the path exercised by enterprise
+// deployments, not by default CI.
+TEST (ApplyWorkerFilesystemTest, PrivilegedAppliesOverlayAndPivotRoot)
+{
+  if (!has_cap_sys_admin ())
+    GTEST_SKIP () << "Requires CAP_SYS_ADMIN "
+                     "(sudo setcap cap_sys_admin+ep on the test binary)";
+
+  TempHome home;
+  const std::string worker_id = "test_worker";
+  const std::string run_id = "test_run_002";
+
+  // apply_worker_filesystem(..., privileged=true) performs pivot_root,
+  // which changes the calling process's root filesystem view. Run it in a
+  // forked child; the parent's filesystem view is unaffected and can check
+  // the resulting directories directly.
+  pid_t pid = fork ();
+  ASSERT_GE (pid, 0) << "fork failed";
+
+  if (pid == 0)
+  {
+    if (unshare (CLONE_NEWNS) != 0)
+      _exit (10);
+    if (!make_mount_namespace_private ())
+      _exit (11);
+    bool ok = apply_worker_filesystem (worker_id, run_id, /*privileged=*/true);
+    _exit (ok ? 0 : 1);
+  }
+
+  int status = 0;
+  ASSERT_EQ (waitpid (pid, &status, 0), pid);
+  ASSERT_TRUE (WIFEXITED (status)) << "child did not exit normally";
+  EXPECT_EQ (WEXITSTATUS (status), 0) << "apply_worker_filesystem failed";
 
   const fs::path base = home.path ();
   const fs::path layers_dir = base / "layers" / "runs" / run_id;

@@ -1,10 +1,12 @@
 #include "agentos/sandbox.h"
 #include "agentos/database.h"
 #include "agentos/home_init.h"
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <linux/landlock.h>
+#include <optional>
 #include <sched.h>
 #include <seccomp.h>
 #include <spdlog/spdlog.h>
@@ -12,7 +14,6 @@
 #include <string>
 #include <sys/capability.h>
 #include <sys/mount.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
@@ -31,6 +32,32 @@ namespace agentos
       }
     procs << getpid ();
     return true;
+  }
+
+  // Detect whether the calling process holds CAP_SYS_ADMIN in its effective
+  // capability set. Enterprise deployments grant this via a one-time
+  // `setcap cap_sys_admin+ep` on the agentos binary at install time.
+  //
+  //   true  - "privileged" tier: native overlayfs + pivot_root provides
+  //           workers with their own filesystem root (ADR-016).
+  //   false - "--unsafe"/community tier (default): no filesystem
+  //           namespace at all. Workers see the real host filesystem;
+  //           isolation is provided entirely by Landlock path rules
+  //           (ADR-015) + Landlock network rules + seccomp + cgroup +
+  //           capability drop. This requires no special privileges and is
+  //           the path exercised by unit tests.
+  bool has_cap_sys_admin ()
+  {
+    cap_t caps = cap_get_proc ();
+    if (!caps)
+      return false;
+
+    cap_flag_value_t value = CAP_CLEAR;
+    if (cap_get_flag (caps, CAP_SYS_ADMIN, CAP_EFFECTIVE, &value) != 0)
+      value = CAP_CLEAR;
+
+    cap_free (caps);
+    return value == CAP_SET;
   }
 
   // Helper: apply seccomp whitelist
@@ -192,69 +219,6 @@ namespace agentos
     return true;
   }
 
-  // Helper: unshare namespaces
-  static bool apply_namespaces ()
-  {
-    // Unshare network namespace
-    if (unshare (CLONE_NEWNET) != 0)
-    {
-      spdlog::error ("[sandbox] unshare CLONE_NEWNET failed: {}",
-                     strerror (errno));
-      return false;
-    }
-    // Unshare mount namespace
-    if (unshare (CLONE_NEWNS) != 0)
-    {
-      spdlog::error ("[sandbox] unshare CLONE_NEWNS failed: {}",
-                     strerror (errno));
-      return false;
-    }
-    return true;
-  }
-
-  // Helper: set up tmpfs and bind mounts
-  static bool setup_mounts (const std::string &job_dir,
-                            const std::vector<std::string> &allowed_read_paths,
-                            const std::vector<std::string> &allowed_write_paths)
-  {
-    // Mount tmpfs for workspace
-    if (mount ("tmpfs", job_dir.c_str (), "tmpfs", 0, "size=64M") != 0)
-    {
-      spdlog::error ("[sandbox] mount tmpfs on {} failed: {}", job_dir,
-                     strerror (errno));
-      return false;
-    }
-
-    // Bind mount allowed read paths read-only
-    for (const auto &path : allowed_read_paths)
-    {
-      std::string target = job_dir + "/read/" + path;
-      // Create target directory
-      mkdir (target.c_str (), 0755);
-      if (mount (path.c_str (), target.c_str (), "none", MS_BIND | MS_RDONLY,
-                 nullptr)
-          != 0)
-      {
-        spdlog::warn ("[sandbox] bind mount {} read-only failed: {}", path,
-                      strerror (errno));
-      }
-    }
-
-    // Bind mount allowed write paths read-write
-    for (const auto &path : allowed_write_paths)
-    {
-      std::string target = job_dir + "/write/" + path;
-      mkdir (target.c_str (), 0755);
-      if (mount (path.c_str (), target.c_str (), "none", MS_BIND, nullptr) != 0)
-      {
-        spdlog::warn ("[sandbox] bind mount {} read-write failed: {}", path,
-                      strerror (errno));
-      }
-    }
-
-    return true;
-  }
-
   // Helper: apply Landlock v4 restrictions
   static bool
   apply_landlock (const std::vector<std::string> &allowed_read_paths,
@@ -386,59 +350,6 @@ namespace agentos
     return true;
   }
 
-  bool apply_sandbox (const std::string &job_dir,
-                      const std::vector<std::string> &allowed_read_paths,
-                      const std::vector<std::string> &allowed_write_paths,
-                      const std::vector<int> &allowed_tcp_ports)
-  {
-    spdlog::info ("[sandbox] applying sandbox for job_dir={}", job_dir);
-
-    // 1. cgroup v2 (assume cgroup already created by daemon)
-    if (!join_cgroup ("/sys/fs/cgroup/agentos"))
-    {
-      spdlog::warn ("[sandbox] cgroup join failed, continuing");
-    }
-
-    // 2. seccomp
-    if (!apply_seccomp ())
-    {
-      spdlog::error ("[sandbox] seccomp setup failed");
-      return false;
-    }
-
-    // 3. namespaces
-    if (!apply_namespaces ())
-    {
-      spdlog::error ("[sandbox] namespace setup failed");
-      return false;
-    }
-
-    // 4. mount namespace setup
-    if (!setup_mounts (job_dir, allowed_read_paths, allowed_write_paths))
-    {
-      spdlog::error ("[sandbox] mount setup failed");
-      return false;
-    }
-
-    // 5. Landlock v4
-    if (!apply_landlock (allowed_read_paths, allowed_write_paths,
-                         allowed_tcp_ports))
-    {
-      spdlog::error ("[sandbox] Landlock setup failed");
-      return false;
-    }
-
-    // 6. drop capabilities
-    if (!drop_capabilities ())
-    {
-      spdlog::error ("[sandbox] capability drop failed");
-      return false;
-    }
-
-    spdlog::info ("[sandbox] sandbox applied successfully");
-    return true;
-  }
-
   void confine_daemon (const std::filesystem::path &home)
   {
     struct landlock_ruleset_attr rs_attr = {};
@@ -514,30 +425,53 @@ namespace agentos
     spdlog::info ("[daemon] daemon confined to {}", home.string ());
   }
 
-  bool apply_worker_filesystem (const std::string &worker_id,
-                                const std::string &run_id)
+  // Paths involved in constructing the privileged-mode worker overlay
+  // filesystem view (ADR-016, native overlayfs strategy only).
+  struct OverlayPaths
+  {
+    std::string lower0;             // host root, read-only
+    std::string lower1;             // worker base layer, read-only
+    std::filesystem::path upper;
+    std::filesystem::path work;
+    std::filesystem::path merged;
+  };
+
+  // Create the run-layer directories (upper/work/merged), the log
+  // directory, and the worker base layer directory. Returns std::nullopt
+  // on any filesystem error (already logged).
+  static std::optional<OverlayPaths>
+  prepare_overlay_dirs (const std::string &worker_id, const std::string &run_id)
   {
     namespace fs = std::filesystem;
     fs::path home = agentos_home ();
-
-    // Create run layer directories
     fs::path layers_dir = home / "layers" / "runs" / run_id;
-    fs::path upper_dir = layers_dir / "upper";
-    fs::path work_dir = layers_dir / "work";
+
+    OverlayPaths p;
+    p.upper  = layers_dir / "upper";
+    p.work   = layers_dir / "work";
+    p.merged = layers_dir / "merged";
+
     std::error_code ec;
-    fs::create_directories (upper_dir, ec);
+    fs::create_directories (p.upper, ec);
     if (ec)
     {
       spdlog::error ("[sandbox] cannot create upper dir {}: {}",
-                     upper_dir.string (), ec.message ());
-      return false;
+                     p.upper.string (), ec.message ());
+      return std::nullopt;
     }
-    fs::create_directories (work_dir, ec);
+    fs::create_directories (p.work, ec);
     if (ec)
     {
       spdlog::error ("[sandbox] cannot create work dir {}: {}",
-                     work_dir.string (), ec.message ());
-      return false;
+                     p.work.string (), ec.message ());
+      return std::nullopt;
+    }
+    fs::create_directories (p.merged, ec);
+    if (ec)
+    {
+      spdlog::error ("[sandbox] cannot create merged dir {}: {}",
+                     p.merged.string (), ec.message ());
+      return std::nullopt;
     }
 
     // Create log directory
@@ -547,45 +481,60 @@ namespace agentos
     {
       spdlog::error ("[sandbox] cannot create log dir {}: {}",
                      log_dir.string (), ec.message ());
-      return false;
+      return std::nullopt;
     }
 
-    // Build overlayfs mount options
-    std::string lower0 = "/";
-    std::string lower1 = (home / "layers" / "workers" / worker_id).string ();
-    // Ensure worker base layer directory exists
-    std::error_code ec2;
-    fs::create_directories (lower1, ec2);
-    if (ec2)
-    {
-      spdlog::error ("[sandbox] cannot create worker base layer {}: {}", lower1,
-                     ec2.message ());
-      return false;
-    }
-    std::string options = "lowerdir=" + lower0 + ":" + lower1
-                          + ",upperdir=" + upper_dir.string ()
-                          + ",workdir=" + work_dir.string ();
-
-    // Mount overlayfs on a temporary directory (we'll pivot_root into it)
-    fs::path merged = layers_dir / "merged";
-    fs::create_directories (merged, ec);
+    p.lower0 = "/";
+    p.lower1 = (home / "layers" / "workers" / worker_id).string ();
+    fs::create_directories (p.lower1, ec);
     if (ec)
     {
-      spdlog::error ("[sandbox] cannot create merged dir {}: {}",
-                     merged.string (), ec.message ());
-      return false;
+      spdlog::error ("[sandbox] cannot create worker base layer {}: {}",
+                     p.lower1, ec.message ());
+      return std::nullopt;
     }
 
-    if (mount ("overlay", merged.c_str (), "overlay", MS_NODEV,
+    return p;
+  }
+
+  // Privileged mount strategy (enterprise): native kernel overlayfs.
+  //
+  // Requires real CAP_SYS_ADMIN in the *current* user namespace at the
+  // time of the call. This function must be called BEFORE
+  // unshare(CLONE_NEWUSER) — once a new user namespace is created,
+  // capability checks are scoped to it, and even a process that held
+  // CAP_SYS_ADMIN in init_user_ns beforehand loses the ability to
+  // clone_private_mount host-owned mounts (overlay lowerdir on the host
+  // root fails with EINVAL "failed to clone lowerpath"). Only
+  // unshare(CLONE_NEWNS) (no CLONE_NEWUSER) is required for this path.
+  static bool mount_overlay_native (const OverlayPaths &p)
+  {
+    std::string options = "lowerdir=" + p.lower0 + ":" + p.lower1
+                          + ",upperdir=" + p.upper.string ()
+                          + ",workdir=" + p.work.string ()
+                          + ",userxattr";
+
+    if (mount ("overlay", p.merged.c_str (), "overlay", MS_NODEV,
                options.c_str ())
         != 0)
     {
-      spdlog::error ("[sandbox] overlay mount failed: {}", strerror (errno));
+      spdlog::error ("[sandbox] native overlay mount failed: {}",
+                     strerror (errno));
       return false;
     }
+    return true;
+  }
 
-    // Create old_root directory inside merged for pivot_root
-    fs::path old_root = merged / "old_root";
+  // pivot_root into the merged overlay view and bind-mount the worker's
+  // persistent directory to /home/agentos (ADR-016 steps 4-5). Shared by
+  // both mount strategies.
+  static bool pivot_into_overlay (const OverlayPaths &p,
+                                  const std::string &worker_id)
+  {
+    namespace fs = std::filesystem;
+
+    fs::path old_root = p.merged / "old_root";
+    std::error_code ec;
     fs::create_directories (old_root, ec);
     if (ec)
     {
@@ -594,21 +543,19 @@ namespace agentos
       return false;
     }
 
-    // pivot_root
-    if (syscall (SYS_pivot_root, merged.c_str (), old_root.c_str ()) != 0)
+    if (syscall (SYS_pivot_root, p.merged.c_str (), old_root.c_str ()) != 0)
     {
       spdlog::error ("[sandbox] pivot_root failed: {}", strerror (errno));
       return false;
     }
 
-    // chdir to new root
     if (chdir ("/") != 0)
     {
       spdlog::error ("[sandbox] chdir / failed: {}", strerror (errno));
       return false;
     }
 
-    // Bind mount worker persistent directory to /home/agentos
+    fs::path home = agentos_home ();
     fs::path worker_persistent = home / "workers" / worker_id;
     fs::create_directories (worker_persistent, ec);
     if (ec)
@@ -616,6 +563,7 @@ namespace agentos
       spdlog::warn ("[sandbox] cannot create worker persistent dir {}: {}",
                     worker_persistent.string (), ec.message ());
     }
+
     fs::create_directories ("/home/agentos", ec);
     if (ec)
     {
@@ -623,6 +571,7 @@ namespace agentos
                      ec.message ());
       return false;
     }
+
     if (mount (worker_persistent.c_str (), "/home/agentos", "none", MS_BIND,
                nullptr)
         != 0)
@@ -632,10 +581,94 @@ namespace agentos
       return false;
     }
 
-    spdlog::info ("[sandbox] worker filesystem isolation applied for run {}",
-                  run_id);
+    // Worker Contract: workers read their persistent storage location from
+    // AGENTOS_WORKER_HOME rather than hardcoding /home/agentos, so the same
+    // worker code runs unmodified under both the privileged (pivot_root)
+    // and --unsafe (real path) filesystem strategies.
+    setenv ("AGENTOS_WORKER_HOME", "/home/agentos", 1);
+
     return true;
   }
+
+  // --unsafe / community strategy: no filesystem namespace at all. The
+  // worker sees the real host filesystem; isolation is provided by
+  // Landlock (ADR-015) + seccomp + cgroup + capability drop, applied later
+  // in apply_worker_sandbox. This function only ensures the worker's
+  // persistent directory and the run's log directory exist, and sets
+  // AGENTOS_WORKER_HOME to the real path of the worker's persistent
+  // directory (see Worker Contract note in pivot_into_overlay above).
+  static bool prepare_unsafe_worker_dirs (const std::string &worker_id,
+                                          const std::string &run_id)
+  {
+    namespace fs = std::filesystem;
+    fs::path home = agentos_home ();
+    std::error_code ec;
+
+    fs::path worker_dir = home / "workers" / worker_id;
+    fs::create_directories (worker_dir, ec);
+    if (ec)
+    {
+      spdlog::error ("[sandbox] cannot create worker persistent dir {}: {}",
+                     worker_dir.string (), ec.message ());
+      return false;
+    }
+
+    fs::path log_dir = home / "logs" / "runs" / run_id;
+    fs::create_directories (log_dir, ec);
+    if (ec)
+    {
+      spdlog::error ("[sandbox] cannot create log dir {}: {}",
+                     log_dir.string (), ec.message ());
+      return false;
+    }
+
+    // worker_runs.layer_path is NOT NULL; create an (empty) placeholder
+    // directory for schema/GC consistency even though --unsafe mode has no
+    // overlay layer to store there.
+    fs::path layer_dir = home / "layers" / "runs" / run_id;
+    fs::create_directories (layer_dir, ec);
+    if (ec)
+    {
+      spdlog::error ("[sandbox] cannot create layer dir {}: {}",
+                     layer_dir.string (), ec.message ());
+      return false;
+    }
+
+    setenv ("AGENTOS_WORKER_HOME", worker_dir.c_str (), 1);
+    return true;
+  }
+
+  bool apply_worker_filesystem (const std::string &worker_id,
+                                const std::string &run_id, bool privileged)
+  {
+    if (!privileged)
+    {
+      if (!prepare_unsafe_worker_dirs (worker_id, run_id))
+        return false;
+      spdlog::info ("[sandbox] worker filesystem prepared for run {} "
+                    "(--unsafe: real host filesystem, AGENTOS_WORKER_HOME={})",
+                    run_id, std::getenv ("AGENTOS_WORKER_HOME"));
+      return true;
+    }
+
+    auto paths = prepare_overlay_dirs (worker_id, run_id);
+    if (!paths)
+      return false;
+
+    if (!mount_overlay_native (*paths))
+    {
+      spdlog::error ("[sandbox] worker filesystem isolation failed");
+      return false;
+    }
+
+    if (!pivot_into_overlay (*paths, worker_id))
+      return false;
+
+    spdlog::info ("[sandbox] worker filesystem isolation applied for run {} "
+                  "(native overlayfs)", run_id);
+    return true;
+  }
+
 
   void gc_run_layers (Database &db)
   {
@@ -655,7 +688,23 @@ namespace agentos
     }
   }
 
+  bool make_mount_namespace_private ()
+  {
+    // Mount propagation must be made private before any further mount or
+    // pivot_root calls, otherwise mount events would propagate back to the
+    // host's mount namespace and pivot_root requires a non-shared mount
+    // point at the new root.
+    if (mount (nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0)
+    {
+      spdlog::error ("[sandbox] making mount namespace private failed: {}",
+                     strerror (errno));
+      return false;
+    }
+    return true;
+  }
+
   bool apply_worker_sandbox (const std::string &job_dir,
+                             const std::string &worker_id,
                              const std::vector<std::string> &fs_read,
                              const std::vector<std::string> &fs_write,
                              const std::vector<int> &tcp_connect_ports,
@@ -663,77 +712,123 @@ namespace agentos
   {
     spdlog::info ("[sandbox] applying worker sandbox for job_dir={}", job_dir);
 
-    // ADR-016: Apply filesystem isolation (overlayfs + pivot_root).
-    // worker_id is the last path component of job_dir.
-    std::string worker_id
-      = std::filesystem::path (job_dir).filename ().string ();
-    if (!apply_worker_filesystem (worker_id, run_id))
-    {
-      spdlog::error ("[sandbox] worker filesystem isolation failed");
-      return false;
-    }
+    // Two-tier model (ADR-016):
+    //
+    //   privileged (CAP_SYS_ADMIN present, enterprise `setcap
+    //   cap_sys_admin+ep`): unshare(CLONE_NEWNS) + native overlayfs +
+    //   pivot_root gives the worker its own filesystem root. CLONE_NEWNET
+    //   provides hard network isolation when network:false. Privilege is
+    //   used only to construct this jail; capability drop (step 9 below)
+    //   removes CAP_SYS_ADMIN etc. before exec — the worker process itself
+    //   runs with no special privileges, matching the daemon's normal
+    //   (unprivileged) identity.
+    //
+    //   --unsafe / community (default, no CAP_SYS_ADMIN): no filesystem or
+    //   network namespace at all. The worker sees the real host
+    //   filesystem; isolation is "directory-level" via Landlock path rules
+    //   (job_dir rw, skills/ ro, manifest fs_read/fs_write) plus Landlock
+    //   network rules (handled_access_net is always set in
+    //   apply_landlock(), so with no tcp_connect_ports — network:false —
+    //   ALL TCP bind/connect is denied without needing CLONE_NEWNET). This
+    //   requires no special privileges and is the path exercised by unit
+    //   tests.
+    bool privileged = has_cap_sys_admin ();
 
-    // 1. cgroup v2
-    if (!join_cgroup ("/sys/fs/cgroup/agentos"))
+    if (privileged)
     {
-      spdlog::warn ("[sandbox] cgroup join failed, continuing");
-    }
+      spdlog::info ("[sandbox] CAP_SYS_ADMIN present; using native overlayfs "
+                    "(privileged mode)");
 
-    // 2. mount namespace (always)
-    if (unshare (CLONE_NEWNS) != 0)
-    {
-      spdlog::error ("[sandbox] unshare CLONE_NEWNS failed: {}",
-                     strerror (errno));
-      return false;
-    }
-
-    // 3. network namespace (only if network:false)
-    if (!network)
-    {
-      if (unshare (CLONE_NEWNET) != 0)
+      // CLONE_NEWNS only — real CAP_SYS_ADMIN in the current (init) user
+      // namespace is sufficient and must be retained for the native
+      // overlay mount below; CLONE_NEWUSER is not used here (it would
+      // scope away CAP_SYS_ADMIN before the overlay mount, causing EINVAL
+      // "failed to clone lowerpath").
+      if (unshare (CLONE_NEWNS) != 0)
       {
-        spdlog::error ("[sandbox] unshare CLONE_NEWNET failed: {}",
+        spdlog::error ("[sandbox] unshare CLONE_NEWNS failed: {}",
                        strerror (errno));
         return false;
       }
+
+      if (!make_mount_namespace_private ())
+        return false;
+
+      // overlayfs + pivot_root + bind /home/agentos (ADR-016).
+      if (!apply_worker_filesystem (worker_id, run_id, true))
+        return false;
+
+      // Network namespace, only if network:false. (Landlock below also
+      // denies all TCP in this case; CLONE_NEWNET additionally removes the
+      // network stack entirely, per ADR-011.)
+      if (!network)
+      {
+        if (unshare (CLONE_NEWNET) != 0)
+        {
+          spdlog::error ("[sandbox] unshare CLONE_NEWNET failed: {}",
+                         strerror (errno));
+          return false;
+        }
+      }
+    }
+    else
+    {
+      spdlog::info ("[sandbox] CAP_SYS_ADMIN absent; using --unsafe "
+                    "directory-level isolation");
+
+      if (!apply_worker_filesystem (worker_id, run_id, false))
+        return false;
+
+      // No CLONE_NEWNET (would require CAP_SYS_ADMIN without CLONE_NEWUSER).
+      // Network isolation for network:false is provided by Landlock below:
+      // handled_access_net is always set in apply_landlock(), so with an
+      // empty tcp_connect_ports list, all TCP bind/connect is denied.
     }
 
-    // 4. mount tmpfs and bind mounts
+    // cgroup v2 (ADR-015 step 1). Failure here is non-fatal — resource
+    // limits are best-effort; the syscall/Landlock layers are the hard
+    // security boundary.
+    if (!join_cgroup ("/sys/fs/cgroup/agentos"))
+      spdlog::warn ("[sandbox] cgroup join failed, continuing");
+
+    // Landlock (ADR-015). In privileged mode, paths are expressed
+    // post-pivot_root (the overlay's lower0=/ makes the original host
+    // paths still resolvable at the same paths). In --unsafe mode, paths
+    // are real host paths directly — either way the same path strings
+    // work. Implicit grants: job_dir rw, skills/ ro. Explicit grants come
+    // from the manifest's fs_read/fs_write/tcp_connect_ports.
     std::vector<std::string> read_paths = fs_read;
     std::vector<std::string> write_paths = fs_write;
-    // Implicit grants (ADR-015): job_dir read+write, skills read-only
     write_paths.push_back (job_dir);
-    std::filesystem::path home = agentos_home ();
-    read_paths.push_back ((home / "skills").string ());
+    read_paths.push_back ((agentos_home () / "skills").string ());
 
-    if (!setup_mounts (job_dir, read_paths, write_paths))
-    {
-      spdlog::error ("[sandbox] mount setup failed");
-      return false;
-    }
-
-    // 5. Landlock ruleset
     if (!apply_landlock (read_paths, write_paths, tcp_connect_ports))
     {
       spdlog::error ("[sandbox] Landlock setup failed");
       return false;
     }
 
-    // 6. seccomp
+    // seccomp (ADR-015). Must come after every unshare/mount/pivot_root
+    // call above — none of those syscalls are in the seccomp whitelist.
     if (!apply_seccomp ())
     {
       spdlog::error ("[sandbox] seccomp setup failed");
       return false;
     }
 
-    // 7. drop capabilities
+    // Drop capabilities (ADR-015). In privileged mode this removes
+    // CAP_SYS_ADMIN (and everything else) before exec — the jail has
+    // already been constructed; the worker process itself runs with no
+    // special privileges. In --unsafe mode this is defense-in-depth (a
+    // normal unprivileged process typically holds no capabilities anyway).
     if (!drop_capabilities ())
     {
       spdlog::error ("[sandbox] capability drop failed");
       return false;
     }
 
-    spdlog::info ("[sandbox] worker sandbox applied successfully");
+    spdlog::info ("[sandbox] worker sandbox applied successfully ({})",
+                  privileged ? "privileged" : "--unsafe");
     return true;
   }
 

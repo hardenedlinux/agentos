@@ -283,9 +283,9 @@ namespace agentos
   bool Dispatcher::apply_child_sandbox (const DispatchRequest &req,
                                         const std::string &job_dir)
   {
-    return apply_worker_sandbox (job_dir, req.fs_read, req.fs_write,
-                                 req.tcp_connect_ports, req.network,
-                                 req.run_id);
+    return apply_worker_sandbox (job_dir, req.worker_id, req.fs_read,
+                                 req.fs_write, req.tcp_connect_ports,
+                                 req.network, req.run_id);
   }
 
 } // namespace agentos

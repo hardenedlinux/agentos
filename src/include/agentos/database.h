@@ -18,6 +18,7 @@
 
 #include "agentos/forge/forge_pipeline_job.h"
 #include "agentos/types.h"
+#include "agentos/protocol_types.h"
 #include <filesystem>
 #include <optional>
 #include <sqlite3.h>
@@ -39,6 +40,8 @@ namespace agentos
       inline constexpr std::string_view executing = "executing";
       inline constexpr std::string_view done = "done";
       inline constexpr std::string_view failed = "failed";
+      inline constexpr std::string_view repairing = "repairing";
+      inline constexpr std::string_view human_review = "human_review";
     } // namespace job_phase
 
     namespace worker_status
@@ -57,6 +60,34 @@ namespace agentos
       inline constexpr std::string_view rejected = "rejected";
       inline constexpr std::string_view human_review = "human_review";
     } // namespace forge_status
+
+    namespace job_type
+    {
+      inline constexpr std::string_view oneshot   = "oneshot";
+      inline constexpr std::string_view scheduled = "scheduled";
+      inline constexpr std::string_view loop      = "loop";
+    } // namespace job_type
+
+    namespace step_status
+    {
+      inline constexpr std::string_view pending = "pending";
+      inline constexpr std::string_view running = "running";
+      inline constexpr std::string_view done    = "done";
+      inline constexpr std::string_view failed  = "failed";
+    } // namespace step_status
+
+    namespace review_status
+    {
+      inline constexpr std::string_view pending  = "pending";
+      inline constexpr std::string_view approved = "approved";
+      inline constexpr std::string_view rejected = "rejected";
+    } // namespace review_status
+
+    namespace review_type
+    {
+      inline constexpr std::string_view auto_  = "auto";
+      inline constexpr std::string_view human  = "human";
+    } // namespace review_type
   } // namespace db
 
   // ---------------------------------------------------------------------------
@@ -118,7 +149,7 @@ namespace agentos
       std::string input_schema; // raw JSON
     };
 
-    // -- Job table ------------------------------------------------------------
+    // -- Job table (original, preserved for compatibility) -------------------
 
     void store_job (const Task &task);
     void update_job_phase (const TaskId &id, const std::string &phase);
@@ -126,13 +157,44 @@ namespace agentos
     std::string load_plan_json (const TaskId &job_id);
     std::vector<InFlightJob> resume_in_flight ();
 
+    // -- Job table (ADR‑025) --------------------------------------------------
+
+    void              insert_job (const Job &job);
+    void              update_job_phase (const std::string &id,
+                                        std::string_view old_phase,
+                                        std::string_view new_phase);
+    void              update_job_error (const std::string &id,
+                                        const std::string &error);
+    std::optional<Job> load_job (const std::string &id);
+    std::vector<Job>    load_jobs (std::optional<std::string_view> type_filter,
+                                   std::optional<std::string_view> phase_filter,
+                                   int limit, int offset);
+    int                 count_jobs (std::optional<std::string_view> type_filter,
+                                    std::optional<std::string_view> phase_filter);
+    void              increment_job_iteration (const std::string &id);
+    void              update_job_feedback (const std::string &id,
+                                           const std::string &feedback);
+    void              increment_job_repairs (const std::string &id);
+
     // -- Task table -----------------------------------------------------------
-    // ADR-022 – Pipeline step persistence and retrieval
+    // ADR‑022 – Pipeline step persistence and retrieval
     void store_pipeline_task (const TaskId &job_id,
                               const PipelinePlanStep &step, int step_order);
     std::string load_step_result (const std::string &step_id);
     void update_step_result (const std::string &step_id,
                              const std::string &result_json);
+
+    // -- Step table (ADR‑025) -------------------------------------------------
+
+    void                     insert_step (const Step &step);
+    void                     update_step_status (const std::string &id,
+                                                  std::string_view new_status,
+                                                  std::optional<std::string> error = std::nullopt);
+    void                     complete_step (const std::string &id,
+                                            const std::string &result_json);
+    std::optional<Step>      load_step (const std::string &id);
+    std::vector<Step>        load_steps_for_job (const std::string &job_id);
+    std::optional<std::string> load_step_result_opt (const std::string &step_id);
 
     // -- WorkerRun table ------------------------------------------------------
 
@@ -165,11 +227,27 @@ namespace agentos
                             const std::string &input_schema);
     std::vector<CapabilityRow> load_capabilities ();
 
-    // -- HumanReview table ----------------------------------------------------
+    // -- HumanReview table (original, preserved for ABI compatibility) --------
 
     void insert_human_review (const std::string &id, const std::string &reason,
                               const std::string &artifacts,
                               const std::string &forge_id);
+
+    // -- HumanReview table (ADR‑025) ------------------------------------------
+
+    void                     insert_human_review (const HumanReview &review);
+    void                     update_review_status (const std::string &id,
+                                                   std::string_view status,
+                                                   const std::string &decision);
+    std::optional<HumanReview> load_human_review (const std::string &id);
+    std::vector<HumanReview>   load_human_reviews (
+                                    std::optional<std::string_view> type_filter,
+                                    std::optional<std::string_view> status_filter);
+
+    // --- Crash recovery helpers (ADR‑025) -----------------------------------
+
+    std::vector<Job>  load_active_jobs ();
+    std::vector<Step> load_active_steps (const std::vector<std::string> &job_ids);
 
     // -- AccessKey table (ADR-020) --------------------------------------------
 
@@ -216,6 +294,8 @@ namespace agentos
                                      const std::optional<int64_t> &val);
     static void bind_optional_int (sqlite3_stmt *stmt, int col,
                                    const std::optional<int> &val);
+    static void bind_optional_text (sqlite3_stmt *stmt, int col,
+                                    const std::optional<std::string> &val);
     static std::string column_text_or_empty (sqlite3_stmt *stmt, int col);
     static std::optional<int64_t> column_int64_opt (sqlite3_stmt *stmt,
                                                     int col);

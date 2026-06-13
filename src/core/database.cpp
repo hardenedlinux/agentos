@@ -19,6 +19,7 @@
 #include "agentos/home_init.h"
 #include <chrono>
 #include <cstring>
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
@@ -108,16 +109,22 @@ namespace agentos
         phase      TEXT NOT NULL DEFAULT 'planning',
         payload    TEXT,
         plan       TEXT,
+        created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS tasks (
-        id       TEXT PRIMARY KEY,
-        job_id   TEXT NOT NULL,
-        agent_id TEXT,
-        method   TEXT,
-        params   TEXT,
-        status   TEXT DEFAULT 'pending',
-        FOREIGN KEY (job_id) REFERENCES jobs(id)
+        id           TEXT PRIMARY KEY,
+        job_id       TEXT NOT NULL,
+        agent_id     TEXT,
+        method       TEXT,
+        params       TEXT,
+        status       TEXT DEFAULT 'pending',
+        result       TEXT,
+        description  TEXT,
+        step_order   INTEGER,
+        started_at   INTEGER,
+        completed_at INTEGER,
+        error        TEXT
     );
     CREATE TABLE IF NOT EXISTS worker_runs (
         run_id     TEXT PRIMARY KEY,
@@ -164,12 +171,15 @@ namespace agentos
     );
     CREATE TABLE IF NOT EXISTS human_reviews (
         id          TEXT PRIMARY KEY,
-        forge_id    TEXT REFERENCES forge_pipeline_jobs(id),
+        forge_id    TEXT,
         reason      TEXT NOT NULL,
         artifacts   TEXT NOT NULL,
         status      TEXT DEFAULT 'pending',
         decision    TEXT,
-        reviewed_at INTEGER
+        reviewed_at INTEGER,
+        type        TEXT,
+        job_id      TEXT,
+        created_at  INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS access_keys (
         id             TEXT PRIMARY KEY,
@@ -214,6 +224,56 @@ namespace agentos
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN step_order INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN started_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN completed_at INTEGER");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN error TEXT");
+    }
+
+    // ADR‑025: extend the jobs table with new columns (idempotent)
+    {
+      auto maybe_add_column = [this] (const char *ddl)
+      {
+        char *err = nullptr;
+        sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
+        if (err)
+        {
+          spdlog::debug ("[database] jobs migration '{}': {}", ddl, err);
+          sqlite3_free (err);
+        }
+      };
+
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN type TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN goal TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN tags TEXT DEFAULT '[]'");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN error TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN max_iterations INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN current_iteration INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN max_repairs INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN current_repairs INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN reviewer_id TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN acceptance_criteria TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN last_feedback TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN timer_id TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN interval_s INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN starts_at INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN last_run_at INTEGER");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN next_run_at INTEGER");
+    }
+
+    // ADR‑025: extend human_reviews with type / job_id
+    {
+      auto maybe_add_column = [this] (const char *ddl)
+      {
+        char *err = nullptr;
+        sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
+        if (err)
+        {
+          spdlog::debug ("[database] review migration '{}': {}", ddl, err);
+          sqlite3_free (err);
+        }
+      };
+      maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN type TEXT");
+      maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN job_id TEXT");
+      maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
     }
 
     spdlog::info ("[database] opened {}", db_path_);
@@ -291,6 +351,15 @@ namespace agentos
       sqlite3_bind_null (stmt, col);
   }
 
+  static void bind_optional_text (sqlite3_stmt *stmt, int col,
+                                  const std::optional<std::string> &val)
+  {
+    if (val)
+      sqlite3_bind_text (stmt, col, val->c_str (), -1, SQLITE_TRANSIENT);
+    else
+      sqlite3_bind_null (stmt, col);
+  }
+
   static std::string column_text_or_empty (sqlite3_stmt *stmt, int col)
   {
     const auto *p
@@ -341,6 +410,12 @@ namespace agentos
     ::agentos::bind_optional_int (stmt, col, val);
   }
 
+  void Database::bind_optional_text (sqlite3_stmt *stmt, int col,
+                                     const std::optional<std::string> &val)
+  {
+    ::agentos::bind_optional_text (stmt, col, val);
+  }
+
   template <typename Fn> bool Database::with_transaction (Fn &&fn)
   {
     if (!exec_ddl ("BEGIN"))
@@ -362,8 +437,719 @@ namespace agentos
     return exec_ddl ("COMMIT");
   }
 
+  // ========================================================================
+  //  row_to_* helpers (file-scope)
+  // ========================================================================
+
+  static Job row_to_job (sqlite3_stmt *stmt)
+  {
+    Job j;
+    j.id         = column_text_or_empty (stmt, 0);
+    j.type       = column_text_or_empty (stmt, 1);
+    j.goal       = column_text_or_empty (stmt, 2);
+
+    // tags — parse JSON array
+    std::string tags_str = column_text_or_empty (stmt, 3);
+    if (!tags_str.empty ())
+    {
+      rapidjson::Document d;
+      d.Parse (tags_str.c_str ());
+      if (d.IsArray ())
+      {
+        for (const auto &v : d.GetArray ())
+        {
+          if (v.IsString ())
+            j.tags.emplace_back (v.GetString ());
+        }
+      }
+    }
+
+    j.phase      = column_text_or_empty (stmt, 4);
+    j.created_at = sqlite3_column_int64 (stmt, 5);
+    j.updated_at = sqlite3_column_int64 (stmt, 6);
+
+    // error (nullable)
+    if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
+      j.error = column_text_or_empty (stmt, 7);
+
+    // ----------------------------------------------------------------------
+    // Loop fields (columns 8‑14)
+    // Present only when type == loop
+    // ----------------------------------------------------------------------
+    std::string type = j.type;
+    if (type == std::string (db::job_type::loop))
+    {
+      Loop l;
+      l.max_iterations      = sqlite3_column_int (stmt, 8);
+      l.current_iteration   = sqlite3_column_int (stmt, 9);
+      l.max_repairs         = sqlite3_column_int (stmt, 10);
+      l.current_repairs     = sqlite3_column_int (stmt, 11);
+      l.reviewer_id         = column_text_or_empty (stmt, 12);
+      l.acceptance_criteria = column_text_or_empty (stmt, 13);
+      if (sqlite3_column_type (stmt, 14) != SQLITE_NULL)
+        l.last_feedback = column_text_or_empty (stmt, 14);
+      j.loop = std::move (l);
+    }
+
+    // ----------------------------------------------------------------------
+    // Schedule fields (columns 15‑19)
+    // Present only when type == scheduled
+    // ----------------------------------------------------------------------
+    if (type == std::string (db::job_type::scheduled))
+    {
+      Schedule s;
+      s.timer_id   = column_text_or_empty (stmt, 15);
+      s.interval_s = sqlite3_column_int64 (stmt, 16);
+      s.starts_at   = column_int64_opt (stmt, 17);
+      s.last_run_at = column_int64_opt (stmt, 18);
+      s.next_run_at = column_int64_opt (stmt, 19);
+      j.schedule = std::move (s);
+    }
+
+    return j;
+  }
+
+  static Step row_to_step (sqlite3_stmt *stmt)
+  {
+    Step s;
+    s.id          = column_text_or_empty (stmt, 0);
+    s.job_id      = column_text_or_empty (stmt, 1);
+    s.step_order  = sqlite3_column_int (stmt, 2);
+    s.description = column_text_or_empty (stmt, 3);
+    s.status      = column_text_or_empty (stmt, 4);
+    s.started_at   = column_int64_opt (stmt, 5);
+    s.completed_at = column_int64_opt (stmt, 6);
+    if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
+      s.error = column_text_or_empty (stmt, 7);
+    return s;
+  }
+
+  static HumanReview row_to_human_review (sqlite3_stmt *stmt)
+  {
+    HumanReview r;
+    r.id        = column_text_or_empty (stmt, 0);
+    r.type      = column_text_or_empty (stmt, 1);
+    if (sqlite3_column_type (stmt, 2) != SQLITE_NULL)
+      r.forge_id = column_text_or_empty (stmt, 2);
+    if (sqlite3_column_type (stmt, 3) != SQLITE_NULL)
+      r.job_id   = column_text_or_empty (stmt, 3);
+    r.reason    = column_text_or_empty (stmt, 4);
+    r.artifacts = column_text_or_empty (stmt, 5);
+    r.status    = column_text_or_empty (stmt, 6);
+    if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
+      r.decision = column_text_or_empty (stmt, 7);
+    r.created_at  = sqlite3_column_int64 (stmt, 8);
+    r.reviewed_at = column_int64_opt (stmt, 9);
+    return r;
+  }
+
+  // ========================================================================
+  //  ADR‑025 public methods
+  // ========================================================================
+
+  // ---------- Job ----------
+
+  void Database::insert_job (const Job &job)
+  {
+    if (!db_)
+      return;
+
+    // serialise tags → JSON array
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartArray ();
+    for (const auto &t : job.tags)
+      w.String (t.c_str ());
+    w.EndArray ();
+    std::string tags_json = buf.GetString ();
+
+    Stmt stmt (prepare (R"(
+      INSERT INTO jobs (id, type, goal, tags, phase,
+                        created_at, updated_at, error,
+                        max_iterations, current_iteration,
+                        max_repairs, current_repairs,
+                        reviewer_id, acceptance_criteria, last_feedback,
+                        timer_id, interval_s, starts_at, last_run_at, next_run_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    )"));
+    if (!stmt.s)
+      return;
+
+    const int64_t ts = now_unix ();
+    sqlite3_bind_text (stmt, 1, job.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job.type.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, job.goal.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, tags_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, job.phase.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 6, job.created_at ? job.created_at : ts);
+    sqlite3_bind_int64 (stmt, 7, job.updated_at ? job.updated_at : ts);
+
+    bind_optional_text (stmt, 8, job.error);
+
+    if (job.loop)
+    {
+      const Loop &l = *job.loop;
+      sqlite3_bind_int (stmt, 9, l.max_iterations);
+      sqlite3_bind_int (stmt, 10, l.current_iteration);
+      sqlite3_bind_int (stmt, 11, l.max_repairs);
+      sqlite3_bind_int (stmt, 12, l.current_repairs);
+      sqlite3_bind_text (stmt, 13, l.reviewer_id.c_str (), -1,
+                         SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, 14, l.acceptance_criteria.c_str (), -1,
+                         SQLITE_TRANSIENT);
+      bind_optional_text (stmt, 15, l.last_feedback);
+    }
+    else
+    {
+      sqlite3_bind_null (stmt, 9);
+      sqlite3_bind_null (stmt, 10);
+      sqlite3_bind_null (stmt, 11);
+      sqlite3_bind_null (stmt, 12);
+      sqlite3_bind_null (stmt, 13);
+      sqlite3_bind_null (stmt, 14);
+      sqlite3_bind_null (stmt, 15);
+    }
+
+    if (job.schedule)
+    {
+      const Schedule &s = *job.schedule;
+      sqlite3_bind_text (stmt, 16, s.timer_id.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 17, s.interval_s);
+      bind_optional_int64 (stmt, 18, s.starts_at);
+      bind_optional_int64 (stmt, 19, s.last_run_at);
+      bind_optional_int64 (stmt, 20, s.next_run_at);
+    }
+    else
+    {
+      sqlite3_bind_null (stmt, 16);
+      sqlite3_bind_null (stmt, 17);
+      sqlite3_bind_null (stmt, 18);
+      sqlite3_bind_null (stmt, 19);
+      sqlite3_bind_null (stmt, 20);
+    }
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_job: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_job_phase (const std::string &id,
+                                   std::string_view /*old_phase*/,
+                                   std::string_view new_phase)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET phase = ?, updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, new_phase.data (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text (stmt, 3, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_job_phase: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_job_error (const std::string &id,
+                                    const std::string &error)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET error = ?, updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, error.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text (stmt, 3, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_job_error: {}", sqlite3_errmsg (db_));
+  }
+
+  std::optional<Job> Database::load_job (const std::string &id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT id, type, goal, tags, phase,
+             created_at, updated_at, error,
+             max_iterations, current_iteration,
+             max_repairs, current_repairs,
+             reviewer_id, acceptance_criteria, last_feedback,
+             timer_id, interval_s, starts_at, last_run_at, next_run_at
+      FROM jobs WHERE id = ?
+    )"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_job (stmt);
+    return std::nullopt;
+  }
+
+  std::vector<Job> Database::load_jobs (std::optional<std::string_view> type_filter,
+                                        std::optional<std::string_view> phase_filter,
+                                        int limit, int offset)
+  {
+    std::vector<Job> jobs;
+    if (!db_)
+      return jobs;
+
+    std::string where;
+    int bind_idx = 1;
+
+    if (type_filter)
+    {
+      where += " AND type = ?";
+    }
+    if (phase_filter)
+    {
+      where += " AND phase = ?";
+    }
+
+    std::string sql = std::string ("SELECT id, type, goal, tags, phase, "
+                                   "created_at, updated_at, error, "
+                                   "max_iterations, current_iteration, "
+                                   "max_repairs, current_repairs, "
+                                   "reviewer_id, acceptance_criteria, last_feedback, "
+                                   "timer_id, interval_s, starts_at, last_run_at, next_run_at "
+                                   "FROM jobs WHERE 1=1")
+                      + where
+                      + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return jobs;
+
+    if (type_filter)
+    {
+      std::string tmp (*type_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+    if (phase_filter)
+    {
+      std::string tmp (*phase_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+
+    sqlite3_bind_int (stmt, bind_idx++, limit);
+    sqlite3_bind_int (stmt, bind_idx++, offset);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      jobs.push_back (row_to_job (stmt));
+
+    return jobs;
+  }
+
+  int Database::count_jobs (std::optional<std::string_view> type_filter,
+                             std::optional<std::string_view> phase_filter)
+  {
+    if (!db_)
+      return 0;
+
+    std::string where;
+    int bind_idx = 1;
+
+    if (type_filter)
+      where += " AND type = ?";
+    if (phase_filter)
+      where += " AND phase = ?";
+
+    std::string sql = std::string ("SELECT COUNT(*) FROM jobs WHERE 1=1") + where;
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return 0;
+
+    if (type_filter)
+    {
+      std::string tmp (*type_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+    if (phase_filter)
+    {
+      std::string tmp (*phase_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return sqlite3_column_int (stmt, 0);
+    return 0;
+  }
+
+  void Database::increment_job_iteration (const std::string &id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET current_iteration = current_iteration + 1, "
+      "updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_int64 (stmt, 1, now_unix ());
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] increment_job_iteration: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::update_job_feedback (const std::string &id,
+                                      const std::string &feedback)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET last_feedback = ?, updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, feedback.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text (stmt, 3, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_job_feedback: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::increment_job_repairs (const std::string &id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET current_repairs = current_repairs + 1, "
+      "updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_int64 (stmt, 1, now_unix ());
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] increment_job_repairs: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  // ---------- Step ----------
+
+  void Database::insert_step (const Step &step)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT INTO tasks (id, job_id, step_order, description, status,
+                         result, started_at, completed_at, error)
+      VALUES (?,?,?,?,?, NULL,?,?,?)
+    )"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, step.job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (stmt, 3, step.step_order);
+    sqlite3_bind_text (stmt, 4, step.description.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, step.status.c_str (), -1, SQLITE_TRANSIENT);
+    bind_optional_int64 (stmt, 6, step.started_at);
+    bind_optional_int64 (stmt, 7, step.completed_at);
+    bind_optional_text  (stmt, 8, step.error);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_step: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_step_status (const std::string &id,
+                                     std::string_view new_status,
+                                     std::optional<std::string> error)
+  {
+    if (!db_)
+      return;
+
+    const int64_t ts = now_unix ();
+    const bool is_running = (new_status == db::step_status::running);
+
+    // running → set started_at; done/failed → set completed_at.
+    const char *sql = is_running
+      ? "UPDATE tasks SET status = ?, error = ?, started_at  = ? WHERE id = ?"
+      : "UPDATE tasks SET status = ?, error = ?, completed_at = ? WHERE id = ?";
+
+    Stmt stmt (prepare (sql));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, new_status.data (), -1, SQLITE_TRANSIENT);
+    bind_optional_text (stmt, 2, error);
+    sqlite3_bind_int64 (stmt, 3, ts);
+    sqlite3_bind_text (stmt, 4, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_step_status: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::complete_step (const std::string &id,
+                                const std::string &result_json)
+  {
+    // reuse legacy helper that writes result + sets status=done
+    update_step_result (id, result_json);
+  }
+
+  std::optional<Step> Database::load_step (const std::string &id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT id, job_id, step_order, description, status,
+             started_at, completed_at, error
+      FROM tasks WHERE id = ?
+    )"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_step (stmt);
+    return std::nullopt;
+  }
+
+  std::vector<Step> Database::load_steps_for_job (const std::string &job_id)
+  {
+    std::vector<Step> steps;
+    if (!db_)
+      return steps;
+
+    Stmt stmt (prepare (R"(
+      SELECT id, job_id, step_order, description, status,
+             started_at, completed_at, error
+      FROM tasks WHERE job_id = ? ORDER BY step_order ASC
+    )"));
+    if (!stmt.s)
+      return steps;
+
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      steps.push_back (row_to_step (stmt));
+    return steps;
+  }
+
+  std::optional<std::string> Database::load_step_result_opt (const std::string &step_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare ("SELECT result FROM tasks WHERE id = ?"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, step_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      if (sqlite3_column_type (stmt, 0) == SQLITE_NULL)
+        return std::nullopt;
+      return column_text_or_empty (stmt, 0);
+    }
+    return std::nullopt;
+  }
+
+  // ---------- HumanReview ----------
+
+  void Database::insert_human_review (const HumanReview &review)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT INTO human_reviews
+          (id, type, forge_id, job_id, reason, artifacts,
+           status, decision, created_at, reviewed_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+    )"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, review.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, review.type.c_str (), -1, SQLITE_TRANSIENT);
+    bind_optional_text (stmt, 3, review.forge_id);
+    bind_optional_text (stmt, 4, review.job_id);
+    sqlite3_bind_text (stmt, 5, review.reason.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 6, review.artifacts.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 7, review.status.c_str (), -1, SQLITE_TRANSIENT);
+    bind_optional_text (stmt, 8, review.decision);
+    sqlite3_bind_int64 (stmt, 9,
+                        review.created_at ? review.created_at : now_unix ());
+    bind_optional_int64 (stmt, 10, review.reviewed_at);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_human_review: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::update_review_status (const std::string &id,
+                                       std::string_view status,
+                                       const std::string &decision)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE human_reviews SET status = ?, decision = ?, reviewed_at = ? "
+      "WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, status.data (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, decision.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 3, now_unix ());
+    sqlite3_bind_text (stmt, 4, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_review_status: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::optional<HumanReview> Database::load_human_review (const std::string &id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT id, type, forge_id, job_id, reason, artifacts,
+             status, decision, created_at, reviewed_at
+      FROM human_reviews WHERE id = ?
+    )"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_human_review (stmt);
+    return std::nullopt;
+  }
+
+  std::vector<HumanReview> Database::load_human_reviews (
+      std::optional<std::string_view> type_filter,
+      std::optional<std::string_view> status_filter)
+  {
+    std::vector<HumanReview> revs;
+    if (!db_)
+      return revs;
+
+    std::string where;
+    int bind_idx = 1;
+
+    if (type_filter)
+      where += " AND type = ?";
+    if (status_filter)
+      where += " AND status = ?";
+
+    std::string sql = std::string (
+      "SELECT id, type, forge_id, job_id, reason, artifacts, "
+      "status, decision, created_at, reviewed_at "
+      "FROM human_reviews WHERE 1=1")
+                      + where
+                      + " ORDER BY created_at DESC";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return revs;
+
+    if (type_filter)
+    {
+      std::string tmp (*type_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+    if (status_filter)
+    {
+      std::string tmp (*status_filter);
+      sqlite3_bind_text (stmt, bind_idx++, tmp.c_str (), -1, SQLITE_TRANSIENT);
+    }
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      revs.push_back (row_to_human_review (stmt));
+
+    return revs;
+  }
+
+  // ---------- Crash recovery helpers ----------
+
+  std::vector<Job> Database::load_active_jobs ()
+  {
+    std::vector<Job> jobs;
+    if (!db_)
+      return jobs;
+
+    Stmt stmt (prepare (
+      "SELECT id, type, goal, tags, phase, created_at, updated_at, error, "
+      "max_iterations, current_iteration, max_repairs, current_repairs, "
+      "reviewer_id, acceptance_criteria, last_feedback, "
+      "timer_id, interval_s, starts_at, last_run_at, next_run_at "
+      "FROM jobs "
+      "WHERE phase NOT IN (?, ?, ?) "
+      "ORDER BY created_at"));
+    if (!stmt.s)
+      return jobs;
+
+    sqlite3_bind_text (stmt, 1, db::job_phase::done.data (),         -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, db::job_phase::failed.data (),       -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, db::job_phase::human_review.data (), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      jobs.push_back (row_to_job (stmt));
+    return jobs;
+  }
+
+  std::vector<Step> Database::load_active_steps (const std::vector<std::string> &job_ids)
+  {
+    std::vector<Step> steps;
+    if (!db_ || job_ids.empty ())
+      return steps;
+
+    // build IN clause
+    std::string placeholders;
+    for (size_t i = 0; i < job_ids.size (); ++i)
+    {
+      if (i > 0)
+        placeholders += ", ";
+      placeholders += "?";
+    }
+
+    std::string sql = std::string (
+      "SELECT id, job_id, step_order, description, status, "
+      "started_at, completed_at, error "
+      "FROM tasks WHERE job_id IN (")
+                      + placeholders
+                      + ") AND status != ? ORDER BY step_order ASC";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return steps;
+
+    for (size_t i = 0; i < job_ids.size (); ++i)
+      sqlite3_bind_text (stmt, static_cast<int> (i + 1),
+                         job_ids[i].c_str (), -1, SQLITE_TRANSIENT);
+
+    std::string done_status = std::string(db::step_status::done);
+    sqlite3_bind_text (stmt, static_cast<int>(job_ids.size () + 1),
+                       done_status.c_str (), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      steps.push_back (row_to_step (stmt));
+    return steps;
+  }
+
+  // ========================================================================
+  //  Existing (original) methods — kept unchanged below
+  // ========================================================================
+
   // ---------------------------------------------------------------------------
-  // Job table
+  // Job table (original)
   // ---------------------------------------------------------------------------
 
   void Database::store_job (const Task &task)
@@ -514,7 +1300,11 @@ namespace agentos
     sqlite3_bind_text (stmt, 1, step_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      if (sqlite3_column_type (stmt, 0) == SQLITE_NULL)
+        return "";
       return column_text_or_empty (stmt, 0);
+    }
     return "";
   }
 
@@ -523,17 +1313,20 @@ namespace agentos
   {
     if (!db_)
       return;
+    std::string done_status = std::string(db::step_status::done);
     Stmt stmt (
-      prepare ("UPDATE tasks SET result = ?, status = 'done', completed_at = ? "
+      prepare ("UPDATE tasks SET result = ?, status = ?, completed_at = ? "
                "WHERE id = ?"));
     if (!stmt.s)
       return;
     sqlite3_bind_text (stmt, 1, result_json.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 2, now_unix ());
-    sqlite3_bind_text (stmt, 3, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, done_status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 3, now_unix ());
+    sqlite3_bind_text (stmt, 4, step_id.c_str (), -1, SQLITE_TRANSIENT);
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] update_step_result: {}", sqlite3_errmsg (db_));
   }
+
   // types.h WorkerRun uses magic numbers (ended_at==0, exit_code==-1).
   // We map these to NULL in the database and restore them on read.
   // ---------------------------------------------------------------------------
@@ -942,7 +1735,7 @@ namespace agentos
   }
 
   // ---------------------------------------------------------------------------
-  // HumanReview table
+  // HumanReview table (original)
   // ---------------------------------------------------------------------------
 
   void Database::insert_human_review (const std::string &id,

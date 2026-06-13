@@ -302,6 +302,40 @@ namespace agentos
     GatewayOutbound outbound;
   };
 
+  // ADR-023 — Task target classification
+  enum class TaskTarget : uint8_t
+  {
+    Gateway,
+    Orchestrator,
+    Master
+  };
+
+  inline std::string to_string (TaskTarget t)
+  {
+    switch (t)
+    {
+    case TaskTarget::Gateway:
+      return "gateway";
+    case TaskTarget::Orchestrator:
+      return "orchestrator";
+    case TaskTarget::Master:
+      return "master";
+    }
+    return "";
+  }
+
+  // ADR-023 — timer_tasks row representation (in-memory only)
+  struct TimerTask
+  {
+    std::string id;
+    int64_t interval_s = 0;
+    int64_t next_fire = 0;
+    TaskTarget target;
+    std::string payload_json;
+    bool enabled = true;
+    int64_t created_at = 0;
+  };
+
   // ADR-023 — PeriodicExecutor control messages (register / cancel tasks)
   struct PeriodicControl
   {
@@ -316,7 +350,7 @@ namespace agentos
       std::string id;
       int64_t interval_s = 0; // 0 = one-shot
       int64_t next_fire = 0;  // Unix seconds
-      std::string target;     // "gateway" | "orchestrator" | "master"
+      TaskTarget target;      // where to dispatch
       std::string payload_json;
     };
 

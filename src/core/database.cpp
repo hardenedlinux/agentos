@@ -184,6 +184,15 @@ namespace agentos
         revoked_at     INTEGER,
         revoked_reason TEXT
     );
+    CREATE TABLE IF NOT EXISTS timer_tasks (
+        id          TEXT PRIMARY KEY,
+        interval_s  INTEGER NOT NULL,
+        next_fire   INTEGER NOT NULL,
+        target      TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_at  INTEGER NOT NULL
+    );
   )";
     if (!exec_ddl (schema))
       return false;
@@ -1065,6 +1074,143 @@ namespace agentos
       keys.push_back (std::move (k));
     }
     return keys;
+  }
+
+  // ---------------------------------------------------------------------------
+  // timer_tasks table (ADR-023)
+  // ---------------------------------------------------------------------------
+
+  static TaskTarget target_from_string (const std::string &s)
+  {
+    if (s == "orchestrator") return TaskTarget::Orchestrator;
+    if (s == "master")       return TaskTarget::Master;
+    return TaskTarget::Gateway;
+  }
+
+  static TimerTask row_to_timer_task (sqlite3_stmt *stmt)
+  {
+    TimerTask t;
+    t.id           = column_text_or_empty (stmt, 0);
+    t.interval_s   = sqlite3_column_int64 (stmt, 1);
+    t.next_fire    = sqlite3_column_int64 (stmt, 2);
+    t.target       = target_from_string (column_text_or_empty (stmt, 3));
+    t.payload_json = column_text_or_empty (stmt, 4);
+    t.enabled      = sqlite3_column_int (stmt, 5) != 0;
+    t.created_at   = sqlite3_column_int64 (stmt, 6);
+    return t;
+  }
+
+  void Database::insert_timer_task (const TimerTask &t)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "INSERT OR IGNORE INTO timer_tasks "
+      "(id, interval_s, next_fire, target, payload_json, enabled, created_at) "
+      "VALUES (?,?,?,?,?,1,?)"));
+    if (!stmt.s)
+      return;
+
+    const auto trg = to_string (t.target);
+    sqlite3_bind_text  (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, t.interval_s);
+    sqlite3_bind_int64 (stmt, 3, t.next_fire);
+    sqlite3_bind_text  (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text  (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 6, t.created_at > 0 ? t.created_at : now_unix ());
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_timer_task: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::persist_timer_task (const TimerTask &t)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "INSERT OR REPLACE INTO timer_tasks "
+      "(id, interval_s, next_fire, target, payload_json, enabled, created_at) "
+      "VALUES (?,?,?,?,?,1,?)"));
+    if (!stmt.s)
+      return;
+
+    const auto trg = to_string (t.target);
+    sqlite3_bind_text  (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, t.interval_s);
+    sqlite3_bind_int64 (stmt, 3, t.next_fire);
+    sqlite3_bind_text  (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text  (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 6, t.created_at > 0 ? t.created_at : now_unix ());
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] persist_timer_task: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::upsert_timer_task_next_fire (const std::string &id,
+                                              int64_t next_fire)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE timer_tasks SET next_fire = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_int64 (stmt, 1, next_fire);
+    sqlite3_bind_text  (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] upsert_timer_task_next_fire: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::disable_timer_task (const std::string &id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE timer_tasks SET enabled = 0 WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] disable_timer_task: {}", sqlite3_errmsg (db_));
+  }
+
+  bool Database::timer_task_exists (const std::string &id)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (
+      "SELECT COUNT(*) FROM timer_tasks WHERE id = ? AND enabled = 1"));
+    if (!stmt.s)
+      return false;
+
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return sqlite3_column_int (stmt, 0) > 0;
+    return false;
+  }
+
+  std::vector<TimerTask> Database::load_enabled_timer_tasks ()
+  {
+    std::vector<TimerTask> tasks;
+    if (!db_)
+      return tasks;
+
+    Stmt stmt (prepare (
+      "SELECT id, interval_s, next_fire, target, payload_json, enabled, "
+      "created_at FROM timer_tasks WHERE enabled = 1"));
+    if (!stmt.s)
+      return tasks;
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      tasks.push_back (row_to_timer_task (stmt));
+
+    return tasks;
   }
 
 } // namespace agentos

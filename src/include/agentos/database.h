@@ -65,7 +65,6 @@ namespace agentos
   // Owns the sqlite3* connection for the daemon lifetime.
   // open() once at startup; destructor closes.
   // All public methods preserve the original external interface exactly.
-  // Internally, work is delegated to Repository objects.
   //
   // Thread safety: sqlite3 is opened in serialized mode (SQLITE_THREADSAFE=1).
   // A 5-second busy timeout handles write contention under WAL.
@@ -91,8 +90,8 @@ namespace agentos
     void close ();
     [[nodiscard]] bool is_open () const;
 
-    // Exposed for legacy code that needs the raw handle (prefer Repository
-    // methods for all new code).
+    // Exposed for test code that needs the raw handle.
+    // Production code must not call this — use the typed methods below.
     sqlite3 *db_handle () const;
 
     // -- Nested types (preserved for ABI compatibility) -----------------------
@@ -164,10 +163,6 @@ namespace agentos
                             const std::string &method,
                             const std::string &description,
                             const std::string &input_schema);
-
-    // ADR-007: capability matching index  JOIN capabilities with agents,
-    // enabled agents only. This is the single source of truth for
-    // command -> agent_id resolution, used by Registry.
     std::vector<CapabilityRow> load_capabilities ();
 
     // -- HumanReview table ----------------------------------------------------
@@ -198,34 +193,30 @@ namespace agentos
     void touch_access_key (const std::string &id);
     std::vector<AccessKey> load_active_access_keys ();
 
+    // -- timer_tasks table (ADR-023) ------------------------------------------
+
+    void insert_timer_task (const TimerTask &t);       // INSERT OR IGNORE
+    void persist_timer_task (const TimerTask &t);      // INSERT OR REPLACE
+    void upsert_timer_task_next_fire (const std::string &id,
+                                      int64_t next_fire);
+    void disable_timer_task (const std::string &id);
+    bool timer_task_exists (const std::string &id);
+    std::vector<TimerTask> load_enabled_timer_tasks ();
+
   private:
     // -- Internal helpers -----------------------------------------------------
 
-    // Executes a multi-statement DDL string. Logs and returns false on error.
     [[nodiscard]] bool exec_ddl (const char *sql);
 
-    // Wraps a single write operation in BEGIN/COMMIT; rolls back on any
-    // sqlite3_step failure. The callable receives the prepared stmt.
-    // Usage: with_transaction([&]{ ... });
-    // Returns false and logs if the transaction fails; never throws.
     template <typename Fn> bool with_transaction (Fn &&fn);
 
-    // Prepares a statement and logs on failure.
-    // Returns nullptr on failure — callers must check before use.
     sqlite3_stmt *prepare (const char *sql);
 
-    // Binds an optional int64 — uses sqlite3_bind_null when empty.
     static void bind_optional_int64 (sqlite3_stmt *stmt, int col,
                                      const std::optional<int64_t> &val);
-
-    // Binds an optional int — uses sqlite3_bind_null when empty.
     static void bind_optional_int (sqlite3_stmt *stmt, int col,
                                    const std::optional<int> &val);
-
-    // Reads a nullable TEXT column — returns empty string if NULL.
     static std::string column_text_or_empty (sqlite3_stmt *stmt, int col);
-
-    // Reads a nullable INTEGER column — returns nullopt if NULL.
     static std::optional<int64_t> column_int64_opt (sqlite3_stmt *stmt,
                                                     int col);
     static std::optional<int> column_int_opt (sqlite3_stmt *stmt, int col);

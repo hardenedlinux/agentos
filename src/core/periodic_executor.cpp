@@ -51,37 +51,92 @@ PeriodicExecutor::PeriodicExecutor (Database           &db,
 
 void PeriodicExecutor::init ()
 {
+  // timer_tasks DDL lives in Database::open() — no DDL here.
+  load_enabled_tasks ();
+  seed_heartbeat_if_absent ();
+
+  spdlog::info ("[periodic_executor] initialised: heartbeat={}s",
+                (config_.gateway.heartbeat_interval_s > 0)
+                  ? config_.gateway.heartbeat_interval_s
+                  : 30);
+}
+
+// ---------------------------------------------------------------------------
+// load_enabled_tasks – restore from timer_tasks table via Database
+// ---------------------------------------------------------------------------
+
+void PeriodicExecutor::load_enabled_tasks ()
+{
   const int64_t now = now_s ();
 
-  // Load persisted tasks from DB.
-  // (timer_tasks table defined in ADR-023; load_timer_tasks not yet in DB.)
-  // TODO: db_.load_timer_tasks() when implemented.
+  for (auto &tt : db_.load_enabled_timer_tasks ())
+    {
+      // One-shot missed during downtime → mark disabled, skip.
+      if (tt.interval_s == 0 && tt.next_fire < now)
+        {
+          spdlog::info ("[periodic_executor] expired one-shot task {}, "
+                        "disabling", tt.id);
+          db_.disable_timer_task (tt.id);
+          continue;
+        }
 
-  // Seed built-in heartbeat task if not already in heap.
-  // interval from config (default 30s).
-  const int64_t hb_interval =
-    (config_.gateway.heartbeat_interval_s > 0)
-      ? config_.gateway.heartbeat_interval_s
-      : 30;
+      int64_t next_fire = tt.next_fire;
 
-  Task hb;
-  hb.id          = "heartbeat";
-  hb.next_fire   = now + hb_interval;
-  hb.interval_s  = hb_interval;
-  hb.target      = "gateway";
-  hb.payload_json = ""; // built at fire time
-  heap_.push (hb);
+      // Periodic missed → advance to now + interval, persist.
+      if (tt.interval_s > 0 && next_fire < now)
+        {
+          next_fire = now + tt.interval_s;
+          db_.upsert_timer_task_next_fire (tt.id, next_fire);
+        }
 
-  // Seed reaper task — calls dispatcher_.reap() every 5 seconds.
-  Task reaper;
-  reaper.id          = "reaper";
-  reaper.next_fire   = now + 5;
-  reaper.interval_s  = 5;
-  reaper.target      = "orchestrator";
-  reaper.payload_json = R"({"kind":"reaper"})";
-  heap_.push (reaper);
+      Task t;
+      t.id           = tt.id;
+      t.next_fire    = next_fire;
+      t.interval_s   = tt.interval_s;
+      t.target       = tt.target;
+      t.payload_json = tt.payload_json;
+      heap_.push (std::move (t));
+    }
+}
 
-  spdlog::info ("[periodic_executor] initialised: heartbeat={}s reaper=5s",
+// ---------------------------------------------------------------------------
+// seed_heartbeat_if_absent – ADR-023 seed_if_absent pattern
+// ---------------------------------------------------------------------------
+
+void PeriodicExecutor::seed_heartbeat_if_absent ()
+{
+  if (db_.timer_task_exists ("heartbeat"))
+    {
+      spdlog::info ("[periodic_executor] heartbeat task already seeded");
+      return;
+    }
+
+  const int64_t now = now_s ();
+  const int64_t hb_interval
+    = (config_.gateway.heartbeat_interval_s > 0)
+        ? config_.gateway.heartbeat_interval_s
+        : 30;
+
+  TimerTask hb;
+  hb.id           = "heartbeat";
+  hb.interval_s   = hb_interval;
+  hb.next_fire    = now + hb_interval;
+  hb.target       = TaskTarget::Gateway;
+  hb.payload_json = "";
+  hb.enabled      = true;
+  hb.created_at   = now;
+  db_.insert_timer_task (hb);
+
+  // Push into heap — load_enabled_tasks ran before this and didn't see it.
+  Task t;
+  t.id           = "heartbeat";
+  t.next_fire    = hb.next_fire;
+  t.interval_s   = hb.interval_s;
+  t.target       = TaskTarget::Gateway;
+  t.payload_json = "";
+  heap_.push (std::move (t));
+
+  spdlog::info ("[periodic_executor] seeded heartbeat task with interval {}s",
                 hb_interval);
 }
 
@@ -130,6 +185,8 @@ void PeriodicExecutor::loop ()
           if (t.interval_s > 0)
             {
               t.next_fire = now2 + t.interval_s;
+              // Persist the new next_fire (insert or update in DB).
+              persist_task (t);
               heap_.push (t);
             }
           else
@@ -172,7 +229,7 @@ void PeriodicExecutor::register_task (PeriodicControl::Task t)
   heap_.push (task);
 
   spdlog::info ("[periodic_executor] registered task {} interval={}s target={}",
-                task.id, task.interval_s, task.target);
+                task.id, task.interval_s, to_string (task.target));
 }
 
 // ---------------------------------------------------------------------------
@@ -201,48 +258,57 @@ void PeriodicExecutor::cancel_task (const std::string &id)
 }
 
 // ---------------------------------------------------------------------------
-// fire — dispatch task to target
+// fire — dispatch task to target (uses task.target enum)
 // ---------------------------------------------------------------------------
 
 void PeriodicExecutor::fire (const Task &t)
 {
-  spdlog::debug ("[periodic_executor] firing task {} target={}", t.id, t.target);
+  spdlog::debug ("[periodic_executor] firing task {} target={}",
+                 t.id, to_string (t.target));
 
-  if (t.target == "gateway")
+  switch (t.target)
     {
-      // Heartbeat: build payload at fire time.
-      const std::string payload =
-        (t.id == "heartbeat")
-          ? build_heartbeat_payload ()
-          : t.payload_json;
-      gateway_push_ (payload);
-    }
-  else if (t.target == "orchestrator")
-    {
-      if (t.id == "reaper")
-        {
-          // Special case: call dispatcher_.reap() directly.
-          dispatcher_.reap ();
-        }
-      else
-        {
-          OrchestratorEvent ev;
-          ev.kind         = OrchestratorEvent::Kind::TimerFired;
-          ev.payload_json = t.payload_json;
-          send_to_orchestrator_ (std::move (ev));
-        }
-    }
-  else if (t.target == "master")
-    {
-      MasterEvent ev;
-      ev.kind         = MasterEvent::Kind::ScheduledTask;
-      ev.payload_json = t.payload_json;
-      send_to_master_ (std::move (ev));
-    }
-  else
-    {
+    case TaskTarget::Gateway:
+      {
+        if (t.id == "heartbeat")
+          {
+            const std::string payload = build_heartbeat_payload ();
+            gateway_push_ (payload);
+          }
+        else
+          {
+            gateway_push_ (t.payload_json);
+          }
+        break;
+      }
+    case TaskTarget::Orchestrator:
+      {
+        if (t.id == "reaper")
+          {
+            // Special case: call dispatcher_.reap() directly.
+            dispatcher_.reap ();
+          }
+        else
+          {
+            OrchestratorEvent ev;
+            ev.kind         = OrchestratorEvent::Kind::TimerFired;
+            ev.payload_json = t.payload_json;
+            send_to_orchestrator_ (std::move (ev));
+          }
+        break;
+      }
+    case TaskTarget::Master:
+      {
+        MasterEvent ev;
+        ev.kind         = MasterEvent::Kind::ScheduledTask;
+        ev.payload_json = t.payload_json;
+        send_to_master_ (std::move (ev));
+        break;
+      }
+    default:
       spdlog::warn ("[periodic_executor] unknown target '{}' for task {}",
-                    t.target, t.id);
+                    static_cast<int>(t.target), t.id);
+      break;
     }
 }
 
@@ -276,19 +342,25 @@ std::string PeriodicExecutor::build_heartbeat_payload () const
 }
 
 // ---------------------------------------------------------------------------
-// Persistence helpers
+// Persistence helpers — delegate to Database (ADR-021)
 // ---------------------------------------------------------------------------
 
 void PeriodicExecutor::persist_task (const Task &t)
 {
-  // TODO: db_.upsert_timer_task() when timer_tasks table is implemented.
-  (void)t;
+  TimerTask tt;
+  tt.id           = t.id;
+  tt.interval_s   = t.interval_s;
+  tt.next_fire    = t.next_fire;
+  tt.target       = t.target;
+  tt.payload_json = t.payload_json;
+  tt.enabled      = true;
+  tt.created_at   = now_s ();
+  db_.persist_timer_task (tt);
 }
 
 void PeriodicExecutor::mark_disabled (const std::string &id)
 {
-  // TODO: db_.disable_timer_task(id) when timer_tasks table is implemented.
-  (void)id;
+  db_.disable_timer_task (id);
 }
 
 // ---------------------------------------------------------------------------

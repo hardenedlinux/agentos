@@ -21,6 +21,8 @@
 #include "agentos/types.h"
 
 #include <chrono>
+#include <cstddef>   // for size_t
+#include <cstdint>   // for int64_t
 #include <functional>
 #include <queue>
 #include <string>
@@ -51,6 +53,30 @@ public:
   // Called by Central before start() — loads tasks from DB, seeds heartbeat.
   void init ();
 
+  // ---------------------------------------------------------------------------
+  // Internal task type (exposed for unit testing)
+  // ---------------------------------------------------------------------------
+
+  struct Task
+  {
+    std::string id;
+    int64_t     next_fire  = 0; // Unix seconds
+    int64_t     interval_s = 0; // 0 = one-shot
+    TaskTarget  target;         // where to dispatch
+    std::string payload_json;
+
+    // Min-heap: smallest next_fire at top.
+    bool operator> (const Task &o) const { return next_fire > o.next_fire; }
+  };
+
+  // ------------------------------------------------------------------
+  // Test helpers (expose internals for unit testing)
+  // ------------------------------------------------------------------
+  void test_fire (const Task &t) { fire (t); }
+  void test_register_task (const PeriodicControl::Task &t) { register_task (t); }
+  void test_cancel_task (const std::string &id) { cancel_task (id); }
+  size_t heap_size () const { return heap_.size (); }
+
 private:
   // ---------------------------------------------------------------------------
   // Actor overrides
@@ -62,22 +88,6 @@ private:
 
   // Process a single control message (Register or Cancel).
   void on_message (PeriodicControl msg) override;
-
-  // ---------------------------------------------------------------------------
-  // Internal task type
-  // ---------------------------------------------------------------------------
-
-  struct Task
-  {
-    std::string id;
-    int64_t     next_fire  = 0; // Unix seconds
-    int64_t     interval_s = 0; // 0 = one-shot
-    std::string target;         // "gateway" | "orchestrator" | "master"
-    std::string payload_json;
-
-    // Min-heap: smallest next_fire at top.
-    bool operator> (const Task &o) const { return next_fire > o.next_fire; }
-  };
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -92,6 +102,10 @@ private:
 
   // Build the heartbeat payload at fire time (reads live DB stats).
   std::string build_heartbeat_payload () const;
+
+  // Seed the heartbeat task if absent, load timer_tasks into the heap.
+  void        seed_heartbeat_if_absent ();
+  void        load_enabled_tasks ();
 
   // ---------------------------------------------------------------------------
   // Members

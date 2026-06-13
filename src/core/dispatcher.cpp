@@ -82,10 +82,10 @@ namespace agentos
         std::lock_guard<std::mutex> lk (mutex_);
         auto it = in_flight_.find (static_cast<int> (pid));
         if (it == in_flight_.end ())
-        {
-          // Not our child (or already reaped) — ignore.
-          continue;
-        }
+          {
+            // Not our child (or already reaped) — ignore.
+            continue;
+          }
         entry = it->second;
         in_flight_.erase (it);
         cb = reap_cb_;
@@ -94,9 +94,18 @@ namespace agentos
       spdlog::info ("[dispatcher] reaped pid={} run_id={} exit_code={}", pid,
                     entry.run_id, exit_code);
 
+      if (exit_code != 0)
+        {
+          std::ifstream lf (log_file (entry.run_id));
+          std::ostringstream ss;
+          ss << lf.rdbuf ();
+          spdlog::warn ("[dispatcher] run_id={} output.log:\n{}", entry.run_id,
+                        ss.str ());
+        }
+
       if (cb)
         cb (
-          WorkerExited{entry.run_id, entry.step_id, exit_code, entry.job_dir});
+            WorkerExited{entry.run_id, entry.step_id, exit_code, entry.job_dir});
     }
   }
 
@@ -209,8 +218,12 @@ namespace agentos
 
       // execvp only returns on failure.
       // stderr is already redirected to log, so write there.
-      const char *msg = "[dispatcher:child] execvp failed\n";
-      write_full (STDERR_FILENO, msg, strlen (msg));
+      const int e = errno;
+      const std::string msg = "[dispatcher:child] execvp("
+                              + std::string (argv[0])
+                              + ") failed: errno=" + std::to_string (e) + " ("
+                              + strerror (e) + ")\n";
+      write_full (STDERR_FILENO, msg.data (), msg.size ());
       _exit (3);
     }
 
@@ -246,15 +259,14 @@ namespace agentos
   // collect
   // ---------------------------------------------------------------------------
 
-  CollectResult Dispatcher::collect (
-    const std::string &run_id, const std::string &job_dir, int exit_code)
+  CollectResult Dispatcher::collect (const std::string &run_id,
+                                     const std::string &job_dir, int exit_code)
   {
     const fs::path result_path = fs::path (job_dir) / "result.json";
 
     if (!fs::exists (result_path))
     {
-      const std::string err
-        = "result.json not found: " + result_path.string ();
+      const std::string err = "result.json not found: " + result_path.string ();
       spdlog::warn ("[dispatcher] run_id={} {}", run_id, err);
       return {false, exit_code, {}, err};
     }

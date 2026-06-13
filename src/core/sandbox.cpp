@@ -1,3 +1,19 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #include "agentos/sandbox.h"
 #include "agentos/database.h"
 #include "agentos/home_init.h"
@@ -14,6 +30,7 @@
 #include <string>
 #include <sys/capability.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
@@ -26,10 +43,10 @@ namespace agentos
   {
     std::ofstream procs (cgroup_path + "/cgroup.procs");
     if (!procs.is_open ())
-      {
-        spdlog::warn ("[sandbox] cannot open cgroup.procs at {}", cgroup_path);
-        return false;
-      }
+    {
+      spdlog::warn ("[sandbox] cannot open cgroup.procs at {}", cgroup_path);
+      return false;
+    }
     procs << getpid ();
     return true;
   }
@@ -64,142 +81,19 @@ namespace agentos
   static bool apply_seccomp ()
   {
     scmp_filter_ctx ctx = seccomp_init (SCMP_ACT_KILL);
-    if (!ctx)
-    {
-      spdlog::error ("[sandbox] seccomp_init failed");
-      return false;
-    }
 
-    // Allow basic syscalls needed for typical execution
-    int syscalls[] = {
-      SCMP_SYS (read),
-      SCMP_SYS (write),
-      SCMP_SYS (open),
-      SCMP_SYS (close),
-      SCMP_SYS (mmap),
-      SCMP_SYS (munmap),
-      SCMP_SYS (mprotect),
-      SCMP_SYS (brk),
-      SCMP_SYS (exit_group),
-      SCMP_SYS (exit),
-      SCMP_SYS (fstat),
-      SCMP_SYS (lseek),
-      SCMP_SYS (ioctl),
-      SCMP_SYS (writev),
-      SCMP_SYS (readv),
-      SCMP_SYS (clock_gettime),
-      SCMP_SYS (getrandom),
-      SCMP_SYS (getpid),
-      SCMP_SYS (gettid),
-      SCMP_SYS (futex),
-      SCMP_SYS (nanosleep),
-      SCMP_SYS (dup),
-      SCMP_SYS (dup2),
-      SCMP_SYS (pipe),
-      SCMP_SYS (pipe2),
-      SCMP_SYS (clone),
-      SCMP_SYS (fork),
-      SCMP_SYS (vfork),
-      SCMP_SYS (execve),
-      SCMP_SYS (execveat),
-      SCMP_SYS (access),
-      SCMP_SYS (faccessat),
-      SCMP_SYS (stat),
-      SCMP_SYS (lstat),
-      SCMP_SYS (readlink),
-      SCMP_SYS (readlinkat),
-      SCMP_SYS (uname),
-      SCMP_SYS (sched_yield),
-      SCMP_SYS (getcwd),
-      SCMP_SYS (chdir),
-      SCMP_SYS (fchdir),
-      SCMP_SYS (mkdir),
-      SCMP_SYS (mkdirat),
-      SCMP_SYS (rmdir),
-      SCMP_SYS (unlink),
-      SCMP_SYS (unlinkat),
-      SCMP_SYS (rename),
-      SCMP_SYS (renameat),
-      SCMP_SYS (link),
-      SCMP_SYS (symlink),
-      SCMP_SYS (getdents),
-      SCMP_SYS (getdents64),
-      SCMP_SYS (ftruncate),
-      SCMP_SYS (truncate),
-      SCMP_SYS (fcntl),
-      SCMP_SYS (flock),
-      SCMP_SYS (sendfile),
-      SCMP_SYS (copy_file_range),
-      SCMP_SYS (prctl),
-      SCMP_SYS (arch_prctl),
-      SCMP_SYS (set_tid_address),
-      SCMP_SYS (set_robust_list),
-      SCMP_SYS (rt_sigaction),
-      SCMP_SYS (rt_sigprocmask),
-      SCMP_SYS (rt_sigreturn),
-      SCMP_SYS (sigaltstack),
-      SCMP_SYS (madvise),
-      SCMP_SYS (mlock),
-      SCMP_SYS (munlock),
-      SCMP_SYS (mincore),
-      SCMP_SYS (getegid),
-      SCMP_SYS (geteuid),
-      SCMP_SYS (getgid),
-      SCMP_SYS (getuid),
-      SCMP_SYS (getresgid),
-      SCMP_SYS (getresuid),
-      SCMP_SYS (getgroups),
-      SCMP_SYS (setgroups),
-      SCMP_SYS (setgid),
-      SCMP_SYS (setuid),
-      SCMP_SYS (setresgid),
-      SCMP_SYS (setresuid),
-      SCMP_SYS (setpgid),
-      SCMP_SYS (getpgid),
-      SCMP_SYS (setsid),
-      SCMP_SYS (getsid),
-      SCMP_SYS (wait4),
-      SCMP_SYS (waitpid),
-      SCMP_SYS (kill),
-      SCMP_SYS (tkill),
-      SCMP_SYS (socket),
-      SCMP_SYS (connect),
-      SCMP_SYS (bind),
-      SCMP_SYS (listen),
-      SCMP_SYS (accept),
-      SCMP_SYS (accept4),
-      SCMP_SYS (setsockopt),
-      SCMP_SYS (getsockopt),
-      SCMP_SYS (sendto),
-      SCMP_SYS (recvfrom),
-      SCMP_SYS (sendmsg),
-      SCMP_SYS (recvmsg),
-      SCMP_SYS (shutdown),
-      SCMP_SYS (getpeername),
-      SCMP_SYS (getsockname),
-      SCMP_SYS (epoll_create),
-      SCMP_SYS (epoll_ctl),
-      SCMP_SYS (epoll_wait),
-      SCMP_SYS (eventfd),
-      SCMP_SYS (timerfd_create),
-      SCMP_SYS (timerfd_settime),
-      SCMP_SYS (signalfd),
-      SCMP_SYS (newfstatat),
-      SCMP_SYS (statx),
-      SCMP_SYS (getcpu),
-      SCMP_SYS (sched_getaffinity),
-      SCMP_SYS (sched_setaffinity),
-      SCMP_SYS (get_mempolicy),
-      SCMP_SYS (mbind),
-      SCMP_SYS (migrate_pages),
-      SCMP_SYS (landlock_create_ruleset),
-      SCMP_SYS (landlock_add_rule),
-      SCMP_SYS (landlock_restrict_self),
-    };
+    if (!ctx)
+      {
+        spdlog::error ("[sandbox] seccomp_init failed");
+        return false;
+      }
+
+    // Do not move this line.
+#include "agentos/syscall_whitelist.h"
 
     for (int syscall : syscalls)
-    {
-      if (seccomp_rule_add (ctx, SCMP_ACT_ALLOW, syscall, 0) != 0)
+      {
+        if (seccomp_rule_add (ctx, SCMP_ACT_ALLOW, syscall, 0) != 0)
       {
         spdlog::error ("[sandbox] seccomp_rule_add failed for syscall {}",
                        syscall);
@@ -429,8 +323,8 @@ namespace agentos
   // filesystem view (ADR-016, native overlayfs strategy only).
   struct OverlayPaths
   {
-    std::string lower0;             // host root, read-only
-    std::string lower1;             // worker base layer, read-only
+    std::string lower0; // host root, read-only
+    std::string lower1; // worker base layer, read-only
     std::filesystem::path upper;
     std::filesystem::path work;
     std::filesystem::path merged;
@@ -447,8 +341,8 @@ namespace agentos
     fs::path layers_dir = home / "layers" / "runs" / run_id;
 
     OverlayPaths p;
-    p.upper  = layers_dir / "upper";
-    p.work   = layers_dir / "work";
+    p.upper = layers_dir / "upper";
+    p.work = layers_dir / "work";
     p.merged = layers_dir / "merged";
 
     std::error_code ec;
@@ -511,8 +405,7 @@ namespace agentos
   {
     std::string options = "lowerdir=" + p.lower0 + ":" + p.lower1
                           + ",upperdir=" + p.upper.string ()
-                          + ",workdir=" + p.work.string ()
-                          + ",userxattr";
+                          + ",workdir=" + p.work.string () + ",userxattr";
 
     if (mount ("overlay", p.merged.c_str (), "overlay", MS_NODEV,
                options.c_str ())
@@ -665,10 +558,10 @@ namespace agentos
       return false;
 
     spdlog::info ("[sandbox] worker filesystem isolation applied for run {} "
-                  "(native overlayfs)", run_id);
+                  "(native overlayfs)",
+                  run_id);
     return true;
   }
-
 
   void gc_run_layers (Database &db)
   {
@@ -785,6 +678,23 @@ namespace agentos
       // empty tcp_connect_ports list, all TCP bind/connect is denied.
     }
 
+    // PR_SET_NO_NEW_PRIVS is required by landlock_restrict_self() and
+    // seccomp(SECCOMP_SET_MODE_FILTER) for any process that does not hold
+    // CAP_SYS_ADMIN (EPERM/EACCES otherwise) -- which is exactly the
+    // --unsafe case, since it runs in the host's normal user namespace
+    // with no special capabilities. Harmless in privileged mode: by this
+    // point the mount/pivot_root/CLONE_NEWNET setup above is already done,
+    // and no_new_privs only blocks gaining *new* privileges via exec of
+    // setuid/setgid/file-capability binaries -- it does not revoke
+    // capabilities already held (that happens explicitly via
+    // drop_capabilities() below).
+    if (prctl (PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+    {
+      spdlog::error ("[sandbox] prctl(PR_SET_NO_NEW_PRIVS) failed: {}",
+                     strerror (errno));
+      return false;
+    }
+
     // cgroup v2 (ADR-015 step 1). Failure here is non-fatal — resource
     // limits are best-effort; the syscall/Landlock layers are the hard
     // security boundary.
@@ -801,6 +711,23 @@ namespace agentos
     std::vector<std::string> write_paths = fs_write;
     write_paths.push_back (job_dir);
     read_paths.push_back ((agentos_home () / "skills").string ());
+
+    // Implicit grant: system binary/library paths. LANDLOCK_ACCESS_FS_READ_FILE
+    // is a handled access type (above), and the kernel must open()/mmap() the
+    // worker's own binary and its dynamic dependencies (ld.so, libc,
+    // python3/guile interpreters, etc.) as part of execve(). Without these,
+    // Landlock denies READ_FILE on the binary itself and execve fails with
+    // EACCES before the worker ever runs — the worker's environment is
+    // confined to job_dir/skills/fs_read/fs_write, but it must still be
+    // able
+    // to *load and execute* its own interpreter/binary.
+    for (const char *sys_path : {"/usr", "/bin", "/lib", "/lib64"})
+    {
+      if (fs::exists (sys_path))
+        read_paths.push_back (sys_path);
+    }
+    // Forge-generated (Tier-1) worker binaries live here.
+    read_paths.push_back ((agentos_home () / "workers").string ());
 
     if (!apply_landlock (read_paths, write_paths, tcp_connect_ports))
     {

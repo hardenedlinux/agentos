@@ -10,6 +10,14 @@
 #   ./scripts/test.sh --musl           # Fully static (requires musl-tools)
 #   ./scripts/test.sh --clean          # Clean build dir first
 #   ./scripts/test.sh --coverage       # Enable coverage report
+#   ./scripts/test.sh --privileged     # setcap cap_sys_admin+ep on sandbox
+#                                       # test binaries after build, so
+#                                       # apply_worker_sandbox exercises the
+#                                       # privileged (native overlayfs +
+#                                       # pivot_root) path instead of
+#                                       # --unsafe. Requires sudo. setcap is
+#                                       # file-bound, so this must run after
+#                                       # every rebuild.
 #   ./scripts/test.sh --filter <expr>  # Run only matching tests (gtest filter)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -21,6 +29,7 @@ BUILD_TYPE="Release"
 USE_MUSL=OFF
 CLEAN=false
 USE_ASAN=false
+USE_PRIVILEGED=false
 AGENTOS_COVERAGE=OFF
 GTEST_FILTER=""
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -32,6 +41,7 @@ while [ $# -gt 0 ]; do
     --musl)     USE_MUSL=ON ;;
     --clean)    CLEAN=true ;;
     --coverage) AGENTOS_COVERAGE=ON ;;
+    --privileged) USE_PRIVILEGED=true ;;
     --filter)   shift; GTEST_FILTER="$1" ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -89,6 +99,30 @@ echo "→ Building all ($JOBS jobs)"
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Privileged mode: grant CAP_SYS_ADMIN to the sandbox test binaries so
+# apply_worker_sandbox's has_cap_sys_admin() check exercises the privileged
+# (native overlayfs + pivot_root) path instead of --unsafe (ADR-016).
+# setcap is bound to the file's inode and is lost on every relink, so this
+# must run after every build — hence it lives here, not in CMake.
+# ─────────────────────────────────────────────────────────────────────────────
+if $USE_PRIVILEGED; then
+  echo ""
+  echo "→ Granting CAP_SYS_ADMIN to sandbox test binaries (sudo required)"
+  PRIVILEGED_BINS=(
+    "$BUILD_DIR/tests/test_orchestrator"
+    "$BUILD_DIR/tests/test_dispatcher"
+    "$BUILD_DIR/tests/test_worker_run"
+  )
+  for bin in "${PRIVILEGED_BINS[@]}"; do
+    if [ -f "$bin" ]; then
+      sudo setcap cap_sys_admin+ep "$bin"
+    else
+      echo "  ! skipping $bin (not found)"
+    fi
+  done
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run tests
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -130,6 +164,8 @@ fi
 echo ""
 if $USE_ASAN; then
     echo "✓ ASAN tests complete."
+elif $USE_PRIVILEGED; then
+    echo "✓ Privileged tests complete (native overlayfs + pivot_root path)."
 else
     echo "✓ Tests complete."
 fi

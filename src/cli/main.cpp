@@ -3,14 +3,17 @@
  *
  * AgentOS — entry point.
  *
- * `agentos run` constructs Central (ADR-024) and blocks until
- * SIGTERM/SIGINT. Other CLI subcommands (ADR-026) are not yet
- * implemented.
+ * `agentos run` constructs Central and blocks until SIGTERM/SIGINT.
+ * All other subcommands are implemented via the CLI11 framework and
+ * registered by their respective register_* functions.
  */
 
+#include <CLI/CLI.hpp>
+#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -18,78 +21,115 @@
 #include "agentos/central.h"
 #include "agentos/config.h"
 #include "agentos/home_init.h"
-#include "agentos/version.h"
+
+#include "agentos/adviser_params.h"
+#include "agentos/cli_color.h"
+#include "agentos/cli_completion.h"
+#include "agentos/forge_params.h"
+#include "agentos/job_params.h"
+#include "agentos/review_params.h"
+#include "agentos/worker_params.h"
+
+// Forward declarations of subcommand registration functions.
+void register_key_commands (CLI::App &app);
+void register_job_commands (CLI::App &app);
+void register_worker_commands (CLI::App &app);
+void register_adviser_commands (CLI::App &app);
+void register_review_commands (CLI::App &app);
+void register_forge_commands (CLI::App &app);
 
 namespace
 {
-  agentos::Central *g_central = nullptr;
-
-  void signal_handler (int)
-  {
-    if (g_central)
-      g_central->stop ();
-  }
 
   void print_banner ()
   {
-    std::cout
-      << R"(
+    std::cout << R"(
     ___                    __  ____  _____
    /   | ____ ____  ____  / /_/ __ \/ ___/
   / /| |/ __ `/ _ \/ __ \/ __/ / / /\__ \
  / ___ / /_/ /  __/ / / / /_/ /_/ /___/ /
 /_/  |_\__, /\___/_/ /_/\__/\____//____/
        /____/   v)"
-      << AGENTOS_VERSION << R"(
-
-  Core:    Single-binary Agent Runtime  |  C++)"
-      << __cplusplus << "\n";
+              << "0.1.0" << "\n"
+              << "  Core:    Single-binary Agent Runtime  |  C++23\n";
   }
 
-  int run_daemon ()
-  {
-    std::string error;
-    auto config = agentos::load_config (
-      (agentos::agentos_home () / "config.toml").string (), error);
-    if (!config)
-      {
-        spdlog::critical ("failed to load config: {}", error);
-        return 1;
-      }
-    agentos::read_env_api_key (*config);
+} // anonymous namespace
 
-    agentos::Central central (*config);
-    g_central = &central;
-    std::signal (SIGINT, signal_handler);
-    std::signal (SIGTERM, signal_handler);
+// plain function for signal(2)
+static agentos::Central *g_central = nullptr;
 
-    central.run ();
-    return 0;
-  }
-} // namespace
+static void signal_handler (int)
+{
+  if (g_central)
+    g_central->stop ();
+}
 
-int main (int argc, char *argv[])
+int main (int argc, char **argv)
 {
   auto logger = spdlog::stdout_color_mt ("agentos");
   logger->set_pattern ("[%H:%M:%S] [%^%l%$] %v");
   spdlog::set_default_logger (logger);
 
   print_banner ();
-  spdlog::info ("AgentOS {} starting", AGENTOS_VERSION);
+  spdlog::info ("AgentOS {} starting", "0.1.0");
 
-  if (argc < 2)
+  CLI::App app{"AgentOS — AI agent orchestration daemon"};
+  app.require_subcommand (1);
+
+  bool no_color_flag = false;
+  app.add_option ("--timeout", "Socket timeout in milliseconds")
+    ->default_val (5000);
+  app.add_option ("--socket", "Path to daemon socket");
+  app.add_flag ("--json", "JSON output mode");
+  app.add_flag ("--no-color", no_color_flag, "Disable terminal color");
+
+  // ---------- daemon mode ----------
+  auto *run = app.add_subcommand ("run", "Start the AgentOS daemon");
+  run->callback (
+    [&]
     {
-      spdlog::info ("Usage: agentos run");
-      spdlog::info ("(other CLI subcommands per ADR-026 not yet implemented)");
-      return 0;
-    }
+      std::string error;
+      auto config = agentos::load_config (
+        (agentos::agentos_home () / "config.toml").string (), error);
+      if (!config)
+      {
+        agentos::cli::die (2, std::string ("config: ") + error);
+      }
+      agentos::read_env_api_key (*config);
 
-  const std::string cmd = argv[1];
+      agentos::Central central (*config);
+      g_central = &central;
+      std::signal (SIGINT, signal_handler);
+      std::signal (SIGTERM, signal_handler);
 
-  if (cmd == "run")
-    return run_daemon ();
+      spdlog::info ("daemon starting");
+      central.run ();
+    });
 
-  spdlog::info ("Usage: agentos run");
-  spdlog::info ("(other CLI subcommands per ADR-026 not yet implemented)");
-  return 1;
+  // ---------- register all subcommand groups ----------
+  register_key_commands (app);
+  register_job_commands (app);
+  register_worker_commands (app);
+  register_adviser_commands (app);
+  register_review_commands (app);
+  register_forge_commands (app);
+
+  agentos::cli::add_completion (&app);
+
+  try
+  {
+    app.parse (argc, argv);
+  }
+  catch (const CLI::ParseError &e)
+  {
+    return app.exit (e);
+  }
+
+  if (no_color_flag)
+  {
+    agentos::cli::set_color_enabled (false);
+  }
+
+  return 0;
 }

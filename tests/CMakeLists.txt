@@ -21,10 +21,12 @@
 # are registered with CTest and reported together by `ctest`.
 find_package(Threads REQUIRED)
 include(GoogleTest)
+
 # Project headers — warnings here are ours to fix, so NOT marked SYSTEM.
 set(AGENTOS_TEST_INCLUDES
   ${CMAKE_SOURCE_DIR}/src/include
 )
+
 # Third-party headers — marked SYSTEM so their warnings (e.g. spdlog's
 # bundled fmt) are suppressed.
 set(AGENTOS_TEST_SYSTEM_INCLUDES
@@ -33,7 +35,11 @@ set(AGENTOS_TEST_SYSTEM_INCLUDES
   ${CPPZMQ_INC}
   ${TOMLPLUSPLUS_INC}
   ${GTEST_INC}
+  ${CLI11_INC}
+  ${ZMQ_INC}
+  ${OPENSSL_STATIC_INC}
 )
+
 set(AGENTOS_TEST_LIBS
   agentos_core
   agentos_forge
@@ -41,8 +47,19 @@ set(AGENTOS_TEST_LIBS
   ${GTEST_MAIN_LIB}
   ${GMOCK_LIB}
   ${ZMQ_LIB}
+  ${OPENSSL_STATIC_SSL}
+  ${OPENSSL_STATIC_CRYPTO}
   Threads::Threads
 )
+
+# CLI layer sources needed by specific tests.
+set(CLI_CLIENT_SOURCES
+  ${CMAKE_SOURCE_DIR}/src/cli/cli_client.cpp
+)
+set(CLI_PARAMS_SOURCES
+  ${CMAKE_SOURCE_DIR}/src/cli/cli_params.cpp
+)
+
 # One executable per test source file.
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
 
@@ -54,7 +71,16 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/my_test\\.cpp$")
 
 foreach(test_src ${TEST_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
-  add_executable(${test_name} ${test_src})
+
+  # Tests that use CLI layer sources need them compiled in.
+  set(extra_sources "")
+  if(test_name STREQUAL "test_cli_client")
+    set(extra_sources ${CLI_CLIENT_SOURCES})
+  elseif(test_name STREQUAL "test_cli_params")
+    set(extra_sources ${CLI_PARAMS_SOURCES})
+  endif()
+
+  add_executable(${test_name} ${test_src} ${extra_sources})
   target_compile_features(${test_name} PRIVATE cxx_std_23)
   target_link_libraries(${test_name} PRIVATE ${AGENTOS_TEST_LIBS})
   target_include_directories(${test_name} PRIVATE ${AGENTOS_TEST_INCLUDES})

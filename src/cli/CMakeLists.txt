@@ -1,6 +1,24 @@
-add_executable(agentos main.cpp)
+target_include_directories(agentos PRIVATE
+  ${CLI11_INC}
+  ${CPPZMQ_INC}
+  ${ZMQ_INC}
+  ${RAPIDJSON_INC}
+  ${OPENSSL_STATIC_INC}
+)
 
-target_link_libraries(agentos PRIVATE agentos_core)
+target_link_libraries(agentos PRIVATE
+  agentos_core
+  ${ZMQ_LIB}
+  ${OPENSSL_STATIC_SSL}
+  ${OPENSSL_STATIC_CRYPTO}
+)
+
+add_dependencies(agentos
+  cli11_ext
+  cppzmq_ext
+  libzmq_ext
+  openssl_ext
+)
 
 if(AGENTOS_COVERAGE)
   target_compile_options(agentos PRIVATE --coverage -fprofile-arcs -ftest-coverage)

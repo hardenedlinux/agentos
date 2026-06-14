@@ -162,19 +162,10 @@ fi
 #   (a) deps are not yet built, OR
 #   (b) build/ was deleted (CMakeCache.txt is absent)
 # ─────────────────────────────────────────────────────────────────────────────
-needs_configure=false
-if ! $deps_built; then
-  needs_configure=true
-elif [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-  needs_configure=true
-fi
-
-# ASAN mode always needs its own configure (different build dir + flags)
-if $USE_ASAN && [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-  needs_configure=true
-fi
-
-if $needs_configure; then
+# Always run cmake configure — it is a fast no-op when nothing has changed,
+# and it is the only way to pick up edits to any CMakeLists.txt (e.g. new
+# source files added to src/cli/ via GLOB CONFIGURE_DEPENDS).
+if true; then
   if $USE_ASAN; then
     echo "→ Configuring ASAN build (Debug, tests=$BUILD_TESTS)"
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja \
@@ -197,8 +188,6 @@ if $needs_configure; then
       -DAGENTOS_STRIP=ON                          \
       -DAGENTOS_COVERAGE="$AGENTOS_COVERAGE"
   fi
-else
-  echo "→ Dependencies already built and build tree intact, skipping configure"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

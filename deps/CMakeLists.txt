@@ -17,8 +17,8 @@
 #
 # Deps that require compilation use -DCMAKE_CXX_STANDARD=17 explicitly so
 # they are never affected by the parent project's C++23 setting.
-# Header-only deps (rapidjson, cppzmq, httplib, tomlplusplus) have no build
-# step and are not affected by the standard either way.
+# Header-only deps (rapidjson, cppzmq, httplib, tomlplusplus, CLI11) have no
+# build step and are not affected by the standard either way.
 # libseccomp and libcap use autoconf/make and are C-only; no CXX standard needed.
 #
 # Design:
@@ -157,6 +157,49 @@ ExternalProject_Add(cppzmq_ext
 )
 set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src"
   CACHE INTERNAL "cppzmq include path")
+
+# ---------------------------------------------------------------------------
+# CLI11 (header-only, extracted at configure time so CLI11_INC is available
+# immediately — same pattern as SQLite3 amalgamation)
+# ---------------------------------------------------------------------------
+set(CLI11_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/cli11-src"
+  CACHE INTERNAL "CLI11 source directory")
+set(CLI11_DOWNLOAD_PATH
+  "${CMAKE_SOURCE_DIR}/deps-src/downloads/cli11-v2.4.2.tar.gz")
+
+if(NOT EXISTS "${CLI11_SRC_DIR}/include/CLI/CLI.hpp")
+  if(NOT EXISTS "${CLI11_DOWNLOAD_PATH}")
+    file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/deps-src/downloads")
+    message(STATUS "Downloading CLI11...")
+    file(DOWNLOAD
+      https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.4.2.tar.gz
+      "${CLI11_DOWNLOAD_PATH}"
+      EXPECTED_HASH SHA256=f2d893a65c3b1324c50d4e682c0cdc021dd0477ae2c048544f39eed6654b699a
+      STATUS download_status
+      LOG    download_log
+    )
+    list(GET download_status 0 download_code)
+    if(NOT download_code EQUAL 0)
+      message(FATAL_ERROR "Failed to download CLI11: ${download_log}")
+    endif()
+  endif()
+  # Remove any leftover extracted dir from previous runs before extracting.
+  set(_cli11_extracted "${CMAKE_SOURCE_DIR}/deps-src/CLI11-2.4.2")
+  if(EXISTS "${_cli11_extracted}")
+    file(REMOVE_RECURSE "${_cli11_extracted}")
+  endif()
+  message(STATUS "Extracting CLI11...")
+  file(ARCHIVE_EXTRACT
+    INPUT       "${CLI11_DOWNLOAD_PATH}"
+    DESTINATION "${CMAKE_SOURCE_DIR}/deps-src"
+  )
+  file(RENAME
+    "${_cli11_extracted}"
+    "${CLI11_SRC_DIR}"
+  )
+endif()
+
+set(CLI11_INC "${CLI11_SRC_DIR}/include" CACHE INTERNAL "CLI11 include path")
 
 # ---------------------------------------------------------------------------
 # toml++ (header-only, single file download)

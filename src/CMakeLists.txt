@@ -4,7 +4,9 @@
 add_subdirectory(core)
 add_subdirectory(core/forge)
 
-add_executable(agentos cli/main.cpp)
+file(GLOB CLI_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/*.cpp)
+add_executable(agentos ${CLI_SOURCES})
+
 target_link_libraries(agentos PRIVATE agentos_core agentos_forge ${SECCOMP_LIB} ${CAP_LIB})
 
 target_include_directories(agentos PRIVATE
@@ -17,6 +19,7 @@ target_include_directories(agentos SYSTEM PRIVATE
   ${HTTPLIB_INC}
   ${CPPZMQ_INC}
   ${TOMLPLUSPLUS_INC}
+  ${CLI11_INC}
 )
 
 add_dependencies(agentos httplib_ext rapidjson_ext spdlog_ext cppzmq_ext)

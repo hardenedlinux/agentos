@@ -67,12 +67,25 @@ static void signal_handler (int)
 
 int main (int argc, char **argv)
 {
+  // Detect --complete early: completion mode must be fully silent.
+  bool completing = false;
+  for (int i = 1; i < argc; ++i)
+    {
+      if (std::string_view (argv[i]) == "--complete")
+        {
+          completing = true;
+          break;
+        }
+    }
+
+  // Logger exists for the whole process but stays silent outside `run`.
   auto logger = spdlog::stdout_color_mt ("agentos");
   logger->set_pattern ("[%H:%M:%S] [%^%l%$] %v");
   spdlog::set_default_logger (logger);
+  spdlog::set_level (spdlog::level::off);
 
-  print_banner ();
-  spdlog::info ("AgentOS {} starting", "0.1.0");
+  if (!completing)
+    print_banner ();
 
   CLI::App app{"AgentOS — AI agent orchestration daemon"};
   app.require_subcommand (1);
@@ -89,6 +102,10 @@ int main (int argc, char **argv)
   run->callback (
     [&]
     {
+      print_banner ();
+      spdlog::set_level (spdlog::level::info);
+      spdlog::info ("AgentOS {} starting", "0.1.0");
+
       std::string error;
       auto config = agentos::load_config (
         (agentos::agentos_home () / "config.toml").string (), error);

@@ -1,13 +1,16 @@
 #include "agentos/cli_client.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
+#include "agentos/cli_format.h"
 #include "agentos/review_params.h"
 #include <CLI/CLI.hpp>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <algorithm>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 void print_json(const rapidjson::Document& doc) {
@@ -44,21 +47,54 @@ void register_review_commands(CLI::App& app) {
                 if (json_flag) {
                     print_json(result);
                 } else {
-                    if (result.HasMember("reviews") && result["reviews"].IsArray()) {
-                        for (const auto& rev : result["reviews"].GetArray()) {
-                            std::string reason;
-                            if (rev.HasMember("reason") && rev["reason"].IsString()) {
-                                reason = rev["reason"].GetString();
-                                if (reason.size() > 60) reason = reason.substr(0, 60) + "...";
-                            }
-                            std::cout
-                                << (rev.HasMember("id")     ? rev["id"].GetString()     : "")
-                                << "  "
-                                << (rev.HasMember("type")   ? rev["type"].GetString()   : "")
-                                << "  "
-                                << (rev.HasMember("status") ? rev["status"].GetString() : "")
-                                << "  " << reason << "\n";
-                        }
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("reviews") || !result["reviews"].IsArray()) {
+                        std::cout << "No reviews.\n";
+                        return;
+                    }
+                    const auto& reviews = result["reviews"];
+                    struct Row { std::string id, type, status, created, reason; };
+                    std::vector<Row> rows;
+                    for (const auto& rev : reviews.GetArray()) {
+                        std::string id      = f::str(rev, "id");
+                        std::string type    = f::str(rev, "type");
+                        std::string status  = f::str(rev, "status");
+                        std::string reason  = f::str(rev, "reason");
+                        if (reason.size() > 50) reason = reason.substr(0, 50) + "...";
+                        std::string created = f::ts(rev, "created_at");
+                        rows.push_back({id, type, status, created, reason});
+                    }
+
+                    size_t w_id = 2, w_type = 4, w_status = 8, w_created = 7, w_reason = 6;
+                    for (const auto& r : rows) {
+                        w_id      = std::max(w_id,      r.id.size());
+                        w_type    = std::max(w_type,    r.type.size());
+                        w_status  = std::max(w_status,  r.status.size());
+                        w_created = std::max(w_created, r.created.size());
+                        w_reason  = std::max(w_reason,  r.reason.size());
+                    }
+
+                    size_t total_w = w_id + w_type + w_status + w_created + w_reason + 8;
+
+                    std::cout << bold(f::col("ID",      w_id))
+                              << bold(f::col("TYPE",    w_type))
+                              << bold(f::col("STATUS",  w_status))
+                              << bold(f::col("CREATED", w_created))
+                              << bold(f::col("REASON",  w_reason)) << "\n";
+                    std::cout << f::separator(total_w) << "\n";
+
+                    for (const auto& r : rows) {
+                        std::string statusColored;
+                        if      (r.status == "pending")  statusColored = yellow(r.status);
+                        else if (r.status == "approved") statusColored = green(r.status);
+                        else if (r.status == "rejected") statusColored = red(r.status);
+                        else                             statusColored = r.status;
+                        std::cout << f::col(r.id,      w_id)
+                                  << f::col(r.type,    w_type)
+                                  << f::col_colored(statusColored, r.status, w_status)
+                                  << f::col(r.created, w_created)
+                                  << r.reason << "\n";
                     }
                 }
             } catch (const agentos::cli::CliError& e) {

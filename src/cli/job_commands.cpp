@@ -1,14 +1,17 @@
 #include "agentos/cli_client.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
+#include "agentos/cli_format.h"
 #include "agentos/job_params.h"
 #include <CLI/CLI.hpp>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <string>
-#include <cstdint>
+#include <vector>
 
 namespace {
 
@@ -83,7 +86,68 @@ void register_job_commands(CLI::App& app) {
                 if (!socket_path.empty()) client.set_socket_path(socket_path);
                 auto params = agentos::cli::build_job_status_params(job_id);
                 auto result = client.send("job.status", std::move(params));
-                print_json(result);
+                if (json_flag) {
+                    print_json(result);
+                } else {
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("job") || !result["job"].IsObject()) {
+                        std::cerr << "invalid response\n";
+                        return;
+                    }
+                    const auto& job = result["job"];
+
+                    std::string id    = f::str(job, "id");
+                    std::string type  = f::str(job, "type");
+                    std::string goal  = f::str(job, "goal");
+                    std::string phase = f::str(job, "phase");
+
+                    std::string phaseColored;
+                    if (phase == "executing" || phase == "repairing") phaseColored = yellow(phase);
+                    else if (phase == "done")                         phaseColored = green(phase);
+                    else if (phase == "failed" || phase == "human_review") phaseColored = red(phase);
+                    else if (phase == "planning")                     phaseColored = cyan(phase);
+                    else                                              phaseColored = phase;
+
+                    std::cout << "Job " << id << "  [" << phaseColored << "]  " << type << "\n";
+                    std::cout << "Goal: " << goal << "\n";
+                    std::cout << "Created: " << f::ts(job, "created_at")
+                              << "   Updated: " << f::ts(job, "updated_at") << "\n";
+
+                    if (result.HasMember("steps") && result["steps"].IsArray()) {
+                        std::cout << "\nSteps:\n";
+                        for (const auto& step : result["steps"].GetArray()) {
+                            int order = step.HasMember("step_order") ? step["step_order"].GetInt() : -1;
+                            std::string desc       = f::str(step, "description");
+                            std::string stepStatus = f::str(step, "status");
+                            std::string started    = (step.HasMember("started_at")   && step["started_at"].IsInt64())
+                                                       ? f::time_ago(step["started_at"].GetInt64())   : "-";
+                            std::string completed  = (step.HasMember("completed_at") && step["completed_at"].IsInt64())
+                                                       ? f::time_ago(step["completed_at"].GetInt64()) : "-";
+                            std::string colStatus;
+                            if      (stepStatus == "done")    colStatus = green(stepStatus);
+                            else if (stepStatus == "running") colStatus = yellow(stepStatus);
+                            else if (stepStatus == "failed")  colStatus = red(stepStatus);
+                            else                              colStatus = grey(stepStatus);
+
+                            std::cout << "  " << order << "  " << colStatus
+                                      << "      " << desc
+                                      << "          " << started << " \xe2\x86\x92 " << completed << "\n";
+                        }
+                    }
+
+                    if (job.HasMember("loop") && job["loop"].IsObject()) {
+                        const auto& loop = job["loop"];
+                        int curIter = loop.HasMember("current_iteration") ? loop["current_iteration"].GetInt() : 0;
+                        int maxIter = loop.HasMember("max_iterations")    ? loop["max_iterations"].GetInt()    : 0;
+                        int repairs = loop.HasMember("current_repairs")   ? loop["current_repairs"].GetInt()   : 0;
+                        std::cout << "Iteration: " << curIter << "/" << maxIter
+                                  << "   Repairs: " << repairs << "\n";
+                        if (loop.HasMember("last_feedback") && loop["last_feedback"].IsString()) {
+                            std::cout << "Last feedback: " << loop["last_feedback"].GetString() << "\n";
+                        }
+                    }
+                }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
             }
@@ -110,19 +174,63 @@ void register_job_commands(CLI::App& app) {
                 if (json_flag) {
                     print_json(result);
                 } else {
-                    if (result.HasMember("jobs") && result["jobs"].IsArray()) {
-                        for (const auto& j : result["jobs"].GetArray()) {
-                            std::cout
-                                << (j.HasMember("id")         ? j["id"].GetString() : "")
-                                << "  "
-                                << (j.HasMember("type")       ? j["type"].GetString() : "")
-                                << "  "
-                                << (j.HasMember("phase")      ? j["phase"].GetString() : "")
-                                << "  "
-                                << (j.HasMember("created_at") ? std::to_string(j["created_at"].GetInt64()) : "")
-                                << "\n";
-                        }
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("jobs") || !result["jobs"].IsArray()) {
+                        std::cout << "No jobs.\n";
+                        return;
                     }
+                    const auto& jobs = result["jobs"];
+                    struct Row { std::string id, type, phase, goal, created; };
+                    std::vector<Row> rows;
+                    for (const auto& j : jobs.GetArray()) {
+                        std::string id      = f::str(j, "id");
+                        std::string type    = f::str(j, "type");
+                        std::string phase   = f::str(j, "phase");
+                        std::string goal    = f::str(j, "goal");
+                        if (goal.size() > 40) goal = goal.substr(0, 40) + "...";
+                        std::string created = f::ts(j, "created_at");
+                        rows.push_back({id, type, phase, goal, created});
+                    }
+
+                    size_t w_id = 2, w_type = 4, w_phase = 5, w_goal = 5, w_created = 7;
+                    for (const auto& r : rows) {
+                        w_id      = std::max(w_id,      r.id.size());
+                        w_type    = std::max(w_type,    r.type.size());
+                        w_phase   = std::max(w_phase,   r.phase.size());
+                        w_goal    = std::max(w_goal,    r.goal.size());
+                        w_created = std::max(w_created, r.created.size());
+                    }
+
+                    size_t total_w = w_id + w_type + w_phase + w_goal + w_created + 8;
+
+                    auto phase_color = [&](const std::string& p) -> std::string {
+                        if (p == "executing" || p == "repairing") return yellow(p);
+                        if (p == "done")                          return green(p);
+                        if (p == "failed" || p == "human_review") return red(p);
+                        if (p == "planning")                      return cyan(p);
+                        return p;
+                    };
+
+                    std::cout << bold(f::col("ID",    w_id))
+                              << bold(f::col("TYPE",  w_type))
+                              << bold(f::col("PHASE", w_phase))
+                              << bold(f::col("GOAL",  w_goal))
+                              << bold("CREATED") << "\n";
+                    std::cout << f::separator(total_w) << "\n";
+
+                    for (const auto& r : rows) {
+                        std::cout << f::col(r.id,   w_id)
+                                  << f::col(r.type, w_type)
+                                  << f::col_colored(phase_color(r.phase), r.phase, w_phase)
+                                  << f::col(r.goal, w_goal)
+                                  << r.created << "\n";
+                    }
+
+                    int total = (result.HasMember("total") && result["total"].IsInt())
+                                    ? result["total"].GetInt()
+                                    : static_cast<int>(rows.size());
+                    std::cout << "\ntotal: " << total << " jobs\n";
                 }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());

@@ -1,13 +1,16 @@
 #include "agentos/cli_client.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
+#include "agentos/cli_format.h"
 #include "agentos/adviser_params.h"
 #include <CLI/CLI.hpp>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <algorithm>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 void print_json(const rapidjson::Document& doc) {
@@ -61,19 +64,47 @@ void register_adviser_commands(CLI::App& app) {
                 if (json_flag) {
                     print_json(result);
                 } else {
-                    if (result.HasMember("advisers") && result["advisers"].IsArray()) {
-                        for (const auto& adv : result["advisers"].GetArray()) {
-                            std::cout
-                                << (adv.HasMember("id")          ? adv["id"].GetString()          : "")
-                                << "  "
-                                << (adv.HasMember("description") ? adv["description"].GetString() : "")
-                                << "  "
-                                << (adv.HasMember("model")       ? adv["model"].GetString()       : "")
-                                << "  active="
-                                << (adv.HasMember("active") && adv["active"].IsBool()
-                                        ? (adv["active"].GetBool() ? "true" : "false") : "")
-                                << "\n";
-                        }
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("advisers") || !result["advisers"].IsArray()) {
+                        std::cout << "No advisers.\n";
+                        return;
+                    }
+                    const auto& advisers = result["advisers"];
+                    struct Row { std::string id, model, active, desc; };
+                    std::vector<Row> rows;
+                    for (const auto& adv : advisers.GetArray()) {
+                        std::string id    = f::str(adv, "id");
+                        std::string model = f::str(adv, "model");
+                        bool act = (adv.HasMember("active") && adv["active"].IsBool())
+                                       ? adv["active"].GetBool() : false;
+                        std::string active = act ? "true" : "false";
+                        std::string desc   = f::str(adv, "description");
+                        rows.push_back({id, model, active, desc});
+                    }
+
+                    size_t w_id = 2, w_model = 5, w_active = 6, w_desc = 11;
+                    for (const auto& r : rows) {
+                        w_id     = std::max(w_id,     r.id.size());
+                        w_model  = std::max(w_model,  r.model.size());
+                        w_active = std::max(w_active, r.active.size());
+                        w_desc   = std::max(w_desc,   r.desc.size());
+                    }
+
+                    size_t total_w = w_id + w_model + w_active + w_desc + 6;
+
+                    std::cout << bold(f::col("ID",          w_id))
+                              << bold(f::col("MODEL",       w_model))
+                              << bold(f::col("ACTIVE",      w_active))
+                              << bold(f::col("DESCRIPTION", w_desc)) << "\n";
+                    std::cout << f::separator(total_w) << "\n";
+
+                    for (const auto& r : rows) {
+                        std::string actColored = (r.active == "true") ? green("true") : grey("false");
+                        std::cout << f::col(r.id,    w_id)
+                                  << f::col(r.model, w_model)
+                                  << f::col_colored(actColored, r.active, w_active)
+                                  << r.desc << "\n";
                     }
                 }
             } catch (const agentos::cli::CliError& e) {

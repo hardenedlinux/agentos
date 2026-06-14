@@ -1,13 +1,16 @@
 #include "agentos/cli_client.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
+#include "agentos/cli_format.h"
 #include "agentos/worker_params.h"
 #include <CLI/CLI.hpp>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <algorithm>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 void print_json(const rapidjson::Document& doc) {
@@ -63,23 +66,61 @@ void register_worker_commands(CLI::App& app) {
                 if (json_flag) {
                     print_json(result);
                 } else {
-                    if (result.HasMember("workers") && result["workers"].IsArray()) {
-                        for (const auto& w : result["workers"].GetArray()) {
-                            std::string caps;
-                            if (w.HasMember("capabilities") && w["capabilities"].IsArray()) {
-                                for (const auto& c : w["capabilities"].GetArray()) {
-                                    if (!caps.empty()) caps += ",";
-                                    caps += c.GetString();
-                                }
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("workers") || !result["workers"].IsArray()) {
+                        std::cout << "No workers.\n";
+                        return;
+                    }
+                    const auto& workers = result["workers"];
+                    struct Row { std::string id, tier, prov, enabled, caps, registered; };
+                    std::vector<Row> rows;
+                    for (const auto& w : workers.GetArray()) {
+                        std::string id   = f::str(w, "id");
+                        std::string tier = f::str(w, "tier");
+                        std::string prov = f::str(w, "provenance");
+                        bool en = (w.HasMember("enabled") && w["enabled"].IsBool())
+                                      ? w["enabled"].GetBool() : false;
+                        std::string enabled = en ? "true" : "false";
+                        std::string caps;
+                        if (w.HasMember("capabilities") && w["capabilities"].IsArray()) {
+                            for (const auto& c : w["capabilities"].GetArray()) {
+                                if (!caps.empty()) caps += ",";
+                                caps += c.GetString();
                             }
-                            std::cout
-                                << (w.HasMember("id")      ? w["id"].GetString() : "")
-                                << "  "
-                                << (w.HasMember("tier")    ? w["tier"].GetString() : "")
-                                << "  "
-                                << (w.HasMember("enabled") ? (w["enabled"].GetBool() ? "true" : "false") : "")
-                                << "  " << caps << "\n";
                         }
+                        std::string registered = f::ts(w, "registered_at");
+                        rows.push_back({id, tier, prov, enabled, caps, registered});
+                    }
+
+                    size_t w_id = 2, w_tier = 4, w_prov = 10, w_en = 7, w_caps = 13, w_reg = 10;
+                    for (const auto& r : rows) {
+                        w_id   = std::max(w_id,   r.id.size());
+                        w_tier = std::max(w_tier, r.tier.size());
+                        w_prov = std::max(w_prov, r.prov.size());
+                        w_en   = std::max(w_en,   r.enabled.size());
+                        w_caps = std::max(w_caps, r.caps.size());
+                        w_reg  = std::max(w_reg,  r.registered.size());
+                    }
+
+                    size_t total_w = w_id + w_tier + w_prov + w_en + w_caps + w_reg + 10;
+
+                    std::cout << bold(f::col("ID",           w_id))
+                              << bold(f::col("TIER",         w_tier))
+                              << bold(f::col("PROVENANCE",   w_prov))
+                              << bold(f::col("ENABLED",      w_en))
+                              << bold(f::col("CAPABILITIES", w_caps))
+                              << bold(f::col("REGISTERED",   w_reg)) << "\n";
+                    std::cout << f::separator(total_w) << "\n";
+
+                    for (const auto& r : rows) {
+                        std::string enColored = (r.enabled == "true") ? green("true") : red("false");
+                        std::cout << f::col(r.id,   w_id)
+                                  << f::col(r.tier, w_tier)
+                                  << f::col(r.prov, w_prov)
+                                  << f::col_colored(enColored, r.enabled, w_en)
+                                  << f::col(r.caps, w_caps)
+                                  << f::col(r.registered, w_reg) << "\n";
                     }
                 }
             } catch (const agentos::cli::CliError& e) {

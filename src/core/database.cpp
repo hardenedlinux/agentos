@@ -68,12 +68,8 @@ namespace agentos
   {
       std::ifstream f("/proc/sys/kernel/random/uuid");
       if (!f) {
-          char buf[37]={0};
-          for (int i=0;i<36;++i) {
-              if (i==8||i==13||i==18||i==23) buf[i]='-';
-              else buf[i] = "0123456789abcdef"[rand()%16];
-          }
-          return std::string(buf, 36);
+          spdlog::error("[database] generate_uuid: cannot open /proc/sys/kernel/random/uuid");
+          return {};
       }
       std::string u;
       std::getline(f, u);
@@ -623,8 +619,10 @@ namespace agentos
       c.id = column_text_or_empty (stmt, 0);
       c.user_id = column_text_or_empty (stmt, 1);
       c.provider = column_text_or_empty (stmt, 2);
-      c.ciphertext = *column_blob_opt(stmt, 3);
-      c.nonce = *column_blob_opt(stmt, 4);
+      // ciphertext/nonce are NOT NULL in schema; use .value() so a corrupt DB
+      // throws std::bad_optional_access rather than silent UB from *nullopt.
+      c.ciphertext = column_blob_opt(stmt, 3).value();
+      c.nonce = column_blob_opt(stmt, 4).value();
       c.refresh_ciphertext = column_blob_opt(stmt, 5);
       c.refresh_nonce = column_blob_opt(stmt, 6);
       c.expires_at = column_int64_opt(stmt, 7);
@@ -2140,14 +2138,31 @@ namespace agentos
   {
       if (!db_)
           return std::unexpected(Error{"database not open"});
+
+      // If a credential already exists for (user_id, provider), load its id so
+      // we preserve the audit chain (credential_id references must not change).
+      {
+          auto existing = load_credential(user_id, provider);
+          if (existing) {
+              // Re-encrypt in place: update token blob and expiry only.
+              if (!update_credential_token(existing->id, token_blob, expires_at))
+                  return std::unexpected(Error{"update failed"});
+              return existing->id;
+          }
+      }
+
       std::string id = generate_uuid();
+      if (id.empty())
+          return std::unexpected(Error{"uuid generation failed"});
+
       const int64_t ts = now_unix();
+      // refresh_expires_at is not passed by callers yet; insert NULL for now.
       Stmt stmt (prepare(R"(
-          INSERT OR REPLACE INTO credentials
+          INSERT INTO credentials
               (id, user_id, provider, ciphertext, nonce,
                refresh_ciphertext, refresh_nonce,
-               expires_at, created_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?)
+               expires_at, refresh_expires_at, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,NULL,?,?)
       )"));
       if (!stmt.s)
           return std::unexpected(Error{"prepare failed"});
@@ -2279,11 +2294,22 @@ namespace agentos
   {
       if (!db_)
           return std::unexpected(Error{"database not open"});
+
+      // If grant already exists, return its existing id rather than a new UUID.
+      {
+          auto existing = load_credential_grant(worker_id, provider);
+          if (existing)
+              return existing->id;
+      }
+
       std::string id = generate_uuid();
+      if (id.empty())
+          return std::unexpected(Error{"uuid generation failed"});
+
       const int64_t ts = now_unix();
 
       Stmt stmt(prepare(R"(
-          INSERT OR IGNORE INTO credential_grants
+          INSERT INTO credential_grants
               (id, worker_id, provider, granted_at, granted_by)
           VALUES (?,?,?,?,?)
       )"));
@@ -2386,13 +2412,15 @@ namespace agentos
       int bind_idx = 1;
       if (user_id) where += " AND a.user_id = ?";
       if (job_id)  where += " AND a.job_id = ?";
+      // provider filter uses EXISTS so audit rows survive credential revocation
       if (provider) where += " AND EXISTS (SELECT 1 FROM credentials c WHERE c.id=a.credential_id AND c.provider=?)";
 
+      // No INNER JOIN: audit records must be queryable even after a credential
+      // is revoked (deleted from credentials table).
       std::string sql = std::string(
           "SELECT a.id, a.credential_id, a.user_id, a.worker_id, a.job_id, a.step_id, a.run_id, "
           "a.action, a.reason, a.timestamp "
           "FROM credential_audit a "
-          "INNER JOIN credentials c ON c.id = a.credential_id "
           "WHERE 1=1") + where + " ORDER BY a.timestamp DESC LIMIT ?";
 
       Stmt stmt(prepare(sql.c_str()));

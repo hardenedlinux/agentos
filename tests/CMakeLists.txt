@@ -38,17 +38,18 @@ set(AGENTOS_TEST_SYSTEM_INCLUDES
   ${CLI11_INC}
   ${ZMQ_INC}
   ${OPENSSL_STATIC_INC}
+  ${LIBTPMS_INC}
 )
 
 set(AGENTOS_TEST_LIBS
   agentos_core
-  agentos_forge
   ${GTEST_LIB}
   ${GTEST_MAIN_LIB}
   ${GMOCK_LIB}
   ${ZMQ_LIB}
   ${OPENSSL_STATIC_SSL}
   ${OPENSSL_STATIC_CRYPTO}
+  ${LIBTPMS_LIB}
   Threads::Threads
 )
 

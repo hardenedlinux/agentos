@@ -1,20 +1,8 @@
-set(AGENTOS_CORE_SOURCES
-  dispatcher.cpp
-  registry.cpp
-  master.cpp
-  periodic_executor.cpp
-  orchestrator.cpp
-  database.cpp
-  capability.cpp
-  central.cpp
-  enforce_layer.cpp
-  sandbox.cpp
-  llm/llm_proxy.cpp
-  llm/llm_client.cpp
-  config.cpp
-  home_init.cpp
-  gateway.cpp
+file(GLOB AGENTOS_CORE_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
 )
+
+add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
 
@@ -26,8 +14,6 @@ target_compile_definitions(sqlite3 PRIVATE
 )
 
 set_source_files_properties(${SQLITE3_SRC_DIR}/sqlite3.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")
-
-add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
 
 target_include_directories(agentos_core PUBLIC
   ${CMAKE_SOURCE_DIR}/src/include
@@ -43,6 +29,7 @@ target_include_directories(agentos_core SYSTEM PUBLIC
   ${SECCOMP_INCLUDE_DIR}
   ${CAP_INCLUDE_DIR}
   ${OPENSSL_STATIC_INC}
+  ${LIBTPMS_INC}
 )
 
 target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
@@ -81,7 +68,17 @@ target_include_directories(agentos_core PUBLIC
   ${CAP_INCLUDE_DIR}
 )
 
-add_dependencies(agentos_core libseccomp_ext libcap_ext spdlog_ext httplib_ext rapidjson_ext libzmq_ext cppzmq_ext openssl_ext)
+add_dependencies(
+  agentos_core
+  libseccomp_ext
+  libcap_ext
+  spdlog_ext
+  httplib_ext
+  rapidjson_ext
+  libzmq_ext
+  cppzmq_ext
+  openssl_ext
+  libtpms_ext)
 
 target_link_libraries(agentos_core PRIVATE sqlite3)
 

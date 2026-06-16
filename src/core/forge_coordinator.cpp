@@ -1,14 +1,14 @@
 /**
- * agentos/forge/forge_coordinator.cpp
+ * agentos/forge_coordinator.cpp
  *
  * ADR-019: Forge pipeline state machine implementation.
  * ADR-022: ForgeCoordinator as internal sub-component of Orchestrator.
  * ADR-009: Enforce Layer capability policy applied at every decision point.
  */
 
-#include "agentos/forge/forge_coordinator.h"
-#include "agentos/forge/code_reviewer.h"
-#include "agentos/forge/code_writer.h"
+#include "agentos/forge_coordinator.h"
+#include "agentos/code_reviewer.h"
+#include "agentos/code_writer.h"
 #include "agentos/home_init.h"
 
 #include <rapidjson/document.h>

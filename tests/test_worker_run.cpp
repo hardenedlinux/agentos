@@ -37,6 +37,7 @@
 #include <gtest/gtest.h>
 
 #include "agentos/config.h"
+#include "agentos/cred_vault.h"
 #include "agentos/database.h"
 #include "agentos/dispatcher.h"
 #include "agentos/home_init.h"
@@ -89,7 +90,7 @@ private:
 
 // ---------------------------------------------------------------------------
 // Common fixture: in-memory Database + real Registry/LlmProxy/ForgeCoordinator
-// /Dispatcher/Orchestrator (ADR-022/024).
+// /Dispatcher/CredVault/Orchestrator (ADR-022/024/028).
 // ---------------------------------------------------------------------------
 class WorkerRunTest : public ::testing::Test
 {
@@ -103,21 +104,31 @@ protected:
   void SetUp () override
   {
     ASSERT_TRUE (db.open ());
+    auto r = cred_vault.start ();
+    ASSERT_TRUE (r.has_value ()) << r.error ();
+  }
+
+  void TearDown () override
+  {
+    cred_vault.stop ();
   }
 
   // Declaration order = initialisation order.
   InMemoryDatabase db;
   Config config{};
+  Config::Vault vault_cfg{};
   LlmProxy llm{1, 1};
   Registry registry{db};
   Dispatcher dispatcher{};
   forge::ForgeCoordinator forge{db, llm, registry, [] (forge::ForgeResult) {}};
+  CredVault cred_vault{db, vault_cfg};
   Orchestrator orchestrator{db,
                             llm,
                             registry,
                             dispatcher,
                             forge,
                             config,
+                            cred_vault,
                             [] (MasterEvent) {},
                             [] (GatewayEvent) {}};
 };

@@ -1,4 +1,4 @@
-#include "agentos/forge/code_reviewer.h"
+#include "agentos/code_reviewer.h"
 #include "agentos/capability.h"
 #include "agentos/error_utils.h"
 #include "agentos/home_init.h"

@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "agentos/database.h"
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/registry.h"
 
 using namespace agentos;

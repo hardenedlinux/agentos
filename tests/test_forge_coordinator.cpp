@@ -20,8 +20,8 @@
 #include <gtest/gtest.h>
 
 #include "agentos/database.h"
-#include "agentos/forge/forge_coordinator.h"
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/forge_coordinator.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/registry.h"

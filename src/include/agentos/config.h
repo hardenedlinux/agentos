@@ -3,6 +3,7 @@
 #include <optional>
 #include <string_view>
 #include <filesystem>
+#include <vector>
 
 namespace agentos {
 
@@ -39,6 +40,14 @@ struct Config {
         int heartbeat_interval_s = 30;
         int rate_limit_per_key   = 10;
     } gateway;
+
+    // ADR-028: Credential vault configuration
+    struct Vault {
+        std::string tier               = "community"; // community | standard | enterprise
+        int         refresh_ahead_s    = 300;          // refresh when < N seconds remain
+        int         refresh_poll_interval = 60;        // seconds between refresh scans
+        std::vector<int> pcr_indices   = {0, 1, 2, 7}; // enterprise PCR selection
+    } vault;
 };
 
 // Load config from TOML file. Returns nullopt on error, with error message in `error`.

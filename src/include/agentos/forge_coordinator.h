@@ -16,7 +16,7 @@
  */
 #pragma once
 /**
- * agentos/forge/forge_coordinator.h
+ * agentos/forge_coordinator.h
  *
  * ForgeCoordinator — internal sub-component of Orchestrator (ADR-022).
  *
@@ -32,7 +32,7 @@
  */
 
 #include "agentos/database.h"
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/registry.h"
 #include "agentos/types.h"
@@ -151,7 +151,7 @@ private:
   // Returns false (and sets job.feedback) if network:true or exec:true declared.
   bool enforce_capability_policy(ForgePipelineJob& job);
 
-  // Write code file to ~/.agentos/forge/<forge_job_id>/attempt_N.<ext>
+  // Write code file to ~/.agentos/<forge_job_id>/attempt_N.<ext>
   // Updates job.last_code_path.
   bool write_code_file(ForgePipelineJob& job, const std::string& code,
                        const std::string& language);

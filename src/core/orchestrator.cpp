@@ -24,6 +24,7 @@
  */
 
 #include "agentos/orchestrator.h"
+#include "agentos/cred_vault.h"
 #include "agentos/home_init.h"
 #include "agentos/uuid.h"
 
@@ -143,6 +144,8 @@ namespace agentos
           "job.submit",     "job.status",    "job.list",    "job.cancel",
           "worker.list",    "adviser.list",  "review.list", "review.show",
           "review.approve", "review.reject", "forge.list",  "forge.status",
+          // ADR-028: operators can manage credentials
+          "cred.submit",    "cred.revoke",   "cred.list",   "cred.audit",
         };
         return operator_methods.count (method) > 0;
       }
@@ -166,10 +169,12 @@ namespace agentos
   Orchestrator::Orchestrator (Database &db, LlmProxy &llm, Registry &registry,
                               Dispatcher &dispatcher,
                               forge::ForgeCoordinator &forge,
-                              const Config &config, SendToMaster send_to_master,
+                              const Config &config,
+                              CredVault &cred_vault,
+                              SendToMaster send_to_master,
                               SendToGateway send_to_gateway)
     : db_ (db), llm_ (llm), registry_ (registry), dispatcher_ (dispatcher),
-      forge_ (forge), config_ (config),
+      forge_ (forge), config_ (config), cred_vault_ (cred_vault),
       send_to_master_ (std::move (send_to_master)),
       send_to_gateway_ (std::move (send_to_gateway))
   {
@@ -413,6 +418,21 @@ namespace agentos
       cmd_review_reject (params_json, identity, request_id);
     else if (method == "worker.register")
       cmd_worker_register (params_json, identity, request_id);
+    // --- ADR-028: credential vault methods ---
+    else if (method == "cred.submit")
+      cmd_cred_submit (params_json, identity, request_id);
+    else if (method == "cred.revoke")
+      cmd_cred_revoke (params_json, identity, request_id);
+    else if (method == "cred.grant")
+      cmd_cred_grant (params_json, identity, request_id);
+    else if (method == "cred.revoke_grant")
+      cmd_cred_revoke_grant (params_json, identity, request_id);
+    else if (method == "cred.list")
+      cmd_cred_list (params_json, identity, request_id);
+    else if (method == "cred.audit")
+      cmd_cred_audit (params_json, identity, request_id);
+    else if (method == "vault.rekey")
+      cmd_vault_rekey (params_json, identity, request_id);
     else
       reply_error (identity, request_id, -32601, "Method not found");
   }
@@ -1016,6 +1036,193 @@ namespace agentos
   std::string Orchestrator::new_uuid ()
   {
     return gen_uuid ();
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-028: cred.* JSON-RPC handlers
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_cred_submit (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ()
+        || !params.HasMember ("token") || !params["token"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    std::string user_id  = params["user_id"].GetString ();
+    std::string provider = params["provider"].GetString ();
+    std::string token    = params["token"].GetString ();
+
+    std::optional<std::string> refresh;
+    if (params.HasMember ("refresh_token") && params["refresh_token"].IsString ())
+      refresh = params["refresh_token"].GetString ();
+
+    std::optional<int64_t> expires;
+    if (params.HasMember ("expires_at") && params["expires_at"].IsInt64 ())
+      expires = params["expires_at"].GetInt64 ();
+
+    auto result = cred_vault_.submit (user_id, provider, token, refresh, expires);
+    if (!result)
+    {
+      reply_error (identity, request_id, -32030, "cred.submit failed");
+      return;
+    }
+    reply_ok (identity, request_id,
+              std::string ("{\"credential_id\":\"") + *result + "\"}");
+  }
+
+  void Orchestrator::cmd_cred_revoke (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    bool ok = cred_vault_.revoke (params["user_id"].GetString (),
+                                  params["provider"].GetString ());
+    reply_ok (identity, request_id,
+              std::string ("{\"ok\":") + (ok ? "true" : "false") + "}");
+  }
+
+  void Orchestrator::cmd_cred_grant (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = cred_vault_.grant (params["worker_id"].GetString (),
+                                  params["provider"].GetString (),
+                                  "admin"); // granted_by: use actual key id in production
+    if (!res)
+    {
+      reply_error (identity, request_id, -32030, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id,
+              std::string ("{\"grant_id\":\"") + *res + "\"}");
+  }
+
+  void Orchestrator::cmd_cred_revoke_grant (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("grant_id") || !params["grant_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    bool ok = cred_vault_.revoke_grant (params["grant_id"].GetString ());
+    reply_ok (identity, request_id,
+              std::string ("{\"ok\":") + (ok ? "true" : "false") + "}");
+  }
+
+  void Orchestrator::cmd_cred_list (const std::string &params_json,
+                                    const std::string &identity,
+                                    const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto list = cred_vault_.list (params["user_id"].GetString ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("credentials"); w.StartArray ();
+    for (const auto &c : list)
+    {
+      w.StartObject ();
+      w.Key ("id");         w.String (c.id.c_str ());
+      w.Key ("provider");   w.String (c.provider.c_str ());
+      if (c.expires_at) { w.Key ("expires_at"); w.Int64 (*c.expires_at); }
+      w.Key ("updated_at"); w.Int64 (c.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_cred_audit (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    std::optional<std::string> user_id, job_id, provider;
+    if (params.HasMember ("user_id") && params["user_id"].IsString ())
+      user_id = params["user_id"].GetString ();
+    if (params.HasMember ("job_id") && params["job_id"].IsString ())
+      job_id = params["job_id"].GetString ();
+    if (params.HasMember ("provider") && params["provider"].IsString ())
+      provider = params["provider"].GetString ();
+    int limit = 50;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto entries = cred_vault_.audit (user_id, job_id, provider, limit);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("entries"); w.StartArray ();
+    for (const auto &e : entries)
+    {
+      w.StartObject ();
+      w.Key ("id");            w.String (e.id.c_str ());
+      w.Key ("credential_id"); w.String (e.credential_id.c_str ());
+      w.Key ("user_id");       w.String (e.user_id.c_str ());
+      w.Key ("worker_id");     w.String (e.worker_id.c_str ());
+      w.Key ("job_id");        w.String (e.job_id.c_str ());
+      w.Key ("step_id");       w.String (e.step_id.c_str ());
+      w.Key ("run_id");        w.String (e.run_id.c_str ());
+      w.Key ("action");        w.String (e.action.c_str ());
+      if (e.reason) { w.Key ("reason"); w.String (e.reason->c_str ()); }
+      w.Key ("timestamp");     w.Int64 (e.timestamp);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_vault_rekey (const std::string & /*params*/,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    auto res = cred_vault_.rekey ();
+    if (!res)
+      reply_error (identity, request_id, -32030, "vault.rekey failed");
+    else
+      reply_ok (identity, request_id, "{\"ok\":true}");
   }
 
 } // namespace agentos

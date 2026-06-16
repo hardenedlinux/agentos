@@ -15,9 +15,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "agentos/database.h"
-#include "agentos/forge/forge_pipeline_job.h"
+#include "agentos/cred_vault.h"
+#include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
-#include "cred_vault.h"
+#include "agentos/secure_enclave.h"
 
 #include <chrono>
 #include <cstring>
@@ -64,16 +65,18 @@ namespace agentos
         .count ());
   }
 
-  static std::string generate_uuid()
+  static std::string generate_uuid ()
   {
-      std::ifstream f("/proc/sys/kernel/random/uuid");
-      if (!f) {
-          spdlog::error("[database] generate_uuid: cannot open /proc/sys/kernel/random/uuid");
-          return {};
-      }
-      std::string u;
-      std::getline(f, u);
-      return u;
+    std::ifstream f ("/proc/sys/kernel/random/uuid");
+    if (!f)
+    {
+      spdlog::error (
+        "[database] generate_uuid: cannot open /proc/sys/kernel/random/uuid");
+      return {};
+    }
+    std::string u;
+    std::getline (f, u);
+    return u;
   }
 
   // ---------------------------------------------------------------------------
@@ -290,13 +293,15 @@ namespace agentos
         }
       };
 
-      maybe_add_column ("ALTER TABLE jobs ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN type TEXT");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN goal TEXT");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN tags TEXT DEFAULT '[]'");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN error TEXT");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN max_iterations INTEGER");
-      maybe_add_column ("ALTER TABLE jobs ADD COLUMN current_iteration INTEGER");
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN current_iteration INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN max_repairs INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN current_repairs INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN reviewer_id TEXT");
@@ -323,7 +328,8 @@ namespace agentos
       };
       maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN type TEXT");
       maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN job_id TEXT");
-      maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+      maybe_add_column ("ALTER TABLE human_reviews ADD COLUMN created_at "
+                        "INTEGER NOT NULL DEFAULT 0");
     }
 
     spdlog::info ("[database] opened {}", db_path_);
@@ -410,13 +416,15 @@ namespace agentos
       sqlite3_bind_null (stmt, col);
   }
 
-  static void bind_optional_blob (sqlite3_stmt *stmt, int col,
-                                  const std::optional<std::vector<uint8_t>> &val)
+  static void
+  bind_optional_blob (sqlite3_stmt *stmt, int col,
+                      const std::optional<std::vector<uint8_t>> &val)
   {
-      if (val)
-          sqlite3_bind_blob (stmt, col, val->data (), static_cast<int>(val->size()), SQLITE_TRANSIENT);
-      else
-          sqlite3_bind_null (stmt, col);
+    if (val)
+      sqlite3_bind_blob (stmt, col, val->data (),
+                         static_cast<int> (val->size ()), SQLITE_TRANSIENT);
+    else
+      sqlite3_bind_null (stmt, col);
   }
 
   static std::string column_text_or_empty (sqlite3_stmt *stmt, int col)
@@ -440,15 +448,17 @@ namespace agentos
     return sqlite3_column_int (stmt, col);
   }
 
-  static std::optional<std::vector<uint8_t>> column_blob_opt (sqlite3_stmt *stmt, int col)
+  static std::optional<std::vector<uint8_t>>
+  column_blob_opt (sqlite3_stmt *stmt, int col)
   {
-      if (sqlite3_column_type (stmt, col) == SQLITE_NULL)
-          return std::nullopt;
-      const void* p = sqlite3_column_blob (stmt, col);
-      int sz = sqlite3_column_bytes (stmt, col);
-      if (!p || sz <= 0) return std::nullopt;
-      const uint8_t* b = static_cast<const uint8_t*>(p);
-      return std::vector<uint8_t> (b, b+sz);
+    if (sqlite3_column_type (stmt, col) == SQLITE_NULL)
+      return std::nullopt;
+    const void *p = sqlite3_column_blob (stmt, col);
+    int sz = sqlite3_column_bytes (stmt, col);
+    if (!p || sz <= 0)
+      return std::nullopt;
+    const uint8_t *b = static_cast<const uint8_t *> (p);
+    return std::vector<uint8_t> (b, b + sz);
   }
 
   // Database member forwarders — preserve the declared interface in database.h
@@ -486,26 +496,6 @@ namespace agentos
     ::agentos::bind_optional_text (stmt, col, val);
   }
 
-  template <typename Fn> bool Database::with_transaction (Fn &&fn)
-  {
-    if (!exec_ddl ("BEGIN"))
-      return false;
-    bool ok = false;
-    try
-    {
-      ok = fn ();
-    }
-    catch (...)
-    {
-      spdlog::error ("[database] unexpected exception inside transaction");
-    }
-    if (!ok)
-    {
-      exec_ddl ("ROLLBACK");
-      return false;
-    }
-    return exec_ddl ("COMMIT");
-  }
 
   // ========================================================================
   //  row_to_* helpers (file-scope)
@@ -514,9 +504,9 @@ namespace agentos
   static Job row_to_job (sqlite3_stmt *stmt)
   {
     Job j;
-    j.id         = column_text_or_empty (stmt, 0);
-    j.type       = column_text_or_empty (stmt, 1);
-    j.goal       = column_text_or_empty (stmt, 2);
+    j.id = column_text_or_empty (stmt, 0);
+    j.type = column_text_or_empty (stmt, 1);
+    j.goal = column_text_or_empty (stmt, 2);
 
     // tags — parse JSON array
     std::string tags_str = column_text_or_empty (stmt, 3);
@@ -534,7 +524,7 @@ namespace agentos
       }
     }
 
-    j.phase      = column_text_or_empty (stmt, 4);
+    j.phase = column_text_or_empty (stmt, 4);
     j.created_at = sqlite3_column_int64 (stmt, 5);
     j.updated_at = sqlite3_column_int64 (stmt, 6);
 
@@ -550,11 +540,11 @@ namespace agentos
     if (type == std::string (db::job_type::loop))
     {
       Loop l;
-      l.max_iterations      = sqlite3_column_int (stmt, 8);
-      l.current_iteration   = sqlite3_column_int (stmt, 9);
-      l.max_repairs         = sqlite3_column_int (stmt, 10);
-      l.current_repairs     = sqlite3_column_int (stmt, 11);
-      l.reviewer_id         = column_text_or_empty (stmt, 12);
+      l.max_iterations = sqlite3_column_int (stmt, 8);
+      l.current_iteration = sqlite3_column_int (stmt, 9);
+      l.max_repairs = sqlite3_column_int (stmt, 10);
+      l.current_repairs = sqlite3_column_int (stmt, 11);
+      l.reviewer_id = column_text_or_empty (stmt, 12);
       l.acceptance_criteria = column_text_or_empty (stmt, 13);
       if (sqlite3_column_type (stmt, 14) != SQLITE_NULL)
         l.last_feedback = column_text_or_empty (stmt, 14);
@@ -568,9 +558,9 @@ namespace agentos
     if (type == std::string (db::job_type::scheduled))
     {
       Schedule s;
-      s.timer_id   = column_text_or_empty (stmt, 15);
+      s.timer_id = column_text_or_empty (stmt, 15);
       s.interval_s = sqlite3_column_int64 (stmt, 16);
-      s.starts_at   = column_int64_opt (stmt, 17);
+      s.starts_at = column_int64_opt (stmt, 17);
       s.last_run_at = column_int64_opt (stmt, 18);
       s.next_run_at = column_int64_opt (stmt, 19);
       j.schedule = std::move (s);
@@ -582,12 +572,12 @@ namespace agentos
   static Step row_to_step (sqlite3_stmt *stmt)
   {
     Step s;
-    s.id          = column_text_or_empty (stmt, 0);
-    s.job_id      = column_text_or_empty (stmt, 1);
-    s.step_order  = sqlite3_column_int (stmt, 2);
+    s.id = column_text_or_empty (stmt, 0);
+    s.job_id = column_text_or_empty (stmt, 1);
+    s.step_order = sqlite3_column_int (stmt, 2);
     s.description = column_text_or_empty (stmt, 3);
-    s.status      = column_text_or_empty (stmt, 4);
-    s.started_at   = column_int64_opt (stmt, 5);
+    s.status = column_text_or_empty (stmt, 4);
+    s.started_at = column_int64_opt (stmt, 5);
     s.completed_at = column_int64_opt (stmt, 6);
     if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
       s.error = column_text_or_empty (stmt, 7);
@@ -597,69 +587,69 @@ namespace agentos
   static HumanReview row_to_human_review (sqlite3_stmt *stmt)
   {
     HumanReview r;
-    r.id        = column_text_or_empty (stmt, 0);
-    r.type      = column_text_or_empty (stmt, 1);
+    r.id = column_text_or_empty (stmt, 0);
+    r.type = column_text_or_empty (stmt, 1);
     if (sqlite3_column_type (stmt, 2) != SQLITE_NULL)
       r.forge_id = column_text_or_empty (stmt, 2);
     if (sqlite3_column_type (stmt, 3) != SQLITE_NULL)
-      r.job_id   = column_text_or_empty (stmt, 3);
-    r.reason    = column_text_or_empty (stmt, 4);
+      r.job_id = column_text_or_empty (stmt, 3);
+    r.reason = column_text_or_empty (stmt, 4);
     r.artifacts = column_text_or_empty (stmt, 5);
-    r.status    = column_text_or_empty (stmt, 6);
+    r.status = column_text_or_empty (stmt, 6);
     if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
       r.decision = column_text_or_empty (stmt, 7);
-    r.created_at  = sqlite3_column_int64 (stmt, 8);
+    r.created_at = sqlite3_column_int64 (stmt, 8);
     r.reviewed_at = column_int64_opt (stmt, 9);
     return r;
   }
 
   static CredentialRow row_to_credential (sqlite3_stmt *stmt)
   {
-      CredentialRow c;
-      c.id = column_text_or_empty (stmt, 0);
-      c.user_id = column_text_or_empty (stmt, 1);
-      c.provider = column_text_or_empty (stmt, 2);
-      // ciphertext/nonce are NOT NULL in schema; use .value() so a corrupt DB
-      // throws std::bad_optional_access rather than silent UB from *nullopt.
-      c.ciphertext = column_blob_opt(stmt, 3).value();
-      c.nonce = column_blob_opt(stmt, 4).value();
-      c.refresh_ciphertext = column_blob_opt(stmt, 5);
-      c.refresh_nonce = column_blob_opt(stmt, 6);
-      c.expires_at = column_int64_opt(stmt, 7);
-      c.refresh_expires_at = column_int64_opt(stmt, 8);
-      c.created_at = sqlite3_column_int64(stmt, 9);
-      c.updated_at = sqlite3_column_int64(stmt, 10);
-      return c;
+    CredentialRow c;
+    c.id = column_text_or_empty (stmt, 0);
+    c.user_id = column_text_or_empty (stmt, 1);
+    c.provider = column_text_or_empty (stmt, 2);
+    // ciphertext/nonce are NOT NULL in schema; use .value() so a corrupt DB
+    // throws std::bad_optional_access rather than silent UB from *nullopt.
+    c.ciphertext = column_blob_opt (stmt, 3).value ();
+    c.nonce = column_blob_opt (stmt, 4).value ();
+    c.refresh_ciphertext = column_blob_opt (stmt, 5);
+    c.refresh_nonce = column_blob_opt (stmt, 6);
+    c.expires_at = column_int64_opt (stmt, 7);
+    c.refresh_expires_at = column_int64_opt (stmt, 8);
+    c.created_at = sqlite3_column_int64 (stmt, 9);
+    c.updated_at = sqlite3_column_int64 (stmt, 10);
+    return c;
   }
 
   static GrantRow row_to_grant (sqlite3_stmt *stmt)
   {
-      GrantRow g;
-      g.id = column_text_or_empty (stmt, 0);
-      g.worker_id = column_text_or_empty (stmt, 1);
-      g.provider = column_text_or_empty (stmt, 2);
-      if (sqlite3_column_type(stmt, 3) != SQLITE_NULL)
-          g.suite_id = column_text_or_empty(stmt, 3);
-      g.granted_at = sqlite3_column_int64(stmt, 4);
-      g.granted_by = column_text_or_empty (stmt, 5);
-      return g;
+    GrantRow g;
+    g.id = column_text_or_empty (stmt, 0);
+    g.worker_id = column_text_or_empty (stmt, 1);
+    g.provider = column_text_or_empty (stmt, 2);
+    if (sqlite3_column_type (stmt, 3) != SQLITE_NULL)
+      g.suite_id = column_text_or_empty (stmt, 3);
+    g.granted_at = sqlite3_column_int64 (stmt, 4);
+    g.granted_by = column_text_or_empty (stmt, 5);
+    return g;
   }
 
   static CredentialAuditRow row_to_audit (sqlite3_stmt *stmt)
   {
-      CredentialAuditRow a;
-      a.id = column_text_or_empty (stmt, 0);
-      a.credential_id = column_text_or_empty (stmt, 1);
-      a.user_id = column_text_or_empty (stmt, 2);
-      a.worker_id = column_text_or_empty (stmt, 3);
-      a.job_id = column_text_or_empty (stmt, 4);
-      a.step_id = column_text_or_empty (stmt, 5);
-      a.run_id = column_text_or_empty (stmt, 6);
-      a.action = column_text_or_empty (stmt, 7);
-      if (sqlite3_column_type(stmt, 8) != SQLITE_NULL)
-          a.reason = column_text_or_empty(stmt, 8);
-      a.timestamp = sqlite3_column_int64(stmt, 9);
-      return a;
+    CredentialAuditRow a;
+    a.id = column_text_or_empty (stmt, 0);
+    a.credential_id = column_text_or_empty (stmt, 1);
+    a.user_id = column_text_or_empty (stmt, 2);
+    a.worker_id = column_text_or_empty (stmt, 3);
+    a.job_id = column_text_or_empty (stmt, 4);
+    a.step_id = column_text_or_empty (stmt, 5);
+    a.run_id = column_text_or_empty (stmt, 6);
+    a.action = column_text_or_empty (stmt, 7);
+    if (sqlite3_column_type (stmt, 8) != SQLITE_NULL)
+      a.reason = column_text_or_empty (stmt, 8);
+    a.timestamp = sqlite3_column_int64 (stmt, 9);
+    return a;
   }
 
   // ========================================================================
@@ -757,8 +747,8 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE jobs SET phase = ?, updated_at = ? WHERE id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE jobs SET phase = ?, updated_at = ? WHERE id = ?"));
     if (!stmt.s)
       return;
 
@@ -771,12 +761,12 @@ namespace agentos
   }
 
   void Database::update_job_error (const std::string &id,
-                                    const std::string &error)
+                                   const std::string &error)
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE jobs SET error = ?, updated_at = ? WHERE id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE jobs SET error = ?, updated_at = ? WHERE id = ?"));
     if (!stmt.s)
       return;
 
@@ -811,9 +801,10 @@ namespace agentos
     return std::nullopt;
   }
 
-  std::vector<Job> Database::load_jobs (std::optional<std::string_view> type_filter,
-                                        std::optional<std::string_view> phase_filter,
-                                        int limit, int offset)
+  std::vector<Job>
+  Database::load_jobs (std::optional<std::string_view> type_filter,
+                       std::optional<std::string_view> phase_filter, int limit,
+                       int offset)
   {
     std::vector<Job> jobs;
     if (!db_)
@@ -831,15 +822,16 @@ namespace agentos
       where += " AND phase = ?";
     }
 
-    std::string sql = std::string ("SELECT id, type, goal, tags, phase, "
-                                   "created_at, updated_at, error, "
-                                   "max_iterations, current_iteration, "
-                                   "max_repairs, current_repairs, "
-                                   "reviewer_id, acceptance_criteria, last_feedback, "
-                                   "timer_id, interval_s, starts_at, last_run_at, next_run_at "
-                                   "FROM jobs WHERE 1=1")
-                      + where
-                      + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+    std::string sql
+      = std::string (
+          "SELECT id, type, goal, tags, phase, "
+          "created_at, updated_at, error, "
+          "max_iterations, current_iteration, "
+          "max_repairs, current_repairs, "
+          "reviewer_id, acceptance_criteria, last_feedback, "
+          "timer_id, interval_s, starts_at, last_run_at, next_run_at "
+          "FROM jobs WHERE 1=1")
+        + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
 
     Stmt stmt (prepare (sql.c_str ()));
     if (!stmt.s)
@@ -866,7 +858,7 @@ namespace agentos
   }
 
   int Database::count_jobs (std::optional<std::string_view> type_filter,
-                             std::optional<std::string_view> phase_filter)
+                            std::optional<std::string_view> phase_filter)
   {
     if (!db_)
       return 0;
@@ -879,7 +871,8 @@ namespace agentos
     if (phase_filter)
       where += " AND phase = ?";
 
-    std::string sql = std::string ("SELECT COUNT(*) FROM jobs WHERE 1=1") + where;
+    std::string sql
+      = std::string ("SELECT COUNT(*) FROM jobs WHERE 1=1") + where;
     Stmt stmt (prepare (sql.c_str ()));
     if (!stmt.s)
       return 0;
@@ -904,9 +897,9 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE jobs SET current_iteration = current_iteration + 1, "
-      "updated_at = ? WHERE id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE jobs SET current_iteration = current_iteration + 1, "
+               "updated_at = ? WHERE id = ?"));
     if (!stmt.s)
       return;
 
@@ -941,9 +934,9 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE jobs SET current_repairs = current_repairs + 1, "
-      "updated_at = ? WHERE id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE jobs SET current_repairs = current_repairs + 1, "
+               "updated_at = ? WHERE id = ?"));
     if (!stmt.s)
       return;
 
@@ -971,13 +964,13 @@ namespace agentos
 
     sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, step.job_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int  (stmt, 3, step.step_order);
+    sqlite3_bind_int (stmt, 3, step.step_order);
     sqlite3_bind_text (stmt, 4, step.description.c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, step.status.c_str (), -1, SQLITE_TRANSIENT);
     bind_optional_int64 (stmt, 6, step.started_at);
     bind_optional_int64 (stmt, 7, step.completed_at);
-    bind_optional_text  (stmt, 8, step.error);
+    bind_optional_text (stmt, 8, step.error);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_step: {}", sqlite3_errmsg (db_));
@@ -994,9 +987,10 @@ namespace agentos
     const bool is_running = (new_status == db::step_status::running);
 
     // running → set started_at; done/failed → set completed_at.
-    const char *sql = is_running
-      ? "UPDATE tasks SET status = ?, error = ?, started_at  = ? WHERE id = ?"
-      : "UPDATE tasks SET status = ?, error = ?, completed_at = ? WHERE id = ?";
+    const char *sql = is_running ? "UPDATE tasks SET status = ?, error = ?, "
+                                   "started_at  = ? WHERE id = ?"
+                                 : "UPDATE tasks SET status = ?, error = ?, "
+                                   "completed_at = ? WHERE id = ?";
 
     Stmt stmt (prepare (sql));
     if (!stmt.s)
@@ -1008,8 +1002,7 @@ namespace agentos
     sqlite3_bind_text (stmt, 4, id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
-      spdlog::error ("[database] update_step_status: {}",
-                     sqlite3_errmsg (db_));
+      spdlog::error ("[database] update_step_status: {}", sqlite3_errmsg (db_));
   }
 
   void Database::complete_step (const std::string &id,
@@ -1059,7 +1052,8 @@ namespace agentos
     return steps;
   }
 
-  std::optional<std::string> Database::load_step_result_opt (const std::string &step_id)
+  std::optional<std::string>
+  Database::load_step_result_opt (const std::string &step_id)
   {
     if (!db_)
       return std::nullopt;
@@ -1152,9 +1146,9 @@ namespace agentos
     return std::nullopt;
   }
 
-  std::vector<HumanReview> Database::load_human_reviews (
-      std::optional<std::string_view> type_filter,
-      std::optional<std::string_view> status_filter)
+  std::vector<HumanReview>
+  Database::load_human_reviews (std::optional<std::string_view> type_filter,
+                                std::optional<std::string_view> status_filter)
   {
     std::vector<HumanReview> revs;
     if (!db_)
@@ -1168,12 +1162,11 @@ namespace agentos
     if (status_filter)
       where += " AND status = ?";
 
-    std::string sql = std::string (
-      "SELECT id, type, forge_id, job_id, reason, artifacts, "
-      "status, decision, created_at, reviewed_at "
-      "FROM human_reviews WHERE 1=1")
-                      + where
-                      + " ORDER BY created_at DESC";
+    std::string sql
+      = std::string ("SELECT id, type, forge_id, job_id, reason, artifacts, "
+                     "status, decision, created_at, reviewed_at "
+                     "FROM human_reviews WHERE 1=1")
+        + where + " ORDER BY created_at DESC";
 
     Stmt stmt (prepare (sql.c_str ()));
     if (!stmt.s)
@@ -1215,16 +1208,20 @@ namespace agentos
     if (!stmt.s)
       return jobs;
 
-    sqlite3_bind_text (stmt, 1, db::job_phase::done.data (),         -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, db::job_phase::failed.data (),       -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 3, db::job_phase::human_review.data (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, db::job_phase::done.data (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, db::job_phase::failed.data (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, db::job_phase::human_review.data (), -1,
+                       SQLITE_TRANSIENT);
 
     while (sqlite3_step (stmt) == SQLITE_ROW)
       jobs.push_back (row_to_job (stmt));
     return jobs;
   }
 
-  std::vector<Step> Database::load_active_steps (const std::vector<std::string> &job_ids)
+  std::vector<Step>
+  Database::load_active_steps (const std::vector<std::string> &job_ids)
   {
     std::vector<Step> steps;
     if (!db_ || job_ids.empty ())
@@ -1239,23 +1236,22 @@ namespace agentos
       placeholders += "?";
     }
 
-    std::string sql = std::string (
-      "SELECT id, job_id, step_order, description, status, "
-      "started_at, completed_at, error "
-      "FROM tasks WHERE job_id IN (")
-                      + placeholders
-                      + ") AND status != ? ORDER BY step_order ASC";
+    std::string sql
+      = std::string ("SELECT id, job_id, step_order, description, status, "
+                     "started_at, completed_at, error "
+                     "FROM tasks WHERE job_id IN (")
+        + placeholders + ") AND status != ? ORDER BY step_order ASC";
 
     Stmt stmt (prepare (sql.c_str ()));
     if (!stmt.s)
       return steps;
 
     for (size_t i = 0; i < job_ids.size (); ++i)
-      sqlite3_bind_text (stmt, static_cast<int> (i + 1),
-                         job_ids[i].c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, static_cast<int> (i + 1), job_ids[i].c_str (),
+                         -1, SQLITE_TRANSIENT);
 
-    std::string done_status = std::string(db::step_status::done);
-    sqlite3_bind_text (stmt, static_cast<int>(job_ids.size () + 1),
+    std::string done_status = std::string (db::step_status::done);
+    sqlite3_bind_text (stmt, static_cast<int> (job_ids.size () + 1),
                        done_status.c_str (), -1, SQLITE_TRANSIENT);
 
     while (sqlite3_step (stmt) == SQLITE_ROW)
@@ -1432,7 +1428,7 @@ namespace agentos
   {
     if (!db_)
       return;
-    std::string done_status = std::string(db::step_status::done);
+    std::string done_status = std::string (db::step_status::done);
     Stmt stmt (
       prepare ("UPDATE tasks SET result = ?, status = ?, completed_at = ? "
                "WHERE id = ?"));
@@ -1844,9 +1840,9 @@ namespace agentos
     while (sqlite3_step (stmt) == SQLITE_ROW)
     {
       CapabilityRow row;
-      row.agent_id     = column_text_or_empty (stmt, 0);
-      row.method       = column_text_or_empty (stmt, 1);
-      row.description  = column_text_or_empty (stmt, 2);
+      row.agent_id = column_text_or_empty (stmt, 0);
+      row.method = column_text_or_empty (stmt, 1);
+      row.description = column_text_or_empty (stmt, 2);
       row.input_schema = column_text_or_empty (stmt, 3);
       rows.push_back (std::move (row));
     }
@@ -1994,21 +1990,23 @@ namespace agentos
 
   static TaskTarget target_from_string (const std::string &s)
   {
-    if (s == "orchestrator") return TaskTarget::Orchestrator;
-    if (s == "master")       return TaskTarget::Master;
+    if (s == "orchestrator")
+      return TaskTarget::Orchestrator;
+    if (s == "master")
+      return TaskTarget::Master;
     return TaskTarget::Gateway;
   }
 
   static TimerTask row_to_timer_task (sqlite3_stmt *stmt)
   {
     TimerTask t;
-    t.id           = column_text_or_empty (stmt, 0);
-    t.interval_s   = sqlite3_column_int64 (stmt, 1);
-    t.next_fire    = sqlite3_column_int64 (stmt, 2);
-    t.target       = target_from_string (column_text_or_empty (stmt, 3));
+    t.id = column_text_or_empty (stmt, 0);
+    t.interval_s = sqlite3_column_int64 (stmt, 1);
+    t.next_fire = sqlite3_column_int64 (stmt, 2);
+    t.target = target_from_string (column_text_or_empty (stmt, 3));
     t.payload_json = column_text_or_empty (stmt, 4);
-    t.enabled      = sqlite3_column_int (stmt, 5) != 0;
-    t.created_at   = sqlite3_column_int64 (stmt, 6);
+    t.enabled = sqlite3_column_int (stmt, 5) != 0;
+    t.created_at = sqlite3_column_int64 (stmt, 6);
     return t;
   }
 
@@ -2024,11 +2022,11 @@ namespace agentos
       return;
 
     const auto trg = to_string (t.target);
-    sqlite3_bind_text  (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 2, t.interval_s);
     sqlite3_bind_int64 (stmt, 3, t.next_fire);
-    sqlite3_bind_text  (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text  (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 6, t.created_at > 0 ? t.created_at : now_unix ());
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
@@ -2047,11 +2045,11 @@ namespace agentos
       return;
 
     const auto trg = to_string (t.target);
-    sqlite3_bind_text  (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, t.id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 2, t.interval_s);
     sqlite3_bind_int64 (stmt, 3, t.next_fire);
-    sqlite3_bind_text  (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text  (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, trg.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, t.payload_json.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 6, t.created_at > 0 ? t.created_at : now_unix ());
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
@@ -2063,13 +2061,12 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE timer_tasks SET next_fire = ? WHERE id = ?"));
+    Stmt stmt (prepare ("UPDATE timer_tasks SET next_fire = ? WHERE id = ?"));
     if (!stmt.s)
       return;
 
     sqlite3_bind_int64 (stmt, 1, next_fire);
-    sqlite3_bind_text  (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] upsert_timer_task_next_fire: {}",
@@ -2080,8 +2077,7 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE timer_tasks SET enabled = 0 WHERE id = ?"));
+    Stmt stmt (prepare ("UPDATE timer_tasks SET enabled = 0 WHERE id = ?"));
     if (!stmt.s)
       return;
 
@@ -2129,158 +2125,240 @@ namespace agentos
   //  ADR-028 credential methods
   // ========================================================================
 
-  std::expected<std::string, Error>
-  Database::insert_credential(const std::string &user_id,
-                              const std::string &provider,
-                              const CipherBlob &token_blob,
-                              const std::optional<CipherBlob> &refresh_blob,
-                              std::optional<int64_t> expires_at)
+  std::expected<std::string, Error> Database::insert_credential (
+    const std::string &caller_id,
+    const std::string &user_id, const std::string &provider,
+    const CipherBlob &token_blob, const std::optional<CipherBlob> &refresh_blob,
+    std::optional<int64_t> expires_at)
   {
-      if (!db_)
-          return std::unexpected(Error{"database not open"});
+    if (!db_)
+      return std::unexpected (Error{"database not open"});
 
-      // If a credential already exists for (user_id, provider), load its id so
-      // we preserve the audit chain (credential_id references must not change).
+    // If a credential already exists for (user_id, provider), load its id so
+    // we preserve the audit chain (credential_id references must not change).
+    {
+      auto existing = load_credential (user_id, provider);
+      if (existing)
       {
-          auto existing = load_credential(user_id, provider);
-          if (existing) {
-              // Re-encrypt in place: update token blob and expiry only.
-              if (!update_credential_token(existing->id, token_blob, expires_at))
-                  return std::unexpected(Error{"update failed"});
-              return existing->id;
-          }
+        // Re-encrypt in place: update token blob and expiry only.
+        if (!update_credential_token (existing->id, token_blob, expires_at))
+          return std::unexpected (Error{"update failed"});
+        return existing->id;
       }
+    }
 
-      std::string id = generate_uuid();
-      if (id.empty())
-          return std::unexpected(Error{"uuid generation failed"});
+    // Use the caller-supplied id — must not be empty.
+    if (caller_id.empty ())
+      return std::unexpected (Error{"caller_id must not be empty"});
 
-      const int64_t ts = now_unix();
-      // refresh_expires_at is not passed by callers yet; insert NULL for now.
-      Stmt stmt (prepare(R"(
+    const int64_t ts = now_unix ();
+    // refresh_expires_at is not passed by callers yet; insert NULL for now.
+    Stmt stmt (prepare (R"(
           INSERT INTO credentials
               (id, user_id, provider, ciphertext, nonce,
                refresh_ciphertext, refresh_nonce,
                expires_at, refresh_expires_at, created_at, updated_at)
           VALUES (?,?,?,?,?,?,?,?,NULL,?,?)
       )"));
-      if (!stmt.s)
-          return std::unexpected(Error{"prepare failed"});
+    if (!stmt.s)
+      return std::unexpected (Error{"prepare failed"});
 
-      sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, user_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 3, provider.c_str(), -1, SQLITE_TRANSIENT);
-      bind_optional_blob(stmt, 4, token_blob.ciphertext);
-      bind_optional_blob(stmt, 5, token_blob.nonce);
-      if (refresh_blob) {
-          bind_optional_blob(stmt, 6, refresh_blob->ciphertext);
-          bind_optional_blob(stmt, 7, refresh_blob->nonce);
-      } else {
-          sqlite3_bind_null(stmt, 6);
-          sqlite3_bind_null(stmt, 7);
-      }
-      bind_optional_int64(stmt, 8, expires_at);
-      sqlite3_bind_int64(stmt, 9, ts);
-      sqlite3_bind_int64(stmt, 10, ts);
+    sqlite3_bind_text (stmt, 1, caller_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, provider.c_str (), -1, SQLITE_TRANSIENT);
+    bind_optional_blob (stmt, 4, token_blob.ciphertext);
+    bind_optional_blob (stmt, 5, token_blob.nonce);
+    if (refresh_blob)
+    {
+      bind_optional_blob (stmt, 6, refresh_blob->ciphertext);
+      bind_optional_blob (stmt, 7, refresh_blob->nonce);
+    }
+    else
+    {
+      sqlite3_bind_null (stmt, 6);
+      sqlite3_bind_null (stmt, 7);
+    }
+    bind_optional_int64 (stmt, 8, expires_at);
+    sqlite3_bind_int64 (stmt, 9, ts);
+    sqlite3_bind_int64 (stmt, 10, ts);
 
-      if (sqlite3_step(stmt) != SQLITE_DONE) {
-          spdlog::error("[database] insert_credential: {}", sqlite3_errmsg(db_));
-          return std::unexpected(Error{"insert failed"});
-      }
-      return id;
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] insert_credential: {}", sqlite3_errmsg (db_));
+      return std::unexpected (Error{"insert failed"});
+    }
+    return caller_id;
   }
 
   std::optional<CredentialRow>
-  Database::load_credential(const std::string &user_id,
-                            const std::string &provider)
+  Database::load_credential (const std::string &user_id,
+                             const std::string &provider)
   {
-      if (!db_)
-          return std::nullopt;
-      Stmt stmt(prepare(R"(
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
           SELECT id, user_id, provider, ciphertext, nonce,
                  refresh_ciphertext, refresh_nonce,
                  expires_at, refresh_expires_at, created_at, updated_at
           FROM credentials WHERE user_id=? AND provider=?
       )"));
-      if (!stmt.s)
-          return std::nullopt;
-
-      sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, provider.c_str(), -1, SQLITE_TRANSIENT);
-
-      if (sqlite3_step(stmt) == SQLITE_ROW)
-          return row_to_credential(stmt);
+    if (!stmt.s)
       return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, provider.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_credential (stmt);
+    return std::nullopt;
   }
 
-  bool Database::update_credential_token(const std::string &id,
-                                         const CipherBlob &blob,
-                                         std::optional<int64_t> expires_at)
+  bool Database::update_credential_token (const std::string &id,
+                                          const CipherBlob &blob,
+                                          std::optional<int64_t> expires_at)
   {
-      if (!db_)
-          return false;
-      Stmt stmt(prepare(R"(
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (R"(
           UPDATE credentials SET ciphertext=?, nonce=?, expires_at=?, updated_at=?
           WHERE id=?
       )"));
-      if (!stmt.s)
-          return false;
+    if (!stmt.s)
+      return false;
 
-      bind_optional_blob(stmt, 1, blob.ciphertext);
-      bind_optional_blob(stmt, 2, blob.nonce);
-      bind_optional_int64(stmt, 3, expires_at);
-      sqlite3_bind_int64(stmt, 4, now_unix());
-      sqlite3_bind_text(stmt, 5, id.c_str(), -1, SQLITE_TRANSIENT);
+    bind_optional_blob (stmt, 1, blob.ciphertext);
+    bind_optional_blob (stmt, 2, blob.nonce);
+    bind_optional_int64 (stmt, 3, expires_at);
+    sqlite3_bind_int64 (stmt, 4, now_unix ());
+    sqlite3_bind_text (stmt, 5, id.c_str (), -1, SQLITE_TRANSIENT);
 
-      if (sqlite3_step(stmt) != SQLITE_DONE) {
-          spdlog::error("[database] update_credential_token: {}", sqlite3_errmsg(db_));
-          return false;
-      }
-      return true;
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] update_credential_token: {}",
+                     sqlite3_errmsg (db_));
+      return false;
+    }
+    return true;
   }
 
-  bool Database::revoke_credential(const std::string &user_id,
-                                   const std::string &provider)
+  std::vector<CredentialRow> Database::load_credentials_by_user (const std::string &user_id)
   {
-      if (!db_)
-          return false;
-      Stmt stmt(prepare(R"(
+    std::vector<CredentialRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+          SELECT id, user_id, provider, ciphertext, nonce,
+                 refresh_ciphertext, refresh_nonce,
+                 expires_at, refresh_expires_at, created_at, updated_at
+          FROM credentials WHERE user_id=? ORDER BY created_at ASC
+      )"));
+    if (!stmt.s)
+      return rows;
+    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      rows.push_back (row_to_credential (stmt));
+    return rows;
+  }
+
+  std::vector<CredentialRow> Database::load_all_credentials ()
+  {
+    std::vector<CredentialRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+          SELECT id, user_id, provider, ciphertext, nonce,
+                 refresh_ciphertext, refresh_nonce,
+                 expires_at, refresh_expires_at, created_at, updated_at
+          FROM credentials ORDER BY created_at ASC
+      )"));
+    if (!stmt.s)
+      return rows;
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      rows.push_back (row_to_credential (stmt));
+    return rows;
+  }
+
+  bool Database::update_credential_full (const std::string &id,
+                                         const CipherBlob &token_blob,
+                                         const std::optional<CipherBlob> &refresh_blob,
+                                         std::optional<int64_t> expires_at)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (R"(
+          UPDATE credentials SET ciphertext=?, nonce=?, refresh_ciphertext=?, refresh_nonce=?,
+                expires_at=?, updated_at=? WHERE id=?
+      )"));
+    if (!stmt.s)
+      return false;
+    bind_optional_blob (stmt, 1, token_blob.ciphertext);
+    bind_optional_blob (stmt, 2, token_blob.nonce);
+    if (refresh_blob)
+    {
+      bind_optional_blob (stmt, 3, refresh_blob->ciphertext);
+      bind_optional_blob (stmt, 4, refresh_blob->nonce);
+    }
+    else
+    {
+      sqlite3_bind_null (stmt, 3);
+      sqlite3_bind_null (stmt, 4);
+    }
+    bind_optional_int64 (stmt, 5, expires_at);
+    sqlite3_bind_int64 (stmt, 6, now_unix ());
+    sqlite3_bind_text (stmt, 7, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] update_credential_full: {}",
+                     sqlite3_errmsg (db_));
+      return false;
+    }
+    return true;
+  }
+
+  bool Database::revoke_credential (const std::string &user_id,
+                                    const std::string &provider)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (R"(
           DELETE FROM credentials WHERE user_id=? AND provider=?
       )"));
-      if (!stmt.s)
-          return false;
+    if (!stmt.s)
+      return false;
 
-      sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, provider.c_str(), -1, SQLITE_TRANSIENT);
-      if (sqlite3_step(stmt) != SQLITE_DONE) {
-          spdlog::error("[database] revoke_credential: {}", sqlite3_errmsg(db_));
-          return false;
-      }
-      return true;
+    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, provider.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] revoke_credential: {}", sqlite3_errmsg (db_));
+      return false;
+    }
+    int changes = sqlite3_changes (db_);
+    return changes > 0;
   }
 
   std::vector<CredentialRow>
-  Database::load_expiring_credentials(int64_t threshold_unix)
+  Database::load_expiring_credentials (int64_t threshold_unix)
   {
-      std::vector<CredentialRow> creds;
-      if (!db_)
-          return creds;
+    std::vector<CredentialRow> creds;
+    if (!db_)
+      return creds;
 
-      Stmt stmt(prepare(R"(
+    Stmt stmt (prepare (R"(
           SELECT id, user_id, provider, ciphertext, nonce,
                  refresh_ciphertext, refresh_nonce,
                  expires_at, refresh_expires_at, created_at, updated_at
           FROM credentials
           WHERE expires_at IS NOT NULL AND expires_at < ?
       )"));
-      if (!stmt.s)
-          return creds;
-
-      sqlite3_bind_int64(stmt, 1, threshold_unix);
-
-      while (sqlite3_step(stmt) == SQLITE_ROW)
-          creds.push_back(row_to_credential(stmt));
+    if (!stmt.s)
       return creds;
+
+    sqlite3_bind_int64 (stmt, 1, threshold_unix);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      creds.push_back (row_to_credential (stmt));
+    return creds;
   }
 
   // ---------------------------------------------------------------------------
@@ -2288,153 +2366,172 @@ namespace agentos
   // ---------------------------------------------------------------------------
 
   std::expected<std::string, Error>
-  Database::insert_credential_grant(const std::string &worker_id,
-                                    const std::string &provider,
-                                    const std::string &granted_by)
+  Database::insert_credential_grant (const std::string &worker_id,
+                                     const std::string &provider,
+                                     const std::string &granted_by)
   {
-      if (!db_)
-          return std::unexpected(Error{"database not open"});
+    if (!db_)
+      return std::unexpected (Error{"database not open"});
 
-      // If grant already exists, return its existing id rather than a new UUID.
-      {
-          auto existing = load_credential_grant(worker_id, provider);
-          if (existing)
-              return existing->id;
-      }
+    // If grant already exists, return its existing id rather than a new UUID.
+    {
+      auto existing = load_credential_grant (worker_id, provider);
+      if (existing)
+        return existing->id;
+    }
 
-      std::string id = generate_uuid();
-      if (id.empty())
-          return std::unexpected(Error{"uuid generation failed"});
+    std::string id = generate_uuid ();
+    if (id.empty ())
+      return std::unexpected (Error{"uuid generation failed"});
 
-      const int64_t ts = now_unix();
+    const int64_t ts = now_unix ();
 
-      Stmt stmt(prepare(R"(
+    Stmt stmt (prepare (R"(
           INSERT INTO credential_grants
               (id, worker_id, provider, granted_at, granted_by)
           VALUES (?,?,?,?,?)
       )"));
-      if (!stmt.s)
-          return std::unexpected(Error{"prepare failed"});
+    if (!stmt.s)
+      return std::unexpected (Error{"prepare failed"});
 
-      sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, worker_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 3, provider.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64(stmt, 4, ts);
-      sqlite3_bind_text(stmt, 5, granted_by.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, provider.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 4, ts);
+    sqlite3_bind_text (stmt, 5, granted_by.c_str (), -1, SQLITE_TRANSIENT);
 
-      if (sqlite3_step(stmt) != SQLITE_DONE) {
-          spdlog::error("[database] insert_credential_grant: {}", sqlite3_errmsg(db_));
-          return std::unexpected(Error{"insert failed"});
-      }
-      return id;
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] insert_credential_grant: {}",
+                     sqlite3_errmsg (db_));
+      return std::unexpected (Error{"insert failed"});
+    }
+    return id;
   }
 
   std::optional<GrantRow>
-  Database::load_credential_grant(const std::string &worker_id,
-                                  const std::string &provider)
+  Database::load_credential_grant (const std::string &worker_id,
+                                   const std::string &provider)
   {
-      if (!db_)
-          return std::nullopt;
-      Stmt stmt(prepare(R"(
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
           SELECT id, worker_id, provider, suite_id, granted_at, granted_by
           FROM credential_grants WHERE worker_id=? AND provider=?
       )"));
-      if (!stmt.s)
-          return std::nullopt;
-
-      sqlite3_bind_text(stmt, 1, worker_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, provider.c_str(), -1, SQLITE_TRANSIENT);
-
-      if (sqlite3_step(stmt) == SQLITE_ROW)
-          return row_to_grant(stmt);
+    if (!stmt.s)
       return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, provider.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_grant (stmt);
+    return std::nullopt;
   }
 
-  bool Database::revoke_credential_grant(const std::string &grant_id)
+  bool Database::revoke_credential_grant (const std::string &grant_id)
   {
-      if (!db_)
-          return false;
-      Stmt stmt(prepare("DELETE FROM credential_grants WHERE id=?"));
-      if (!stmt.s)
-          return false;
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("DELETE FROM credential_grants WHERE id=?"));
+    if (!stmt.s)
+      return false;
 
-      sqlite3_bind_text(stmt, 1, grant_id.c_str(), -1, SQLITE_TRANSIENT);
-      if (sqlite3_step(stmt) != SQLITE_DONE) {
-          spdlog::error("[database] revoke_credential_grant: {}", sqlite3_errmsg(db_));
-          return false;
-      }
-      return true;
+    sqlite3_bind_text (stmt, 1, grant_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] revoke_credential_grant: {}",
+                     sqlite3_errmsg (db_));
+      return false;
+    }
+    int changes = sqlite3_changes (db_);
+    return changes > 0;
   }
 
   // ---------------------------------------------------------------------------
   //  audit
   // ---------------------------------------------------------------------------
 
-  void Database::insert_credential_audit(const CredentialAuditRow &row)
+  void Database::insert_credential_audit (const CredentialAuditRow &row)
   {
-      if (!db_)
-          return;
-      Stmt stmt(prepare(R"(
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
           INSERT INTO credential_audit
               (id, credential_id, user_id, worker_id, job_id, step_id, run_id,
                action, reason, timestamp)
           VALUES (?,?,?,?,?,?,?,?,?,?)
       )"));
-      if (!stmt.s)
-          return;
+    if (!stmt.s)
+      return;
 
-      sqlite3_bind_text(stmt, 1, row.id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, row.credential_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 3, row.user_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 4, row.worker_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 5, row.job_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 6, row.step_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 7, row.run_id.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 8, row.action.c_str(), -1, SQLITE_TRANSIENT);
-      bind_optional_text(stmt, 9, row.reason);
-      sqlite3_bind_int64(stmt, 10, row.timestamp ? row.timestamp : now_unix());
+    sqlite3_bind_text (stmt, 1, row.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, row.credential_id.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, row.user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, row.worker_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, row.job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 6, row.step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 7, row.run_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 8, row.action.c_str (), -1, SQLITE_TRANSIENT);
+    bind_optional_text (stmt, 9, row.reason);
+    sqlite3_bind_int64 (stmt, 10, row.timestamp ? row.timestamp : now_unix ());
 
-      if (sqlite3_step(stmt) != SQLITE_DONE)
-          spdlog::error("[database] insert_credential_audit: {}", sqlite3_errmsg(db_));
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_credential_audit: {}",
+                     sqlite3_errmsg (db_));
   }
 
   std::vector<CredentialAuditRow>
-  Database::load_credential_audit(const std::optional<std::string> &user_id,
-                                  const std::optional<std::string> &job_id,
-                                  const std::optional<std::string> &provider,
-                                  int limit)
+  Database::load_credential_audit (const std::optional<std::string> &user_id,
+                                   const std::optional<std::string> &job_id,
+                                   const std::optional<std::string> &provider,
+                                   int limit)
   {
-      std::vector<CredentialAuditRow> rows;
-      if (!db_)
-          return rows;
-
-      std::string where;
-      int bind_idx = 1;
-      if (user_id) where += " AND a.user_id = ?";
-      if (job_id)  where += " AND a.job_id = ?";
-      // provider filter uses EXISTS so audit rows survive credential revocation
-      if (provider) where += " AND EXISTS (SELECT 1 FROM credentials c WHERE c.id=a.credential_id AND c.provider=?)";
-
-      // No INNER JOIN: audit records must be queryable even after a credential
-      // is revoked (deleted from credentials table).
-      std::string sql = std::string(
-          "SELECT a.id, a.credential_id, a.user_id, a.worker_id, a.job_id, a.step_id, a.run_id, "
-          "a.action, a.reason, a.timestamp "
-          "FROM credential_audit a "
-          "WHERE 1=1") + where + " ORDER BY a.timestamp DESC LIMIT ?";
-
-      Stmt stmt(prepare(sql.c_str()));
-      if (!stmt.s)
-          return rows;
-
-      if (user_id)   sqlite3_bind_text(stmt, bind_idx++, user_id->c_str(), -1, SQLITE_TRANSIENT);
-      if (job_id)    sqlite3_bind_text(stmt, bind_idx++, job_id->c_str(), -1, SQLITE_TRANSIENT);
-      if (provider)  sqlite3_bind_text(stmt, bind_idx++, provider->c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int(stmt, bind_idx++, limit);
-
-      while (sqlite3_step(stmt) == SQLITE_ROW)
-          rows.push_back(row_to_audit(stmt));
+    std::vector<CredentialAuditRow> rows;
+    if (!db_)
       return rows;
+
+    std::string where;
+    int bind_idx = 1;
+    if (user_id)
+      where += " AND a.user_id = ?";
+    if (job_id)
+      where += " AND a.job_id = ?";
+    // provider filter uses EXISTS so audit rows survive credential revocation
+    if (provider)
+      where += " AND EXISTS (SELECT 1 FROM credentials c WHERE "
+               "c.id=a.credential_id AND c.provider=?)";
+
+    // No INNER JOIN: audit records must be queryable even after a credential
+    // is revoked (deleted from credentials table).
+    std::string sql
+      = std::string ("SELECT a.id, a.credential_id, a.user_id, a.worker_id, "
+                     "a.job_id, a.step_id, a.run_id, "
+                     "a.action, a.reason, a.timestamp "
+                     "FROM credential_audit a "
+                     "WHERE 1=1")
+        + where + " ORDER BY a.timestamp DESC LIMIT ?";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return rows;
+
+    if (user_id)
+      sqlite3_bind_text (stmt, bind_idx++, user_id->c_str (), -1,
+                         SQLITE_TRANSIENT);
+    if (job_id)
+      sqlite3_bind_text (stmt, bind_idx++, job_id->c_str (), -1,
+                         SQLITE_TRANSIENT);
+    if (provider)
+      sqlite3_bind_text (stmt, bind_idx++, provider->c_str (), -1,
+                         SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, bind_idx++, limit);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      rows.push_back (row_to_audit (stmt));
+    return rows;
   }
 
 } // namespace agentos

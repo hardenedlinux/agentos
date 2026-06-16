@@ -19,13 +19,14 @@
  * agentos/central.cpp
  *
  * ADR-024: Central — actor container, startup/shutdown, callback injection.
+ * ADR-028: CredVault started after forge_coordinator, before orchestrator.
  *
  * Startup order:
- *   db → llm_proxy → registry → forge_coordinator → orchestrator →
- *   master → periodic → gateway
+ *   db → llm_proxy → registry → forge_coordinator → cred_vault →
+ *   orchestrator → master → periodic → gateway
  *
  * Shutdown order (reverse):
- *   gateway → periodic → master → orchestrator →
+ *   gateway → periodic → master → orchestrator → cred_vault →
  *   forge_coordinator → llm_proxy → db
  */
 
@@ -38,6 +39,7 @@
 #include <zmq.hpp>
 
 #include <csignal>
+#include <sys/prctl.h>
 
 namespace agentos
 {
@@ -62,6 +64,9 @@ Central::Central (const Config &config)
                             send_to_orchestrator (
                               make_forge_complete_event (result));
                           }),
+      // ADR-028: CredVault is a shared service, not an Actor.
+      // Constructed here so it can be passed by reference to Orchestrator.
+      cred_vault_ (db_, config_.vault),
       gateway_ (zmq_ctx_,
                 // forward_fn: Gateway → Orchestrator
                 [this] (GatewayInbound msg)
@@ -73,6 +78,7 @@ Central::Central (const Config &config)
                 }),
       orchestrator_ (db_, llm_proxy_, registry_, dispatcher_,
                      forge_coordinator_, config_,
+                     cred_vault_,
                      // send_to_master
                      [this] (MasterEvent msg) { send_to_master (std::move (msg)); },
                      // send_to_gateway
@@ -121,18 +127,32 @@ void Central::run ()
   // 4. Bind gateway_push_ PUSH socket.
   gateway_push_sock_.bind ("inproc://gateway-out-push");
 
-  // 5. Init and start Orchestrator.
+  // 5. ADR-028: disable core dumps to protect vault key in memory.
+  if (prctl (PR_SET_DUMPABLE, 0) != 0)
+    spdlog::warn ("[central] prctl(PR_SET_DUMPABLE, 0) failed — core dumps may expose vault key");
+
+  // 6. ADR-028: start CredVault (unseals vault key into SecureEnclave page).
+  {
+    auto vault_result = cred_vault_.start ();
+    if (!vault_result)
+      {
+        spdlog::critical ("[central] cred_vault start failed: {}", vault_result.error ());
+        return;
+      }
+  }
+
+  // 7. Init and start Orchestrator.
   orchestrator_.init ();
   orchestrator_.start ();
 
-  // 6. Start Master.
+  // 8. Start Master.
   master_.start ();
 
-  // 7. Init and start PeriodicExecutor.
+  // 9. Init and start PeriodicExecutor.
   periodic_.init ();
   periodic_.start ();
 
-  // 8. Start Gateway last — external interface opens only when ready.
+  // 10. Start Gateway last — external interface opens only when ready.
   gateway_.start ();
 
   spdlog::info ("[central] all actors started");
@@ -161,6 +181,11 @@ void Central::stop_all ()
   periodic_.stop ();
   master_.stop ();
   orchestrator_.stop ();
+
+  // ADR-028: stop vault refresh thread, then wipe the enclave page.
+  cred_vault_.stop ();
+  cred_vault_.clear ();
+
   forge_coordinator_.stop ();
   // LlmProxy worker threads are joined in its destructor (ADR-017).
   db_.close ();

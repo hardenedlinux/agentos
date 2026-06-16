@@ -9,18 +9,19 @@
  * Actors do not hold a reference to Central.
  *
  * Startup order:
- *   db → llm_proxy → registry → forge_coordinator → orchestrator →
- *   master → periodic → gateway
+ *   db → llm_proxy → registry → forge_coordinator → cred_vault →
+ *   orchestrator → master → periodic → gateway
  *
  * Shutdown order (reverse):
- *   gateway → periodic → master → orchestrator →
+ *   gateway → periodic → master → orchestrator → cred_vault →
  *   forge_coordinator → llm_proxy → db
  */
 
 #include "agentos/config.h"
+#include "agentos/cred_vault.h"
 #include "agentos/database.h"
 #include "agentos/dispatcher.h"
-#include "agentos/forge/forge_coordinator.h"
+#include "agentos/forge_coordinator.h"
 #include "agentos/gateway.h"
 #include "agentos/llm_client.h"
 #include "agentos/llm_proxy.h"
@@ -96,6 +97,10 @@ private:
   // ---------------------------------------------------------------------------
   Dispatcher              dispatcher_;
   forge::ForgeCoordinator forge_coordinator_;
+
+  // ADR-028: Credential vault — constructed after forge_coordinator_,
+  // before orchestrator_ so Orchestrator can hold a reference to it.
+  CredVault cred_vault_;
 
   // ---------------------------------------------------------------------------
   // Actors

@@ -35,9 +35,10 @@
 #include <gtest/gtest.h>
 
 #include "agentos/central.h" // for Config (avoids guessing config.h path)
+#include "agentos/cred_vault.h"
 #include "agentos/database.h"
 #include "agentos/dispatcher.h"
-#include "agentos/forge/forge_coordinator.h"
+#include "agentos/forge_coordinator.h"
 #include "agentos/home_init.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/orchestrator.h"
@@ -93,6 +94,7 @@ protected:
   Dispatcher dispatcher_;
   std::unique_ptr<forge::ForgeCoordinator> forge_;
   Config config_;
+  std::unique_ptr<CredVault> cred_vault_;
   std::unique_ptr<Orchestrator> orch_;
 
   // Captured outputs from mock callbacks.
@@ -120,8 +122,13 @@ protected:
       *db_, *llm_, *registry_,
       [] (forge::ForgeResult) { /* unused in these tests */ });
 
+    Config::Vault vault_cfg{};
+    cred_vault_ = std::make_unique<CredVault> (*db_, vault_cfg);
+    auto r = cred_vault_->start ();
+    ASSERT_TRUE (r.has_value ()) << r.error ();
+
     orch_ = std::make_unique<Orchestrator> (
-      *db_, *llm_, *registry_, dispatcher_, *forge_, config_,
+      *db_, *llm_, *registry_, dispatcher_, *forge_, config_, *cred_vault_,
       [this] (MasterEvent ev)
       {
         std::lock_guard<std::mutex> lk (mtx_);
@@ -143,6 +150,8 @@ protected:
   {
     orch_->stop ();
     forge_->stop ();
+    if (cred_vault_)
+      cred_vault_->stop ();
     db_->close ();
     unsetenv ("AGENTOS_HOME");
     fs::remove_all (home_);
@@ -389,7 +398,7 @@ TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
   orch_->stop ();
   registry_ = std::make_unique<Registry> (*db_);
   orch_ = std::make_unique<Orchestrator> (
-    *db_, *llm_, *registry_, dispatcher_, *forge_, config_,
+    *db_, *llm_, *registry_, dispatcher_, *forge_, config_, *cred_vault_,
     [this] (MasterEvent ev)
     {
       std::lock_guard<std::mutex> lk (mtx_);

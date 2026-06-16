@@ -26,9 +26,10 @@
 #include "agentos/config.h"
 #include "agentos/database.h"
 #include "agentos/dispatcher.h"
-#include "agentos/forge/forge_coordinator.h"
+#include "agentos/forge_coordinator.h"
 #include "agentos/llm_proxy.h"
 #include "agentos/registry.h"
+#include "agentos/cred_vault.h"
 #include "agentos/types.h"
 
 #include <functional>
@@ -77,6 +78,7 @@ public:
                 Dispatcher                  &dispatcher,
                 forge::ForgeCoordinator     &forge,
                 const Config                &config,
+                CredVault                   &cred_vault,
                 SendToMaster                 send_to_master,
                 SendToGateway                send_to_gateway);
 
@@ -165,6 +167,29 @@ private:
                              const std::string &identity,
                              const std::string &request_id);
 
+  // --- ADR-028: cred.* methods ---
+  void cmd_cred_submit      (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_cred_revoke      (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_cred_grant       (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_cred_revoke_grant(const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_cred_list        (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_cred_audit       (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+  void cmd_vault_rekey      (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+
   // ---------------------------------------------------------------------------
   // Pipeline execution
   // ---------------------------------------------------------------------------
@@ -217,6 +242,7 @@ private:
   Dispatcher              &dispatcher_;
   forge::ForgeCoordinator &forge_;
   const Config            &config_;
+  CredVault               &cred_vault_;
   SendToMaster             send_to_master_;
   SendToGateway            send_to_gateway_;
 

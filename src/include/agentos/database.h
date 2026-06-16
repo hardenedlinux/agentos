@@ -30,6 +30,9 @@ namespace agentos
 
   namespace fs = std::filesystem;
 
+  // forward declaration for ADR‑028
+  struct CipherBlob;
+
   // String constants — avoids raw literals scattered across the codebase.
   // Use these wherever a status/phase string is written or compared.
   namespace db
@@ -280,6 +283,59 @@ namespace agentos
     void disable_timer_task (const std::string &id);
     bool timer_task_exists (const std::string &id);
     std::vector<TimerTask> load_enabled_timer_tasks ();
+
+    // -- Credential storage (ADR-028) -----------------------------------------
+
+    /// Store a credential. Returns the credential id on success.
+    std::expected<std::string, Error>
+    insert_credential(const std::string &user_id,
+                      const std::string &provider,
+                      const CipherBlob &token_blob,
+                      const std::optional<CipherBlob> &refresh_blob,
+                      std::optional<int64_t> expires_at);
+
+    /// Load a credential by (user_id, provider).
+    std::optional<CredentialRow> load_credential(const std::string &user_id,
+                                                 const std::string &provider);
+
+    /// Update the token ciphertext and (optional) expiry for a credential.
+    bool update_credential_token(const std::string &id,
+                                 const CipherBlob &blob,
+                                 std::optional<int64_t> expires_at);
+
+    /// Permanently remove a credential.
+    bool revoke_credential(const std::string &user_id,
+                           const std::string &provider);
+
+    /// Return credentials whose expires_at < threshold_unix.
+    std::vector<CredentialRow> load_expiring_credentials(int64_t threshold_unix);
+
+    // -- Credential grants (ADR-028) -----------------------------------------
+
+    /// Create a grant for a worker to use a provider. Returns grant id.
+    std::expected<std::string, Error>
+    insert_credential_grant(const std::string &worker_id,
+                            const std::string &provider,
+                            const std::string &granted_by);
+
+    /// Load a grant by worker and provider.
+    std::optional<GrantRow> load_credential_grant(const std::string &worker_id,
+                                                  const std::string &provider);
+
+    /// Revoke a grant (delete from DB).
+    bool revoke_credential_grant(const std::string &grant_id);
+
+    // -- Credential audit (ADR-028) -----------------------------------------
+
+    /// Insert an audit row.
+    void insert_credential_audit(const CredentialAuditRow &row);
+
+    /// Load audit rows, optionally filtered by user/job/provider, limited.
+    std::vector<CredentialAuditRow>
+    load_credential_audit(const std::optional<std::string> &user_id,
+                          const std::optional<std::string> &job_id,
+                          const std::optional<std::string> &provider,
+                          int limit);
 
   private:
     // -- Internal helpers -----------------------------------------------------

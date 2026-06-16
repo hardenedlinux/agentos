@@ -376,4 +376,45 @@ namespace agentos
     int worker_attempt = 0;
   };
 
+  // ADR-028 Credential types ------------------------------------------------
+
+  struct CredentialRow
+  {
+    std::string id;
+    std::string user_id;
+    std::string provider;
+    std::vector<uint8_t> ciphertext;
+    std::vector<uint8_t> nonce;
+    std::optional<std::vector<uint8_t>> refresh_ciphertext;
+    std::optional<std::vector<uint8_t>> refresh_nonce;
+    std::optional<int64_t> expires_at;
+    std::optional<int64_t> refresh_expires_at;
+    int64_t created_at = 0;
+    int64_t updated_at = 0;
+  };
+
+  struct GrantRow
+  {
+    std::string id;
+    std::string worker_id;
+    std::string provider;
+    std::optional<std::string> suite_id;
+    int64_t granted_at = 0;
+    std::string granted_by;
+  };
+
+  struct CredentialAuditRow
+  {
+    std::string id;
+    std::string credential_id;
+    std::string user_id;
+    std::string worker_id;
+    std::string job_id;
+    std::string step_id;
+    std::string run_id;
+    std::string action;               // injected|denied|refreshed|submitted|revoked|refresh_failed
+    std::optional<std::string> reason;
+    int64_t timestamp = 0;
+  };
+
 } // namespace agentos

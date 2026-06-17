@@ -354,6 +354,25 @@ namespace agentos
                            const std::optional<std::string> &provider,
                            int limit);
 
+    // ADR-030 Suite purchase / status / agent ref lookup
+
+    void insert_suite_purchase (const SuitePurchase &p);
+    std::optional<SuitePurchase> load_suite_purchase (const std::string &suite_id,
+                                                      const std::string &version);
+    void remove_suite_purchase (const std::string &suite_id,
+                                const std::string &version);
+    void remove_suite_purchase (const std::string &suite_id);
+
+    void upsert_suite_status (const SuiteStatus &s);
+    std::optional<SuiteStatus> load_suite_status (const std::string &suite_id);
+    void update_suite_availability (const std::string &suite_id, bool available,
+                                    int64_t checked_at);
+    void remove_suite_status (const std::string &suite_id);
+    std::vector<SuiteStatus> load_all_suite_status ();
+
+    std::optional<std::string> resolve_agent_binary (const std::string &ref,
+                                                     const std::string &version = "");
+
     /// Failure modes for with_transaction.
     enum class DbTxError
     {

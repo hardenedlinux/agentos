@@ -19,6 +19,7 @@
 #include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
 #include "agentos/secure_enclave.h"
+#include "agentos/time_utils.h"
 
 #include <chrono>
 #include <cstring>
@@ -57,13 +58,6 @@ namespace agentos
   // Static helpers
   // ---------------------------------------------------------------------------
 
-  static int64_t now_unix ()
-  {
-    return static_cast<int64_t> (
-      std::chrono::duration_cast<std::chrono::seconds> (
-        std::chrono::system_clock::now ().time_since_epoch ())
-        .count ());
-  }
 
   static std::string generate_uuid ()
   {
@@ -258,6 +252,34 @@ namespace agentos
     );
   )";
     if (!exec_ddl (schema))
+      return false;
+
+    static const char *schema_suites = R"(
+      CREATE TABLE IF NOT EXISTS agents (
+          ref           TEXT NOT NULL,
+          version       TEXT NOT NULL,
+          role          TEXT NOT NULL,
+          binary_path   TEXT NOT NULL,
+          enabled       INTEGER NOT NULL DEFAULT 1,
+          registered_at INTEGER NOT NULL,
+          PRIMARY KEY (ref, version)
+      );
+      CREATE TABLE IF NOT EXISTS suite_purchases (
+          suite_id         TEXT NOT NULL,
+          version          TEXT NOT NULL,
+          subscription_key TEXT NOT NULL,
+          purchased_at     INTEGER NOT NULL,
+          expires_at       INTEGER,
+          PRIMARY KEY (suite_id, version)
+      );
+      CREATE TABLE IF NOT EXISTS suite_status (
+          suite_id    TEXT PRIMARY KEY,
+          version     TEXT NOT NULL,
+          available   INTEGER NOT NULL DEFAULT 1,
+          checked_at  INTEGER NOT NULL
+      );
+    )";
+    if (!exec_ddl (schema_suites))
       return false;
 
     // ADR-029: users table & profile view
@@ -2574,6 +2596,212 @@ namespace agentos
     while (sqlite3_step (stmt) == SQLITE_ROW)
       rows.push_back (row_to_audit (stmt));
     return rows;
+  }
+
+  // ========================================================================
+  //  Suite purchase (ADR-030)
+  // ========================================================================
+
+  static SuitePurchase row_to_suite_purchase (sqlite3_stmt *stmt)
+  {
+    SuitePurchase p;
+    p.suite_id = column_text_or_empty (stmt, 0);
+    p.version = column_text_or_empty (stmt, 1);
+    p.subscription_key = column_text_or_empty (stmt, 2);
+    p.purchased_at = sqlite3_column_int64 (stmt, 3);
+    p.expires_at = column_int64_opt (stmt, 4);
+    return p;
+  }
+
+  void Database::insert_suite_purchase (const SuitePurchase &p)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO suite_purchases
+          (suite_id, version, subscription_key, purchased_at, expires_at)
+      VALUES (?,?,?,?,?)
+    )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, p.suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, p.version.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, p.subscription_key.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 4, p.purchased_at);
+    bind_optional_int64 (stmt, 5, p.expires_at);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_suite_purchase: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::optional<SuitePurchase>
+  Database::load_suite_purchase (const std::string &suite_id,
+                                 const std::string &version)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, version, subscription_key, purchased_at, expires_at
+      FROM suite_purchases WHERE suite_id=? AND version=?
+    )"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, version.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_suite_purchase (stmt);
+    return std::nullopt;
+  }
+
+  void Database::remove_suite_purchase (const std::string &suite_id,
+                                        const std::string &version)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      DELETE FROM suite_purchases WHERE suite_id=? AND version=?
+    )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, version.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] remove_suite_purchase: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::remove_suite_purchase (const std::string &suite_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("DELETE FROM suite_purchases WHERE suite_id=?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] remove_suite_purchase (suite): {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  static SuiteStatus row_to_suite_status (sqlite3_stmt *stmt)
+  {
+    SuiteStatus s;
+    s.suite_id = column_text_or_empty (stmt, 0);
+    s.version = column_text_or_empty (stmt, 1);
+    s.available = sqlite3_column_int (stmt, 2) != 0;
+    s.checked_at = sqlite3_column_int64 (stmt, 3);
+    return s;
+  }
+
+  void Database::upsert_suite_status (const SuiteStatus &s)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO suite_status (suite_id, version, available, checked_at)
+      VALUES (?,?,?,?)
+    )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, s.suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, s.version.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 3, s.available ? 1 : 0);
+    sqlite3_bind_int64 (stmt, 4, s.checked_at);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] upsert_suite_status: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::optional<SuiteStatus>
+  Database::load_suite_status (const std::string &suite_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, version, available, checked_at
+      FROM suite_status WHERE suite_id=?
+    )"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_suite_status (stmt);
+    return std::nullopt;
+  }
+
+  void Database::update_suite_availability (const std::string &suite_id,
+                                            bool available,
+                                            int64_t checked_at)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      UPDATE suite_status SET available=?, checked_at=? WHERE suite_id=?
+    )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, available ? 1 : 0);
+    sqlite3_bind_int64 (stmt, 2, checked_at);
+    sqlite3_bind_text (stmt, 3, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_suite_availability: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::remove_suite_status (const std::string &suite_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("DELETE FROM suite_status WHERE suite_id=?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] remove_suite_status: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::vector<SuiteStatus> Database::load_all_suite_status ()
+  {
+    std::vector<SuiteStatus> v;
+    if (!db_)
+      return v;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, version, available, checked_at FROM suite_status
+    )"));
+    if (!stmt.s)
+      return v;
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      v.push_back (row_to_suite_status (stmt));
+    return v;
+  }
+
+  std::optional<std::string>
+  Database::resolve_agent_binary (const std::string &ref,
+                                  const std::string &version)
+  {
+    if (!db_)
+      return std::nullopt;
+    std::string sql;
+    if (version.empty ())
+    {
+      sql = "SELECT binary_path FROM agents WHERE ref=? AND enabled=1 "
+            "ORDER BY registered_at DESC LIMIT 1";
+    }
+    else
+    {
+      sql = "SELECT binary_path FROM agents WHERE ref=? AND version=? "
+            "AND enabled=1";
+    }
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, ref.c_str (), -1, SQLITE_TRANSIENT);
+    if (!version.empty ())
+      sqlite3_bind_text (stmt, 2, version.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return column_text_or_empty (stmt, 0);
+    return std::nullopt;
   }
 
 } // namespace agentos

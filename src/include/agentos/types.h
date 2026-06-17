@@ -417,4 +417,25 @@ namespace agentos
     int64_t timestamp = 0;
   };
 
+  // ADR-030 Suite types
+  struct SuitePurchase {
+      std::string suite_id;
+      std::string version;
+      std::string subscription_key;
+      int64_t purchased_at = 0;
+      std::optional<int64_t> expires_at;
+  };
+
+  struct SuiteStatus {
+      std::string suite_id;
+      std::string version;
+      bool available = true;
+      int64_t checked_at = 0;
+  };
+
+  namespace suite_error {
+  inline constexpr int suite_unavailable = -32040;
+  inline constexpr int capability_unavailable = -32041;
+  }
+
 } // namespace agentos

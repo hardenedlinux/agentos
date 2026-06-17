@@ -11,7 +11,6 @@ int vault_status(int /*argc*/, char ** /*argv*/)
     auto home = agentos_home();
     auto vault_dir = home / "vault";
     bool sealed = std::filesystem::exists(vault_dir / "vault.sealed");
-    bool tpm_state = std::filesystem::exists(vault_dir / "tpm.state");
 
     std::cout << "Vault tier: community\n"
               << "Backend:    software TPM\n"

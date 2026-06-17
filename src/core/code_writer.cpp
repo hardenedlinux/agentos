@@ -136,8 +136,6 @@ namespace agentos::forge
     const char *api_key_env = std::getenv ("AGENTOS_ADVISER_API_KEY");
     const char *model_env = std::getenv ("AGENTOS_ADVISER_MODEL");
     const char *max_tokens_env = std::getenv ("AGENTOS_ADVISER_MAX_TOKENS");
-    const char *timeout_env = std::getenv ("AGENTOS_ADVISER_TIMEOUT_S");
-
     if (!api_key_env || std::strlen (api_key_env) == 0)
       return make_error ("LLM API key not set (AGENTOS_ADVISER_API_KEY)");
 
@@ -146,7 +144,6 @@ namespace agentos::forge
     const std::string api_key = api_key_env;
     const std::string model = model_env ? model_env : "claude-opus-4-5";
     const int max_tokens = max_tokens_env ? std::atoi (max_tokens_env) : 2048;
-    const int llm_timeout = timeout_env ? std::atoi (timeout_env) : 120;
 
     const bool is_anthropic
       = base_url.find ("anthropic.com") != std::string::npos;

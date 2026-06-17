@@ -22,6 +22,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <string>
 #include <vector>
@@ -157,7 +158,8 @@ namespace agentos
 
     void store_job (const Task &task);
     void update_job_phase (const TaskId &id, const std::string &phase);
-    void update_job_user (const std::string &job_id, const std::string &user_id);
+    void update_job_user (const std::string &job_id,
+                          const std::string &user_id);
     void update_job_plan (const TaskId &id, const std::string &plan_json);
     std::string load_plan_json (const TaskId &job_id);
     std::vector<InFlightJob> resume_in_flight ();
@@ -287,10 +289,11 @@ namespace agentos
     /// Store a credential. Returns the credential id on success.
     /// On insert, caller_id is used as the row id so that the HKDF info string
     /// used for encryption always matches the id stored in the DB.
-    /// On update (row already exists), the existing id is preserved and returned.
+    /// On update (row already exists), the existing id is preserved and
+    /// returned.
     std::expected<std::string, Error>
-    insert_credential (const std::string &caller_id,
-                       const std::string &user_id, const std::string &provider,
+    insert_credential (const std::string &caller_id, const std::string &user_id,
+                       const std::string &provider,
                        const CipherBlob &token_blob,
                        const std::optional<CipherBlob> &refresh_blob,
                        std::optional<int64_t> expires_at);
@@ -300,7 +303,8 @@ namespace agentos
                                                   const std::string &provider);
 
     /// Load all credentials for a given user.
-    std::vector<CredentialRow> load_credentials_by_user (const std::string &user_id);
+    std::vector<CredentialRow>
+    load_credentials_by_user (const std::string &user_id);
 
     /// Load all credentials (used for rekey).
     std::vector<CredentialRow> load_all_credentials ();
@@ -350,24 +354,60 @@ namespace agentos
                            const std::optional<std::string> &provider,
                            int limit);
 
-    /// Execute fn inside a BEGIN/COMMIT (or ROLLBACK on failure).
-    template <typename Fn>
-    bool with_transaction(Fn &&fn)
+    /// Failure modes for with_transaction.
+    enum class DbTxError
     {
-        if (!exec_ddl("BEGIN"))
-            return false;
-        bool ok = false;
-        try {
-            ok = fn();
-        } catch (...) {
-            exec_ddl("ROLLBACK");
-            return false;
+      BeginFailed,       ///< BEGIN failed; no state changed.
+      TransactionFailed, ///< fn() returned false; ROLLBACK succeeded.
+      Exception,         ///< fn() threw; ROLLBACK succeeded.
+      CommitFailed,      ///< COMMIT failed; data state unknown — do not retry
+                         ///< blindly.
+      RollbackFailed,    ///< ROLLBACK failed; connection state suspect.
+    };
+
+    /// Execute fn inside a BEGIN/COMMIT (or ROLLBACK on failure).
+    /// Returns std::unexpected(DbTxError) on any failure so callers can
+    /// distinguish COMMIT failures (unknown state) from ordinary fn failures.
+    template <typename Fn>
+    std::expected<void, DbTxError> with_transaction (Fn &&fn)
+    {
+      if (!exec_ddl ("BEGIN"))
+        return std::unexpected (DbTxError::BeginFailed);
+
+      bool ok = false;
+      try
+      {
+        ok = fn ();
+      }
+      catch (...)
+      {
+        if (!exec_ddl ("ROLLBACK"))
+        {
+          spdlog::error ("[database] ROLLBACK failed after exception — "
+                         "connection untrusted");
+          return std::unexpected (DbTxError::RollbackFailed);
         }
-        if (!ok) {
-            exec_ddl("ROLLBACK");
-            return false;
+        return std::unexpected (DbTxError::Exception);
+      }
+
+      if (!ok)
+      {
+        if (!exec_ddl ("ROLLBACK"))
+        {
+          spdlog::error ("[database] ROLLBACK failed after fn failure — "
+                         "connection untrusted");
+          return std::unexpected (DbTxError::RollbackFailed);
         }
-        return exec_ddl("COMMIT");
+        return std::unexpected (DbTxError::TransactionFailed);
+      }
+
+      if (!exec_ddl ("COMMIT"))
+      {
+        spdlog::error ("[database] COMMIT failed — data state unknown, do not "
+                       "retry blindly");
+        return std::unexpected (DbTxError::CommitFailed);
+      }
+      return {};
     }
 
   private:

@@ -497,7 +497,7 @@ namespace agentos
     new_enclave.seal (kg.key.data (), kg.key.size ());
 
     // 4. Re-encrypt all credentials under the new key in a single transaction.
-    bool ok = db_.with_transaction ([&] () -> bool {
+    auto tx_result = db_.with_transaction ([&] () -> bool {
       for (auto &e : entries)
       {
         auto token_blob = new_enclave.encrypt (e.token_plain, e.id);
@@ -534,10 +534,27 @@ namespace agentos
     // Zero plaintexts now — regardless of outcome.
     entries.clear ();
 
-    if (!ok)
+    if (!tx_result)
     {
-      spdlog::error ("[cred_vault] rekey: transaction failed — vault key on "
-                     "disk may not match DB");
+      switch (tx_result.error ())
+      {
+      case Database::DbTxError::CommitFailed:
+        // Data may or may not be on disk. Vault key on disk already rotated.
+        // Operator must reconcile manually before retrying.
+        spdlog::error ("[cred_vault] rekey: COMMIT failed — vault key on disk "
+                       "may not match DB; manual reconciliation required");
+        break;
+      case Database::DbTxError::RollbackFailed:
+        // DB connection is in an unknown state. Single-connection singleton
+        // means the whole Database instance is suspect until restarted.
+        spdlog::error ("[cred_vault] rekey: ROLLBACK failed — DB connection "
+                       "suspect; restart required");
+        break;
+      default:
+        spdlog::error ("[cred_vault] rekey: transaction failed — vault key on "
+                       "disk may not match DB");
+        break;
+      }
       return std::unexpected (Error{"rekey transaction failed"});
     }
 

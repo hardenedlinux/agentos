@@ -26,6 +26,7 @@
 #include "agentos/orchestrator.h"
 #include "agentos/cred_vault.h"
 #include "agentos/home_init.h"
+#include "agentos/user_manager.h"
 #include "agentos/uuid.h"
 
 #include <rapidjson/document.h>
@@ -141,11 +142,23 @@ namespace agentos
       if (role == "operator")
       {
         static const std::unordered_set<std::string> operator_methods = {
-          "job.submit",     "job.status",    "job.list",    "job.cancel",
-          "worker.list",    "adviser.list",  "review.list", "review.show",
-          "review.approve", "review.reject", "forge.list",  "forge.status",
+          "job.submit",
+          "job.status",
+          "job.list",
+          "job.cancel",
+          "worker.list",
+          "adviser.list",
+          "review.list",
+          "review.show",
+          "review.approve",
+          "review.reject",
+          "forge.list",
+          "forge.status",
           // ADR-028: operators can manage credentials
-          "cred.submit",    "cred.revoke",   "cred.list",   "cred.audit",
+          "cred.submit",
+          "cred.revoke",
+          "cred.list",
+          "cred.audit",
         };
         return operator_methods.count (method) > 0;
       }
@@ -169,14 +182,13 @@ namespace agentos
   Orchestrator::Orchestrator (Database &db, LlmProxy &llm, Registry &registry,
                               Dispatcher &dispatcher,
                               forge::ForgeCoordinator &forge,
-                              const Config &config,
-                              CredVault &cred_vault,
+                              const Config &config, CredVault &cred_vault,
                               SendToMaster send_to_master,
                               SendToGateway send_to_gateway)
     : db_ (db), llm_ (llm), registry_ (registry), dispatcher_ (dispatcher),
       forge_ (forge), config_ (config), cred_vault_ (cred_vault),
       send_to_master_ (std::move (send_to_master)),
-      send_to_gateway_ (std::move (send_to_gateway))
+      send_to_gateway_ (std::move (send_to_gateway)), user_manager_ (db)
   {
   }
 
@@ -266,6 +278,11 @@ namespace agentos
       });
 
     spdlog::info ("[orchestrator] initialised");
+
+    // ADR-029: seed default user_id="0" for single-user CLI deployments.
+    if (auto res = user_manager_.register_user ("0"); !res)
+      spdlog::warn ("[orchestrator] failed to seed default user: {}",
+                    res.error ());
   }
 
   // ---------------------------------------------------------------------------
@@ -433,6 +450,17 @@ namespace agentos
       cmd_cred_audit (params_json, identity, request_id);
     else if (method == "vault.rekey")
       cmd_vault_rekey (params_json, identity, request_id);
+    // --- ADR-029: user management methods (admin only) ---
+    else if (method == "user.register")
+      cmd_user_register (params_json, identity, request_id);
+    else if (method == "user.list")
+      cmd_user_list (params_json, identity, request_id);
+    else if (method == "user.enable")
+      cmd_user_enable (params_json, identity, request_id);
+    else if (method == "user.disable")
+      cmd_user_disable (params_json, identity, request_id);
+    else if (method == "user.profile")
+      cmd_user_profile (params_json, identity, request_id);
     else
       reply_error (identity, request_id, -32601, "Method not found");
   }
@@ -454,6 +482,25 @@ namespace agentos
       return;
     }
 
+    // ADR-029: user_id defaults to "0" when absent (CLI single-user mode).
+    // An explicitly empty string is an error.
+    std::string user_id = "0";
+    if (params.HasMember ("user_id") && params["user_id"].IsString ())
+      user_id = params["user_id"].GetString ();
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: user_id must not be empty");
+      return;
+    }
+
+    // Validate user — absent and disabled both return -32020 (ADR-029).
+    if (auto v = user_manager_.validate_user (user_id); !v)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
     const std::string goal = params["goal"].GetString ();
     const std::string type
       = (params.HasMember ("type") && params["type"].IsString ())
@@ -469,8 +516,11 @@ namespace agentos
     db_.store_job (task);
     db_.update_job_phase (TaskId (job_id), "planning");
 
-    spdlog::info ("[orchestrator] job.submit job_id={} goal='{}'", job_id,
-                  goal);
+    // ADR-029: persist user_id on the job row.
+    db_.update_job_user (job_id, user_id);
+
+    spdlog::info ("[orchestrator] job.submit job_id={} user_id={} goal='{}'",
+                  job_id, user_id, goal);
 
     // Reply immediately — job runs asynchronously.
     reply_ok (identity, request_id, R"({"job_id":")" + job_id + R"("})");
@@ -1056,19 +1106,21 @@ namespace agentos
       return;
     }
 
-    std::string user_id  = params["user_id"].GetString ();
+    std::string user_id = params["user_id"].GetString ();
     std::string provider = params["provider"].GetString ();
-    std::string token    = params["token"].GetString ();
+    std::string token = params["token"].GetString ();
 
     std::optional<std::string> refresh;
-    if (params.HasMember ("refresh_token") && params["refresh_token"].IsString ())
+    if (params.HasMember ("refresh_token")
+        && params["refresh_token"].IsString ())
       refresh = params["refresh_token"].GetString ();
 
     std::optional<int64_t> expires;
     if (params.HasMember ("expires_at") && params["expires_at"].IsInt64 ())
       expires = params["expires_at"].GetInt64 ();
 
-    auto result = cred_vault_.submit (user_id, provider, token, refresh, expires);
+    auto result
+      = cred_vault_.submit (user_id, provider, token, refresh, expires);
     if (!result)
     {
       reply_error (identity, request_id, -32030, "cred.submit failed");
@@ -1108,9 +1160,9 @@ namespace agentos
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    auto res = cred_vault_.grant (params["worker_id"].GetString (),
-                                  params["provider"].GetString (),
-                                  "admin"); // granted_by: use actual key id in production
+    auto res = cred_vault_.grant (
+      params["worker_id"].GetString (), params["provider"].GetString (),
+      "admin"); // granted_by: use actual key id in production
     if (!res)
     {
       reply_error (identity, request_id, -32030, res.error ());
@@ -1152,14 +1204,22 @@ namespace agentos
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
     w.StartObject ();
-    w.Key ("credentials"); w.StartArray ();
+    w.Key ("credentials");
+    w.StartArray ();
     for (const auto &c : list)
     {
       w.StartObject ();
-      w.Key ("id");         w.String (c.id.c_str ());
-      w.Key ("provider");   w.String (c.provider.c_str ());
-      if (c.expires_at) { w.Key ("expires_at"); w.Int64 (*c.expires_at); }
-      w.Key ("updated_at"); w.Int64 (c.updated_at);
+      w.Key ("id");
+      w.String (c.id.c_str ());
+      w.Key ("provider");
+      w.String (c.provider.c_str ());
+      if (c.expires_at)
+      {
+        w.Key ("expires_at");
+        w.Int64 (*c.expires_at);
+      }
+      w.Key ("updated_at");
+      w.Int64 (c.updated_at);
       w.EndObject ();
     }
     w.EndArray ();
@@ -1193,20 +1253,34 @@ namespace agentos
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
     w.StartObject ();
-    w.Key ("entries"); w.StartArray ();
+    w.Key ("entries");
+    w.StartArray ();
     for (const auto &e : entries)
     {
       w.StartObject ();
-      w.Key ("id");            w.String (e.id.c_str ());
-      w.Key ("credential_id"); w.String (e.credential_id.c_str ());
-      w.Key ("user_id");       w.String (e.user_id.c_str ());
-      w.Key ("worker_id");     w.String (e.worker_id.c_str ());
-      w.Key ("job_id");        w.String (e.job_id.c_str ());
-      w.Key ("step_id");       w.String (e.step_id.c_str ());
-      w.Key ("run_id");        w.String (e.run_id.c_str ());
-      w.Key ("action");        w.String (e.action.c_str ());
-      if (e.reason) { w.Key ("reason"); w.String (e.reason->c_str ()); }
-      w.Key ("timestamp");     w.Int64 (e.timestamp);
+      w.Key ("id");
+      w.String (e.id.c_str ());
+      w.Key ("credential_id");
+      w.String (e.credential_id.c_str ());
+      w.Key ("user_id");
+      w.String (e.user_id.c_str ());
+      w.Key ("worker_id");
+      w.String (e.worker_id.c_str ());
+      w.Key ("job_id");
+      w.String (e.job_id.c_str ());
+      w.Key ("step_id");
+      w.String (e.step_id.c_str ());
+      w.Key ("run_id");
+      w.String (e.run_id.c_str ());
+      w.Key ("action");
+      w.String (e.action.c_str ());
+      if (e.reason)
+      {
+        w.Key ("reason");
+        w.String (e.reason->c_str ());
+      }
+      w.Key ("timestamp");
+      w.Int64 (e.timestamp);
       w.EndObject ();
     }
     w.EndArray ();
@@ -1223,6 +1297,180 @@ namespace agentos
       reply_error (identity, request_id, -32030, "vault.rekey failed");
     else
       reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-029: user.* JSON-RPC handlers (admin only)
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_user_register (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.register_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32030, res.error ());
+      return;
+    }
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (res->id.c_str ());
+    w.Key ("created_at");
+    w.Int64 (res->created_at);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_list (const std::string &params_json,
+                                    const std::string &identity,
+                                    const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    std::optional<bool> enabled_filter;
+    if (params.HasMember ("enabled") && params["enabled"].IsBool ())
+      enabled_filter = params["enabled"].GetBool ();
+
+    int limit = 50;
+    int offset = 0;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+    if (params.HasMember ("offset") && params["offset"].IsInt ())
+      offset = params["offset"].GetInt ();
+
+    auto users = user_manager_.list_users (enabled_filter, limit, offset);
+    if (!users)
+    {
+      reply_error (identity, request_id, -32030, users.error ());
+      return;
+    }
+    auto total = user_manager_.count_users (enabled_filter);
+    if (!total)
+    {
+      reply_error (identity, request_id, -32030, total.error ());
+      return;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("users");
+    w.StartArray ();
+    for (const auto &u : *users)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (u.id.c_str ());
+      w.Key ("enabled");
+      w.Bool (u.enabled);
+      w.Key ("created_at");
+      w.Int64 (u.created_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.Key ("total");
+    w.Int (*total);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_enable (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.enable_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  void Orchestrator::cmd_user_disable (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.disable_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  void Orchestrator::cmd_user_profile (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.get_profile (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    const auto &p = *res;
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (p.user_id.c_str ());
+    w.Key ("first_seen");
+    w.Int64 (p.first_seen);
+    w.Key ("last_seen");
+    if (p.last_seen)
+      w.Int64 (*p.last_seen);
+    else
+      w.Null ();
+    w.Key ("total_jobs");
+    w.Int (p.total_jobs);
+    w.Key ("successful_jobs");
+    w.Int (p.successful_jobs);
+    w.Key ("failed_jobs");
+    w.Int (p.failed_jobs);
+    w.Key ("connected_providers");
+    w.StartArray ();
+    for (const auto &prov : p.connected_providers)
+      w.String (prov.c_str ());
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
   }
 
 } // namespace agentos

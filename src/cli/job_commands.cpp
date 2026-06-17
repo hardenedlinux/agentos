@@ -47,6 +47,7 @@ void register_job_commands(CLI::App& app) {
         int max_iterations{5};
         std::string reviewer_id;
         std::string acceptance_criteria;
+        std::string user_id{"0"};
 
         submit->add_option("--goal", goal)->required();
         submit->add_option("--input", input_str);
@@ -56,6 +57,7 @@ void register_job_commands(CLI::App& app) {
         submit->add_option("--max-iterations", max_iterations)->default_val(5);
         submit->add_option("--reviewer", reviewer_id);
         submit->add_option("--acceptance-criteria", acceptance_criteria);
+        submit->add_option("--user", user_id)->default_val("0");
 
         submit->callback([&] {
             try {
@@ -64,6 +66,13 @@ void register_job_commands(CLI::App& app) {
                 auto params = agentos::cli::build_job_submit_params(
                     goal, type, input_str, interval_s, starts_at,
                     max_iterations, reviewer_id, acceptance_criteria);
+                {
+                    using rapidjson::Value;
+                    auto& alloc = params.GetAllocator();
+                    params.AddMember("user_id",
+                                     Value(user_id.c_str(), alloc),
+                                     alloc);
+                }
                 auto result = client.send("job.submit", std::move(params));
                 if (json_flag) { print_json(result); }
                 else { std::cout << "job_id: " << result["job_id"].GetString() << "\n"; }

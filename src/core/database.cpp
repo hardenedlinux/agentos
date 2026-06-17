@@ -260,6 +260,30 @@ namespace agentos
     if (!exec_ddl (schema))
       return false;
 
+    // ADR-029: users table & profile view
+    static const char *schema_users = R"(
+      CREATE TABLE IF NOT EXISTS users (
+          id         TEXT PRIMARY KEY,
+          enabled    INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL
+      );
+      CREATE VIEW IF NOT EXISTS user_profile AS
+      SELECT
+          u.id                                                      AS user_id,
+          u.created_at                                              AS first_seen,
+          MAX(j.created_at)                                         AS last_seen,
+          COUNT(j.id)                                               AS total_jobs,
+          SUM(CASE WHEN j.phase = 'done' THEN 1 ELSE 0 END)        AS successful_jobs,
+          SUM(CASE WHEN j.phase = 'failed' THEN 1 ELSE 0 END)      AS failed_jobs,
+          GROUP_CONCAT(DISTINCT c.provider)                         AS connected_providers
+      FROM users u
+      LEFT JOIN jobs        j ON j.user_id = u.id
+      LEFT JOIN credentials c ON c.user_id = u.id
+      GROUP BY u.id;
+    )";
+    if (!exec_ddl (schema_users))
+      return false;
+
     // ADR-022: add columns to tasks table (idempotent)
     {
       auto maybe_add_column = [this] (const char *ddl)
@@ -312,6 +336,8 @@ namespace agentos
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN starts_at INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN last_run_at INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN next_run_at INTEGER");
+      // ADR-029: add user_id to jobs
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
     }
 
     // ADR‑025: extend human_reviews with type / job_id
@@ -1287,6 +1313,22 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_job: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_job_user (const std::string &job_id,
+                                  const std::string &user_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE jobs SET user_id = ?, updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text (stmt, 3, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_job_user: {}", sqlite3_errmsg (db_));
   }
 
   void Database::update_job_phase (const TaskId &id, const std::string &phase)

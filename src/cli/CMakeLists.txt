@@ -13,6 +13,8 @@ target_link_libraries(agentos PRIVATE
   ${OPENSSL_STATIC_CRYPTO}
 )
 
+target_sources(agentos PRIVATE user_commands.cpp)
+
 add_dependencies(agentos
   cli11_ext
   cppzmq_ext

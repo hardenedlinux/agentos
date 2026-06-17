@@ -157,6 +157,7 @@ namespace agentos
 
     void store_job (const Task &task);
     void update_job_phase (const TaskId &id, const std::string &phase);
+    void update_job_user (const std::string &job_id, const std::string &user_id);
     void update_job_plan (const TaskId &id, const std::string &plan_json);
     std::string load_plan_json (const TaskId &job_id);
     std::vector<InFlightJob> resume_in_flight ();

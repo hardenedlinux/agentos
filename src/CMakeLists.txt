@@ -10,6 +10,7 @@ target_link_libraries(agentos PRIVATE agentos_core ${SECCOMP_LIB} ${CAP_LIB})
 
 target_include_directories(agentos PRIVATE
   ${DEPS_INSTALL_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_include_directories(agentos SYSTEM PRIVATE

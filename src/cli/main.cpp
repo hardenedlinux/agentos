@@ -37,6 +37,7 @@ void register_worker_commands (CLI::App &app);
 void register_adviser_commands (CLI::App &app);
 void register_review_commands (CLI::App &app);
 void register_forge_commands (CLI::App &app);
+void register_user_commands (CLI::App &app);
 
 namespace
 {
@@ -131,6 +132,7 @@ int main (int argc, char **argv)
   register_adviser_commands (app);
   register_review_commands (app);
   register_forge_commands (app);
+  register_user_commands (app);
 
   agentos::cli::add_completion (&app);
 

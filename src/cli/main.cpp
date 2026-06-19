@@ -1,4 +1,21 @@
 /**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * agentos/src/cli/main.cpp
  *
  * AgentOS — entry point.
@@ -71,13 +88,13 @@ int main (int argc, char **argv)
   // Detect --complete early: completion mode must be fully silent.
   bool completing = false;
   for (int i = 1; i < argc; ++i)
+  {
+    if (std::string_view (argv[i]) == "--complete")
     {
-      if (std::string_view (argv[i]) == "--complete")
-        {
-          completing = true;
-          break;
-        }
+      completing = true;
+      break;
     }
+  }
 
   // Logger exists for the whole process but stays silent outside `run`.
   auto logger = spdlog::stdout_color_mt ("agentos");
@@ -101,29 +118,31 @@ int main (int argc, char **argv)
   // ---------- daemon mode ----------
   auto *run = app.add_subcommand ("run", "Start the AgentOS daemon");
   run->callback (
-    [&]
-    {
-      print_banner ();
-      spdlog::set_level (spdlog::level::info);
-      spdlog::info ("AgentOS {} starting", "0.1.0");
+                 [&]
+                 {
+                   print_banner ();
+                   spdlog::set_level (spdlog::level::info);
+                   spdlog::info ("AgentOS {} starting", "0.1.0");
 
-      std::string error;
-      auto config = agentos::load_config (
-        (agentos::agentos_home () / "config.toml").string (), error);
-      if (!config)
-      {
-        agentos::cli::die (2, std::string ("config: ") + error);
-      }
-      agentos::read_env_api_key (*config);
+                   agentos::initialise_home (agentos::agentos_home ());
 
-      agentos::Central central (*config);
-      g_central = &central;
-      std::signal (SIGINT, signal_handler);
-      std::signal (SIGTERM, signal_handler);
+                   std::string error;
+                   auto config = agentos::load_config (
+                                                       (agentos::agentos_home () / "config.toml").string (), error);
+                   if (!config)
+                     {
+                       agentos::cli::die (2, std::string ("config: ") + error);
+                     }
+                   agentos::read_env_api_key (*config);
 
-      spdlog::info ("daemon starting");
-      central.run ();
-    });
+                   agentos::Central central (*config);
+                   g_central = &central;
+                   std::signal (SIGINT, signal_handler);
+                   std::signal (SIGTERM, signal_handler);
+
+                   spdlog::info ("daemon starting");
+                   central.run ();
+                 });
 
   // ---------- register all subcommand groups ----------
   register_key_commands (app);

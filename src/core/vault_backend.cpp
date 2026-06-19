@@ -121,11 +121,18 @@ namespace agentos
   bool SoftwareTPMBackend::is_initialized () const
   {
     return std::filesystem::exists (tpm_state_path_)
-           && std::filesystem::exists (sealed_path_);
+      && std::filesystem::exists (sealed_path_);
   }
 
   std::expected<void, Error> SoftwareTPMBackend::init ()
   {
+    std::filesystem::path vault_dir = agentos::agentos_home () / "vault";
+    std::filesystem::create_directories (vault_dir);
+    if (chdir (vault_dir.c_str ()) != 0)
+      {
+        return std::unexpected (Error{"vault chdir failed"});
+      }
+
     // Initialise the libtpms TPM emulator.
     TPMLIB_ChooseTPMVersion (TPMLIB_TPM_VERSION_2);
     {
@@ -133,10 +140,10 @@ namespace agentos
       TPMLIB_SetBufferSize (4096, &min_sz, &max_sz);
     }
     if (TPMLIB_MainInit () != 0)
-    {
-      spdlog::error ("[vault] TPMLIB_MainInit failed");
-      return std::unexpected (Error{"TPMLIB_MainInit failed"});
-    }
+      {
+        spdlog::error ("[vault] TPMLIB_MainInit failed");
+        return std::unexpected (Error{"TPMLIB_MainInit failed"});
+      }
 
     // Generate a 256-bit vault key from /dev/urandom.
     // NOTE: In the full implementation this would use TPM2_GetRandom via the

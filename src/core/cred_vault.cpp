@@ -1,4 +1,21 @@
 /**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * agentos/cred_vault.cpp
  *
  * ADR-028: CredVault — credential lifecycle, SecureEnclave integration,
@@ -29,7 +46,7 @@ namespace agentos
     int64_t now_unix ()
     {
       return static_cast<int64_t> (
-                                   std::chrono::duration_cast<std::chrono::seconds> (
+        std::chrono::duration_cast<std::chrono::seconds> (
           std::chrono::system_clock::now ().time_since_epoch ())
           .count ());
     }
@@ -306,8 +323,8 @@ namespace agentos
 
     // insert_credential handles both insert and update-in-place paths.
     // Pass cred_id explicitly so the DB uses the same id we used as HKDF info.
-    auto id_opt = db_.insert_credential (cred_id, user_id, provider, *token_blob,
-                                         refresh_blob, expires_at);
+    auto id_opt = db_.insert_credential (cred_id, user_id, provider,
+                                         *token_blob, refresh_blob, expires_at);
     if (!id_opt)
       return std::unexpected (id_opt.error ());
 
@@ -405,15 +422,15 @@ namespace agentos
     // ---------------------------------------------------------------------------
     struct PlainEntry
     {
-      std::string                id;
-      std::string                token_plain;
+      std::string id;
+      std::string token_plain;
       std::optional<std::string> refresh_plain;
-      std::optional<int64_t>     expires_at;
+      std::optional<int64_t> expires_at;
 
-      PlainEntry ()                              = default;
-      PlainEntry (PlainEntry &&)                 = default;
-      PlainEntry &operator= (PlainEntry &&)      = default;
-      PlainEntry (const PlainEntry &)            = delete;
+      PlainEntry () = default;
+      PlainEntry (PlainEntry &&) = default;
+      PlainEntry &operator= (PlainEntry &&) = default;
+      PlainEntry (const PlainEntry &) = delete;
       PlainEntry &operator= (const PlainEntry &) = delete;
 
       ~PlainEntry ()
@@ -446,7 +463,7 @@ namespace agentos
     for (const auto &cred : all_creds)
     {
       PlainEntry e;
-      e.id         = cred.id;
+      e.id = cred.id;
       e.expires_at = cred.expires_at;
 
       CipherBlob ct_blob{cred.ciphertext, cred.nonce};
@@ -466,8 +483,9 @@ namespace agentos
         auto ref_opt = enclave_.decrypt (ref_blob, cred.id + ":refresh");
         if (!ref_opt)
         {
-          spdlog::error ("[cred_vault] rekey: decrypt refresh failed for {}: {}",
-                         cred.id, ref_opt.error ());
+          spdlog::error (
+            "[cred_vault] rekey: decrypt refresh failed for {}: {}", cred.id,
+            ref_opt.error ());
           return std::unexpected (Error{"decrypt refresh failed for " + cred.id
                                         + ": " + ref_opt.error ()});
         }
@@ -483,12 +501,13 @@ namespace agentos
 
     auto init_res = backend_->init ();
     if (!init_res)
-      return std::unexpected (Error{"backend init failed: " + init_res.error ()});
+      return std::unexpected (
+        Error{"backend init failed: " + init_res.error ()});
 
     auto new_key_opt = backend_->unseal ();
     if (!new_key_opt)
-      return std::unexpected (Error{"backend unseal failed: "
-                                    + new_key_opt.error ()});
+      return std::unexpected (
+        Error{"backend unseal failed: " + new_key_opt.error ()});
 
     KeyGuard kg;
     kg.key = std::move (*new_key_opt);
@@ -497,39 +516,41 @@ namespace agentos
     new_enclave.seal (kg.key.data (), kg.key.size ());
 
     // 4. Re-encrypt all credentials under the new key in a single transaction.
-    auto tx_result = db_.with_transaction ([&] () -> bool {
-      for (auto &e : entries)
+    auto tx_result = db_.with_transaction (
+      [&] () -> bool
       {
-        auto token_blob = new_enclave.encrypt (e.token_plain, e.id);
-        if (!token_blob)
+        for (auto &e : entries)
         {
-          spdlog::error ("[cred_vault] rekey: encrypt token failed for {}",
-                         e.id);
-          return false;
-        }
-        std::optional<CipherBlob> refresh_blob;
-        if (e.refresh_plain)
-        {
-          auto rblob = new_enclave.encrypt (*e.refresh_plain,
-                                            e.id + ":refresh");
-          if (!rblob)
+          auto token_blob = new_enclave.encrypt (e.token_plain, e.id);
+          if (!token_blob)
           {
-            spdlog::error ("[cred_vault] rekey: encrypt refresh failed for {}",
+            spdlog::error ("[cred_vault] rekey: encrypt token failed for {}",
                            e.id);
             return false;
           }
-          refresh_blob = std::move (*rblob);
+          std::optional<CipherBlob> refresh_blob;
+          if (e.refresh_plain)
+          {
+            auto rblob
+              = new_enclave.encrypt (*e.refresh_plain, e.id + ":refresh");
+            if (!rblob)
+            {
+              spdlog::error (
+                "[cred_vault] rekey: encrypt refresh failed for {}", e.id);
+              return false;
+            }
+            refresh_blob = std::move (*rblob);
+          }
+          if (!db_.update_credential_full (e.id, *token_blob, refresh_blob,
+                                           e.expires_at))
+          {
+            spdlog::error (
+              "[cred_vault] rekey: update_credential_full failed for {}", e.id);
+            return false;
+          }
         }
-        if (!db_.update_credential_full (e.id, *token_blob, refresh_blob,
-                                         e.expires_at))
-        {
-          spdlog::error (
-            "[cred_vault] rekey: update_credential_full failed for {}", e.id);
-          return false;
-        }
-      }
-      return true;
-    });
+        return true;
+      });
 
     // Zero plaintexts now — regardless of outcome.
     entries.clear ();
@@ -565,7 +586,6 @@ namespace agentos
 
     return {};
   }
-
 
   // ---------------------------------------------------------------------------
   // refresh_loop — background thread

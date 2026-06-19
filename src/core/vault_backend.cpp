@@ -1,3 +1,20 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "agentos/vault_backend.h"
 #include "agentos/config.h"
 #include "agentos/home_init.h"
@@ -7,6 +24,7 @@
 #include <cstring>
 #include <fstream>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
 // libtpms — always available
 extern "C"
@@ -37,6 +55,42 @@ namespace agentos
       auto d = home / "vault";
       std::filesystem::create_directories (d);
       return d;
+    }
+
+    // ---------------------------------------------------------------------------
+    // prepare_vault_tpm
+    //
+    // Everything that MUST happen before TPMLIB_MainInit, in both init() and
+    // unseal():
+    //
+    //   1. chdir into the vault directory.  libtpms writes its NVChip file to
+    //      the current working directory via the default NVRAM callbacks.  If
+    //      we do not chdir, MainInit on a fresh process (the daemon-restart
+    //      case, which goes straight to unseal()) would look for NVChip in the
+    //      launch directory, fail to find it, and silently create a fresh empty
+    //      TPM in the wrong place.
+    //
+    //   2. TPMLIB_ChooseTPMVersion(TPM2) — selects the TPM 2.0 personality.
+    //      This is process-global library state and MUST be set before MainInit.
+    //      On a restart that calls unseal() without init() having run first,
+    //      forgetting this leaves the library defaulting to TPM 1.2, which then
+    //      cannot load a TPM2 NVChip — historically the source of the SetState
+    //      rc=0x43 we saw on the first run after a kill.
+    //
+    //   3. TPMLIB_SetBufferSize — fixes the command/response buffer size.
+    // ---------------------------------------------------------------------------
+    std::expected<void, Error> prepare_vault_tpm ()
+    {
+      std::filesystem::path vdir = agentos_home () / "vault";
+      std::error_code ec;
+      std::filesystem::create_directories (vdir, ec);
+      if (::chdir (vdir.c_str ()) != 0)
+        return std::unexpected (Error{"vault chdir failed"});
+
+      TPMLIB_ChooseTPMVersion (TPMLIB_TPM_VERSION_2);
+      uint32_t min_sz = 0, max_sz = 0;
+      TPMLIB_SetBufferSize (4096, &min_sz, &max_sz);
+      return {};
     }
 
     constexpr uint8_t SEAL_FORMAT_VERSION = 0x01;
@@ -79,24 +133,37 @@ namespace agentos
   // ===========================================================================
   // SoftwareTPMBackend (community tier, always compiled)
   //
-  // SECURITY MODEL (ADR-028, community tier):
-  //   This backend calls TPMLIB_MainInit() / TPMLIB_Terminate() to initialise
-  //   the libtpms in-process TPM2 emulator, and it reads the TPM's state from
-  //   disk on each unseal() call so the TPM context survives process restarts.
+  // PERSISTENCE MODEL (ADR-028, community tier):
+  //   libtpms is initialised purely through its own file-backed NVRAM (the
+  //   "NVChip" file in the vault directory).  NVChip is libtpms's native
+  //   persistence mechanism and is designed to survive process restarts and
+  //   power loss, so it is the single source of TPM state across runs.
+  //
+  //   We deliberately do NOT use TPMLIB_GetState / TPMLIB_SetState in addition
+  //   to NVChip.  Mixing the two — saving a permanent-state blob with GetState
+  //   while ALSO letting libtpms manage NVChip — produces two competing copies
+  //   of TPM state that drift apart whenever Terminate rewrites NVChip after
+  //   GetState was taken, or whenever a kill -9 truncates NVChip.  On the next
+  //   start, SetState then loads a permanent blob that is inconsistent with the
+  //   on-disk NVChip and MainInit rejects it (rc=0x43).  Relying on NVChip
+  //   alone removes that entire class of inconsistency; if NVChip is ever found
+  //   corrupt, try_soft_tpm_init() removes it and MainInit recreates a fresh
+  //   one (see the security note below on why a fresh TPM is harmless here).
   //
   // IMPORTANT — vault.sealed is NOT encrypted by the TPM in this
   // implementation:
   //   A complete community-tier implementation would use a libtpms TPM2_Create
   //   command to create a KEYEDHASH object with the vault key as sensitiveData,
   //   then store only the TPM2B_PUBLIC + TPM2B_PRIVATE output blobs (never the
-  //   raw key).  Unseal would reconstruct the TPM context from tpm.state and
-  //   issue TPM2_Load + TPM2_Unseal to recover the key.
+  //   raw key).  Unseal would issue TPM2_Load + TPM2_Unseal to recover the key.
   //
   //   The current code takes the simpler but weaker path: it generates the key
   //   from /dev/urandom and writes it directly (prefixed by a version byte) to
-  //   vault.sealed.  The libtpms TPM emulator is initialised so that the state
-  //   file is correctly maintained, but it is NOT used for cryptographic
-  //   protection of the vault key.
+  //   vault.sealed.  The libtpms TPM emulator is initialised so that the call
+  //   sequence matches the hardware backend, but it is NOT used for
+  //   cryptographic protection of the vault key.  Because of this, the TPM
+  //   holds nothing that the key depends on, and recreating a fresh NVChip on
+  //   corruption does not endanger the key — the key lives only in vault.sealed.
   //
   //   CONSEQUENCE: any process that can read vault.sealed can recover the vault
   //   key.  The file is created 0600 and inside the agentos home directory, so
@@ -114,36 +181,72 @@ namespace agentos
     : tpm_state_path_ (vault_dir (home) / "tpm.state"),
       sealed_path_ (vault_dir (home) / "vault.sealed")
   {
+    // tpm_state_path_ is retained only to satisfy the header declaration; it is
+    // no longer read or written.  The member can be removed from the header in
+    // a follow-up cleanup.
+    (void)tpm_state_path_;
   }
 
   SoftwareTPMBackend::~SoftwareTPMBackend () = default;
 
+  // The vault is considered initialised once the sealed key blob exists.
+  // NVChip is libtpms-managed internal state and is intentionally NOT part of
+  // this check: a missing or corrupt NVChip is recoverable (MainInit recreates
+  // it) and must never cause us to fall back into init(), which would overwrite
+  // vault.sealed and destroy the existing key.
   bool SoftwareTPMBackend::is_initialized () const
   {
-    return std::filesystem::exists (tpm_state_path_)
-      && std::filesystem::exists (sealed_path_);
+    return std::filesystem::exists (sealed_path_);
+  }
+
+  // Bring up the libtpms TPM2 emulator.  Assumes prepare_vault_tpm() has
+  // already run (chdir + ChooseTPMVersion + SetBufferSize).
+  //
+  //   - Normal path: MainInit reads the existing NVChip and returns 0.
+  //   - NVChip corrupt (e.g. truncated by a previous kill -9): MainInit fails;
+  //     we remove NVChip and retry, letting MainInit build a fresh one.  This
+  //     is safe because the vault key lives in vault.sealed, not in the TPM.
+  std::expected<void, Error> SoftwareTPMBackend::try_soft_tpm_init ()
+  {
+    auto rc = TPMLIB_MainInit ();
+    if (rc == 0)
+      return {};
+
+    spdlog::warn (
+      "[vault] TPMLIB_MainInit failed (rc=0x{:x}), attempting recovery", rc);
+
+    // Drop libtpms internal state and the on-disk NVChip, then retry from a
+    // clean slate.  vault.sealed is never touched here.
+    TPMLIB_Terminate ();
+    {
+      std::error_code ec;
+      std::filesystem::path vdir = agentos_home () / "vault";
+      std::filesystem::remove (vdir / "NVChip", ec);
+      spdlog::warn ("[vault] removed NVChip for recovery");
+    }
+
+    rc = TPMLIB_MainInit ();
+    if (rc != 0)
+    {
+      spdlog::error (
+        "[vault] TPMLIB_MainInit failed after recovery (rc=0x{:x})", rc);
+      return std::unexpected (Error{"TPMLIB_MainInit failed"});
+    }
+
+    spdlog::info ("[vault] TPM recovery succeeded");
+    return {};
   }
 
   std::expected<void, Error> SoftwareTPMBackend::init ()
   {
-    std::filesystem::path vault_dir = agentos::agentos_home () / "vault";
-    std::filesystem::create_directories (vault_dir);
-    if (chdir (vault_dir.c_str ()) != 0)
-      {
-        return std::unexpected (Error{"vault chdir failed"});
-      }
+    if (auto r = prepare_vault_tpm (); !r)
+      return r;
 
-    // Initialise the libtpms TPM emulator.
-    TPMLIB_ChooseTPMVersion (TPMLIB_TPM_VERSION_2);
+    if (auto res = this->try_soft_tpm_init (); !res)
     {
-      uint32_t min_sz = 0, max_sz = 0;
-      TPMLIB_SetBufferSize (4096, &min_sz, &max_sz);
+      spdlog::error ("[vault] TPM init failed: {}", res.error ());
+      return std::unexpected (res.error ());
     }
-    if (TPMLIB_MainInit () != 0)
-      {
-        spdlog::error ("[vault] TPMLIB_MainInit failed");
-        return std::unexpected (Error{"TPMLIB_MainInit failed"});
-      }
 
     // Generate a 256-bit vault key from /dev/urandom.
     // NOTE: In the full implementation this would use TPM2_GetRandom via the
@@ -162,6 +265,7 @@ namespace agentos
       if (!ur)
       {
         TPMLIB_Terminate ();
+        explicit_bzero_local (vault_key.data (), vault_key.size ());
         return std::unexpected (Error{"short read from /dev/urandom"});
       }
     }
@@ -193,32 +297,7 @@ namespace agentos
                     static_cast<std::streamsize> (vault_key.size ()));
     }
 
-    // Persist the libtpms TPM state so unseal() can restore it.
-    // TPMLIB_GetState allocates the buffer; we must free() it.
-    {
-      unsigned char *state_buffer = nullptr;
-      uint32_t state_len = 0;
-      TPM_RESULT r
-        = TPMLIB_GetState (TPMLIB_STATE_PERMANENT, &state_buffer, &state_len);
-      if (r != TPM_SUCCESS)
-      {
-        spdlog::warn ("[vault] TPMLIB_GetState failed (rc=0x{:x}) — tpm.state "
-                      "may be incomplete",
-                      r);
-      }
-      std::ofstream st (tpm_state_path_, std::ios::binary | std::ios::trunc);
-      if (!st)
-      {
-        std::free (state_buffer);
-        TPMLIB_Terminate ();
-        explicit_bzero_local (vault_key.data (), vault_key.size ());
-        return std::unexpected (Error{"cannot write tpm.state"});
-      }
-      if (state_buffer && state_len > 0)
-        st.write (reinterpret_cast<const char *> (state_buffer), state_len);
-      std::free (state_buffer);
-    }
-
+    // libtpms persists its own state to NVChip; Terminate flushes it.
     TPMLIB_Terminate ();
     explicit_bzero_local (vault_key.data (), vault_key.size ());
     spdlog::info (
@@ -231,27 +310,18 @@ namespace agentos
     if (!is_initialized ())
       return std::unexpected (Error{"vault not initialised"});
 
-    // Restore libtpms state.
+    if (auto r = prepare_vault_tpm (); !r)
+      return std::unexpected (r.error ());
+
+    if (auto res = this->try_soft_tpm_init (); !res)
     {
-      std::ifstream st (tpm_state_path_, std::ios::binary);
-      if (!st)
-        return std::unexpected (Error{"cannot open tpm.state"});
-      std::vector<uint8_t> buf ((std::istreambuf_iterator<char> (st)),
-                                std::istreambuf_iterator<char> ());
-      if (!buf.empty ())
-      {
-        TPM_RESULT r = TPMLIB_SetState (TPMLIB_STATE_PERMANENT, buf.data (),
-                                        static_cast<uint32_t> (buf.size ()));
-        if (r != TPM_SUCCESS)
-          spdlog::warn ("[vault] TPMLIB_SetState returned rc=0x{:x}", r);
-      }
+      spdlog::error ("[vault] TPM init failed during unseal: {}", res.error ());
+      return std::unexpected (res.error ());
     }
 
-    if (TPMLIB_MainInit () != 0)
-      return std::unexpected (Error{"TPMLIB_MainInit failed"});
-
     // Read the raw vault key from vault.sealed.
-    // TODO: replace with TPM2_Load + TPM2_Unseal using the restored TPM state.
+    // TODO: replace with TPM2_Load + TPM2_Unseal once the TPM actually seals
+    //       the key (see security note above).
     std::ifstream sealed (sealed_path_, std::ios::binary);
     if (!sealed)
     {

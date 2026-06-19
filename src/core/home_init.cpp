@@ -247,6 +247,7 @@ Respond with a JSON object:
       base / "workers",
       base / "skills",
       base / "forge",
+      base / "vault",
       base / "logs",
     };
 
@@ -322,6 +323,29 @@ Respond with a JSON object:
                     CODE_REVIEWER_SCRIPT);
     seed_if_absent (advisers / "code-reviewer" / "adviser.py",
                     CODE_REVIEWER_SCRIPT);
-  }
 
+    // TPM state self-healing
+    const auto nvchip = base / "vault" / "NVChip";
+    if (std::filesystem::exists (nvchip))
+      {
+        // simple check: if file size is 0 then repair
+        std::error_code ec;
+        auto size = std::filesystem::file_size (nvchip, ec);
+        if (ec || size == 0)
+          {
+            spdlog::warn (
+                          "[home_init] NVChip appears corrupt, removing for reinitialisation");
+            std::filesystem::remove (nvchip, ec);
+          }
+      }
+
+    // Clean up stale socket from previous unclean shutdown
+    const auto sock = base / "run" / "agentos.sock";
+    if (std::filesystem::exists (sock))
+      {
+        std::error_code ec;
+        std::filesystem::remove (sock, ec);
+        spdlog::warn ("[home_init] removed stale socket {}", sock.string ());
+      }
+  }
 } // namespace agentos

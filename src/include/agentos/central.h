@@ -15,6 +15,12 @@
  * Shutdown order (reverse):
  *   gateway → periodic → master → orchestrator → cred_vault →
  *   forge_coordinator → llm_proxy → db
+ *
+ * Outbound gateway path:
+ *   Any actor calls send_to_gateway() → Central::gateway_push() →
+ *   Gateway::enqueue_outbound() — thread-safe queue.
+ *   Gateway poll thread drains the queue and sends on agentos_sock_.
+ *   No inproc socket; no separate dispatch thread.
  */
 
 #include "agentos/config.h"
@@ -48,27 +54,19 @@ public:
   Central (const Central &)            = delete;
   Central &operator= (const Central &) = delete;
 
-  // Start all actors and block until stop() is called (SIGTERM/SIGINT).
   void run ();
-
-  // Signal shutdown. Safe to call from signal handler.
   void stop ();
 
 private:
-  // ---------------------------------------------------------------------------
-  // Routing — private, only Central calls these
-  // ---------------------------------------------------------------------------
   void send_to_orchestrator (OrchestratorEvent msg);
   void send_to_master       (MasterEvent msg);
   void send_to_gateway      (GatewayEvent msg);
   void send_to_periodic     (PeriodicControl msg);
 
-  // Push raw JSON to inproc://gateway-out.
-  // identity empty = broadcast; non-empty = targeted reply.
+  // Enqueue payload+identity into Gateway's outbound queue.
   void gateway_push (const std::string &payload,
                      const std::string &identity = {});
 
-  // Build OrchestratorEvent from ForgeResult (for ForgeCoordinator callback).
   static OrchestratorEvent
   make_forge_complete_event (const forge::ForgeResult &result);
 
@@ -79,12 +77,8 @@ private:
   // ---------------------------------------------------------------------------
   zmq::context_t zmq_ctx_{ 1 };
 
-  // PUSH end of inproc://gateway-out — used by gateway_push().
-  // Gateway holds the PULL end (bound in gateway_.bind_inproc()).
-  zmq::socket_t gateway_push_sock_{ zmq_ctx_, zmq::socket_type::push };
-
   // ---------------------------------------------------------------------------
-  // Shared services — constructed before any Actor
+  // Shared services
   // ---------------------------------------------------------------------------
   Config    config_;
   Database  db_;
@@ -93,14 +87,11 @@ private:
   Registry  registry_;
 
   // ---------------------------------------------------------------------------
-  // Sub-components injected into Orchestrator
+  // Sub-components
   // ---------------------------------------------------------------------------
   Dispatcher              dispatcher_;
   forge::ForgeCoordinator forge_coordinator_;
-
-  // ADR-028: Credential vault — constructed after forge_coordinator_,
-  // before orchestrator_ so Orchestrator can hold a reference to it.
-  CredVault cred_vault_;
+  CredVault               cred_vault_;
 
   // ---------------------------------------------------------------------------
   // Actors

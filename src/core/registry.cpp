@@ -166,8 +166,15 @@ namespace agentos
   // Registry implementation
   // -----------------------------------------------------------------------
 
-  Registry::Registry (Database &db) : impl_ (std::make_unique<Impl> ())
+  Registry::Registry () : impl_ (std::make_unique<Impl> ()) {}
+
+  void Registry::init (Database &db)
   {
+    impl_->advisers.clear ();
+    impl_->workers.clear ();
+    impl_->command_to_worker.clear ();
+    impl_->command_schemas.clear ();
+
     for (const auto &row : db.load_enabled_agents ())
     {
       RegisteredAdviser adviser;

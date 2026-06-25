@@ -26,6 +26,7 @@
 #include "agentos/orchestrator.h"
 #include "agentos/cred_vault.h"
 #include "agentos/home_init.h"
+#include "agentos/time_utils.h"
 #include "agentos/user_manager.h"
 #include "agentos/uuid.h"
 
@@ -49,7 +50,6 @@ namespace agentos
 
   namespace
   {
-
     // Constant-time comparison to prevent timing attacks on key verification.
     bool ct_equal (std::string_view a, std::string_view b)
     {
@@ -327,10 +327,10 @@ namespace agentos
     active_keys_.clear ();
     auto keys = db_.load_active_access_keys ();
     for (auto &k : keys)
-      {
-        // spdlog::info ("load key: {}", k.key);
-        active_keys_[k.key] = std::move (k);
-      }
+    {
+      // spdlog::info ("load key: {}", k.key);
+      active_keys_[k.key] = std::move (k);
+    }
     spdlog::info ("[orchestrator] loaded {} active access keys",
                   active_keys_.size ());
   }
@@ -551,7 +551,6 @@ namespace agentos
   // ---------------------------------------------------------------------------
   // Command: job.status
   // ---------------------------------------------------------------------------
-
   void Orchestrator::cmd_job_status (const std::string &params_json,
                                      const std::string &identity,
                                      const std::string &request_id)
@@ -564,37 +563,115 @@ namespace agentos
       return;
     }
     const std::string job_id = params["job_id"].GetString ();
-    // Load from DB and return.
-    const std::string plan = db_.load_plan_json (TaskId (job_id));
-    if (plan.empty ())
+
+    auto job = db_.load_job (job_id);
+    if (!job)
     {
       reply_error (identity, request_id, -32020, "Not found");
       return;
     }
-    reply_ok (identity, request_id,
-              R"({"job_id":")" + job_id + R"(","plan":)" + plan + "}");
+
+    auto steps = db_.load_steps_for_job (job_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("job_id");
+    w.String (job_id.c_str ());
+    w.Key ("phase");
+    w.String (job->phase.c_str ());
+    w.Key ("goal");
+    w.String (job->goal.c_str ());
+    w.Key ("created_at");
+    w.Int64 (job->created_at);
+    w.Key ("updated_at");
+    w.Int64 (job->updated_at);
+    if (job->error)
+    {
+      w.Key ("error");
+      w.String (job->error->c_str ());
+    }
+    w.Key ("steps");
+    w.StartArray ();
+    for (const auto &s : steps)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (s.id.c_str ());
+      w.Key ("step_order");
+      w.Int (s.step_order);
+      w.Key ("description");
+      w.String (s.description.c_str ());
+      w.Key ("status");
+      w.String (s.status.c_str ());
+      w.Key ("started_at");
+      if (s.started_at)
+        w.Int64 (*s.started_at);
+      else
+        w.Null ();
+      w.Key ("completed_at");
+      if (s.completed_at)
+        w.Int64 (*s.completed_at);
+      else
+        w.Null ();
+      if (s.error)
+      {
+        w.Key ("error");
+        w.String (s.error->c_str ());
+      }
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
   }
 
   // ---------------------------------------------------------------------------
   // Command: job.list
   // ---------------------------------------------------------------------------
-
   void Orchestrator::cmd_job_list (const std::string & /*params_json*/,
                                    const std::string &identity,
                                    const std::string &request_id)
   {
     spdlog::info ("[orchestrator] cmd_job_list called");
 
-    // Return list of in-flight job IDs.
+    // Default: jobs active in the last 10 minutes (updated_at >= now - 600).
+    // All phases shown; CLI applies colour by phase.
+    auto jobs = db_.load_jobs_since (now_unix () - 600, 100);
+
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
     w.StartObject ();
     w.Key ("jobs");
     w.StartArray ();
-    for (const auto &[id, _] : active_jobs_)
-      w.String (id.c_str ());
+    for (const auto &j : jobs)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (j.id.c_str ());
+      w.Key ("type");
+      w.String (j.type.c_str ());
+      w.Key ("phase");
+      w.String (j.phase.c_str ());
+      w.Key ("goal");
+      w.String (j.goal.c_str ());
+      w.Key ("created_at");
+      w.Int64 (j.created_at);
+      w.Key ("updated_at");
+      w.Int64 (j.updated_at);
+      if (j.error)
+      {
+        w.Key ("error");
+        w.String (j.error->c_str ());
+      }
+      w.EndObject ();
+    }
     w.EndArray ();
+    w.Key ("total");
+    w.Int (static_cast<int> (jobs.size ()));
     w.EndObject ();
+
     reply_ok (identity, request_id, buf.GetString ());
   }
 
@@ -1053,11 +1130,15 @@ namespace agentos
                                  const std::string &error)
   {
     db_.update_job_phase (TaskId (job_id), success ? "done" : "failed");
+
+    if (!success && !error.empty ())
+      db_.update_job_error (job_id, error);
+
     active_jobs_.erase (job_id);
 
     notify ("job.phase_changed", R"({"job_id":")" + job_id
-                                   + R"(","new_phase":")"
-                                   + (success ? "done" : "failed") + R"("})");
+            + R"(","new_phase":")"
+            + (success ? "done" : "failed") + R"("})");
 
     spdlog::info ("[orchestrator] job {} {}", job_id,
                   success ? "done" : ("failed: " + error));

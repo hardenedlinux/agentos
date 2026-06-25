@@ -40,7 +40,10 @@ namespace agentos
   class Registry
   {
   public:
-    explicit Registry (Database &db);
+    explicit Registry ();
+
+    // Load agents from DB. Must be called after Database::open().
+    void init (Database &db);
     ~Registry ();
 
     Registry (const Registry &) = delete;

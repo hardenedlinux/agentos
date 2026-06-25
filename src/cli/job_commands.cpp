@@ -72,11 +72,14 @@ void register_job_commands (CLI::App &app)
   auto timeout_ms = std::make_shared<int> (5000);
   auto socket_path = std::make_shared<std::string> ();
   auto json_flag = std::make_shared<bool> (false);
+  auto access_key = std::make_shared<std::string> ();
 
   job->add_option ("--timeout", *timeout_ms)->default_val (5000);
   job->add_option ("--socket", *socket_path)
     ->default_val ((home / ".agentos/run/agentos.sock").string ());
   job->add_flag ("--json", *json_flag);
+  job->add_option ("--key", *access_key,
+                   "Access key (64-char hex); defaults to first active key in DB");
 
   // ---- job submit ----
   {
@@ -103,12 +106,14 @@ void register_job_commands (CLI::App &app)
     submit->add_option ("--user", *user_id)->default_val ("0");
 
     submit->callback (
-      [timeout_ms, socket_path, json_flag, goal, input_str, type, interval_s,
+      [timeout_ms, socket_path, json_flag, access_key, goal, input_str, type, interval_s,
        starts_at, max_iterations, reviewer_id, acceptance_criteria, user_id]
       {
         try
         {
           agentos::cli::CliClient client (*timeout_ms);
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
 
           if (!socket_path->empty ())
           {
@@ -154,11 +159,13 @@ void register_job_commands (CLI::App &app)
     status->add_option ("job_id", *job_id)->required ();
 
     status->callback (
-      [timeout_ms, socket_path, json_flag, job_id]
+      [timeout_ms, socket_path, json_flag, access_key, job_id]
       {
         try
         {
           agentos::cli::CliClient client (*timeout_ms);
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
           if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
           auto params = agentos::cli::build_job_status_params (*job_id);
@@ -284,16 +291,18 @@ void register_job_commands (CLI::App &app)
     list->add_option ("--offset", *offset)->default_val (0);
 
     list->callback (
-      [timeout_ms, socket_path, json_flag, phase, type_filter, limit, offset]
+      [timeout_ms, socket_path, json_flag, access_key, phase, type_filter, limit, offset]
       {
         try
         {
           agentos::cli::CliClient client (*timeout_ms);
-          if (std::filesystem::exists (*socket_path))
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
+          if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
           else
           {
-            spdlog::error ("wrong socket path {}", *socket_path);
+            spdlog::error ("socket_path is unknown!");
             std::exit (-1);
           }
 
@@ -394,11 +403,13 @@ void register_job_commands (CLI::App &app)
     cancel->add_flag ("--keep-schedule", *keep_schedule);
 
     cancel->callback (
-      [timeout_ms, socket_path, json_flag, job_id, keep_schedule]
+      [timeout_ms, socket_path, json_flag, access_key, job_id, keep_schedule]
       {
         try
         {
           agentos::cli::CliClient client (*timeout_ms);
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
           if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
           auto params

@@ -3,24 +3,32 @@
  * agentos/gateway.h
  *
  * ADR-020: Gateway thread — pure I/O for the external ZMQ ROUTER socket.
- * Owns agentos.sock (ROUTER) and holds the PULL end of inproc://gateway-out.
+ * Owns agentos.sock (ROUTER) and an outbound queue.
  *
- * The inproc PULL socket is bound by calling bind_inproc() before start().
- * In production this is done by Central (ADR-024); in tests it is called
- * directly.
+ * Outbound path:
+ *   Any actor calls Gateway::enqueue_outbound() — thread-safe enqueue.
+ *   The Gateway poll thread drains the queue and sends frames directly on
+ *   agentos_sock_, making it the sole owner of that socket.
  *
- * The forward_fn callback is invoked for every inbound message. In production
- * Central supplies a lambda that calls central.send<Orchestrator>(msg). In
- * tests a capturing lambda stores messages for assertion.
+ * Inbound path:
+ *   The poll thread receives [identity][payload] from DEALER clients and
+ *   invokes forward_fn for each message.
+ *
+ * No inproc socket is used; the earlier PUSH/PULL inproc design was removed
+ * because ZMQ PUSH/PULL does not reliably propagate the SNDMORE flag on the
+ * inproc transport, causing multi-frame messages to be split across poll
+ * cycles.
  */
+
+#include "agentos/types.h"
 
 #include <atomic>
 #include <functional>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
 #include <zmq.hpp>
-
-#include "agentos/types.h"
 
 namespace agentos
 {
@@ -30,39 +38,43 @@ namespace agentos
   public:
     using ForwardFn = std::function<void (GatewayInbound)>;
 
-    // zmq_ctx   — shared ZMQ context (owned by Central / test harness)
-    // forward_fn — called on the Gateway thread for each inbound message;
-    //              must be thread-safe w.r.t. whatever it captures.
     Gateway (zmq::context_t &zmq_ctx, ForwardFn forward_fn);
     ~Gateway ();
 
-    // Non-copyable / non-movable
-    Gateway (const Gateway &) = delete;
+    Gateway (const Gateway &)            = delete;
     Gateway &operator= (const Gateway &) = delete;
 
-    // Bind inproc://gateway-out (PULL side).
-    // Must be called before start() and before any thread pushes to that
-    // endpoint. Called by Central in production (ADR-024); called directly in
-    // tests.
-    void bind_inproc ();
-
     // Bind the external ROUTER socket and start the I/O thread.
-    // bind_inproc() must have been called first.
     void start ();
 
     // Signal the I/O thread to exit and join it.
     void stop ();
 
+    // Enqueue an outbound message. Thread-safe; callable from any actor.
+    void enqueue_outbound (std::string identity, std::string payload);
+
   private:
     void run ();
 
-    std::atomic<bool> running_{false};
-    std::thread thread_;
+    // Drain the outbound queue and send on agentos_sock_.
+    // Called only from the Gateway poll thread.
+    void flush_outbound ();
+
+    std::atomic<bool> running_{ false };
+    std::thread       thread_;
 
     zmq::context_t &zmq_ctx_;
-    zmq::socket_t agentos_sock_; // ZMQ_ROUTER bound to agentos.sock
-    zmq::socket_t inproc_pull_;  // ZMQ_PULL   bound to inproc://gateway-out
-    ForwardFn forward_fn_;
+    zmq::socket_t   agentos_sock_; // ZMQ_ROUTER bound to agentos.sock
+    ForwardFn       forward_fn_;
+
+    // Outbound queue — written by any thread, drained by the poll thread.
+    struct OutboundMsg
+    {
+      std::string identity;
+      std::string payload;
+    };
+    std::mutex              out_mutex_;
+    std::queue<OutboundMsg> out_queue_;
   };
 
 } // namespace agentos

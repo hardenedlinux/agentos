@@ -5,12 +5,14 @@
  * ROUTER.
  *
  * Frame layout:
- *   Inbound  (DEALER → ROUTER): ROUTER sees [identity][payload]  (2 frames)
- *   Outbound (inproc → ROUTER → DEALER): push [identity][payload], DEALER gets
- * [payload]
+ *   Inbound  (DEALER → ROUTER): [identity][payload]  (2 frames)
+ *   Outbound (ROUTER → DEALER): [identity][payload]  (2 frames)
  *
  * DEALER sockets do NOT insert an empty delimiter frame.
  * The empty delimiter is a REQ/REP convention only.
+ *
+ * Outbound messages are enqueued via enqueue_outbound() from any thread and
+ * flushed by the poll thread on every cycle — no inproc socket needed.
  */
 #include "agentos/gateway.h"
 #include "agentos/home_init.h"
@@ -22,8 +24,8 @@ namespace agentos
 {
 
   Gateway::Gateway (zmq::context_t &zmq_ctx, ForwardFn forward_fn)
-    : zmq_ctx_ (zmq_ctx), agentos_sock_ (zmq_ctx, zmq::socket_type::router),
-      inproc_pull_ (zmq_ctx, zmq::socket_type::pull),
+    : zmq_ctx_ (zmq_ctx),
+      agentos_sock_ (zmq_ctx, zmq::socket_type::router),
       forward_fn_ (std::move (forward_fn))
   {
   }
@@ -31,11 +33,6 @@ namespace agentos
   Gateway::~Gateway ()
   {
     stop ();
-  }
-
-  void Gateway::bind_inproc ()
-  {
-    inproc_pull_.bind ("inproc://gateway-out");
   }
 
   void Gateway::start ()
@@ -49,7 +46,7 @@ namespace agentos
     spdlog::info ("[gateway] bound external socket at {}", socket_path);
 
     running_ = true;
-    thread_ = std::thread (&Gateway::run, this);
+    thread_  = std::thread (&Gateway::run, this);
   }
 
   void Gateway::stop ()
@@ -63,13 +60,44 @@ namespace agentos
     try
     {
       agentos_sock_.close ();
-      inproc_pull_.close ();
     }
     catch (const zmq::error_t &)
     {
       // best-effort teardown
     }
     spdlog::info ("[gateway] stopped");
+  }
+
+  void Gateway::enqueue_outbound (std::string identity, std::string payload)
+  {
+    std::lock_guard lock (out_mutex_);
+    out_queue_.push (OutboundMsg{ std::move (identity), std::move (payload) });
+  }
+
+  void Gateway::flush_outbound ()
+  {
+    std::queue<OutboundMsg> local;
+    {
+      std::lock_guard lock (out_mutex_);
+      std::swap (local, out_queue_);
+    }
+    while (!local.empty ())
+    {
+      auto &msg = local.front ();
+      if (!msg.identity.empty ())
+      {
+        zmq::message_t id_frame (msg.identity.data (), msg.identity.size ());
+        auto r = agentos_sock_.send (id_frame, zmq::send_flags::sndmore);
+        if (!r)
+          spdlog::warn ("[gateway] send identity frame failed");
+      }
+      zmq::message_t payload_frame (msg.payload.data (), msg.payload.size ());
+      auto r = agentos_sock_.send (payload_frame, zmq::send_flags::none);
+      if (!r)
+        spdlog::warn ("[gateway] send payload frame failed");
+
+      local.pop ();
+    }
   }
 
   void Gateway::run ()
@@ -80,88 +108,45 @@ namespace agentos
 
     while (running_)
     {
+      // ── 1. Flush outbound queue first ─────────────────────────────────
+      flush_outbound ();
+
+      // ── 2. Poll for inbound messages ──────────────────────────────────
       zmq::pollitem_t items[]
-        = {{static_cast<void *> (agentos_sock_), 0, ZMQ_POLLIN, 0},
-           {static_cast<void *> (inproc_pull_), 0, ZMQ_POLLIN, 0}};
+        = { { static_cast<void *> (agentos_sock_), 0, ZMQ_POLLIN, 0 } };
 
       try
         {
-          zmq::poll (items, 2, std::chrono::milliseconds (poll_timeout_ms));
+          zmq::poll (items, 1, std::chrono::milliseconds (poll_timeout_ms));
         }
       catch (const zmq::error_t &)
         {
           continue;
         }
 
-      // ── 1. Drain all outbound messages first (inproc → external) ──────
-      // Sender pushes [identity][payload]; forward both frames verbatim.
-      // ROUTER uses the identity frame to route; DEALER receives [payload].
+      // ── 3. Flush again after poll — actors may have enqueued during wait
+      flush_outbound ();
 
-      if (items[1].revents & ZMQ_POLLIN)
+      // ── 4. Handle inbound ─────────────────────────────────────────────
+      if (items[0].revents & ZMQ_POLLIN)
         {
-          while (running_)
-            {
-              zmq::message_t part;
-              if (!inproc_pull_.recv (part, zmq::recv_flags::dontwait).has_value ())
-                break;
+          spdlog::info ("[gateway] inbound message arrived");
 
-              bool has_more = part.more ();
-              spdlog::info ("[gateway] forwarding frame size={} more={}",
-                            part.size (), has_more);
-              auto flags
-                = has_more ? zmq::send_flags::sndmore : zmq::send_flags::none;
-          auto r = agentos_sock_.send (std::move (part), flags);
-          if (!r)
-          {
-            spdlog::warn ("[gateway] ROUTER send returned no value");
-          }
+          zmq::message_t identity_msg;
+          if (!agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
+                 .has_value ())
+            continue;
 
-          while (has_more)
-          {
-            zmq::message_t next;
-            if (!inproc_pull_.recv (next, zmq::recv_flags::dontwait)
-                   .has_value ())
-            {
-              spdlog::error (
-                "[gateway] expected more frames from inproc but got none");
-              break;
-            }
-            has_more = next.more ();
-            auto next_flags
-              = has_more ? zmq::send_flags::sndmore : zmq::send_flags::none;
-            r = agentos_sock_.send (std::move (next), next_flags);
-            if (!r)
-            {
-              spdlog::warn (
-                "[gateway] ROUTER send (continuation) returned no value");
-            }
-          }
+          std::string identity = identity_msg.to_string ();
+
+          zmq::message_t payload_msg;
+          if (!agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
+                 .has_value ())
+            continue;
+
+          forward_fn_ (GatewayInbound{ .identity = std::move (identity),
+                                       .message  = payload_msg.to_string () });
         }
-      }
-
-      // ── 2. Handle at most one inbound message per cycle ──────────────
-      // ROUTER receives [identity][payload] from a DEALER — exactly 2 frames.
-      // No empty delimiter: DEALER does not use the REQ/REP envelope
-      // convention.
-      if (running_ && (items[0].revents & ZMQ_POLLIN))
-      {
-        spdlog::info ("[gateway] inbound message arrived");
-        zmq::message_t identity_msg;
-        if (!agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
-               .has_value ())
-          continue;
-
-        std::string identity = identity_msg.to_string ();
-
-        // Second frame is the payload — no delimiter to skip.
-        zmq::message_t payload_msg;
-        if (!agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
-               .has_value ())
-          continue;
-
-        forward_fn_ (GatewayInbound{.identity = std::move (identity),
-                                    .message = payload_msg.to_string ()});
-      }
     }
     spdlog::info ("[gateway] poll thread exited");
   }

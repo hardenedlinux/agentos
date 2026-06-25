@@ -58,7 +58,6 @@ namespace agentos
   // Static helpers
   // ---------------------------------------------------------------------------
 
-
   static std::string generate_uuid ()
   {
     std::ifstream f ("/proc/sys/kernel/random/uuid");
@@ -359,7 +358,8 @@ namespace agentos
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN last_run_at INTEGER");
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN next_run_at INTEGER");
       // ADR-029: add user_id to jobs
-      maybe_add_column ("ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
     }
 
     // ADR‑025: extend human_reviews with type / job_id
@@ -381,7 +381,47 @@ namespace agentos
     }
 
     spdlog::info ("[database] opened {}", db_path_);
+    seed_builtin_advisers ();
     return true;
+  }
+
+  void Database::seed_builtin_advisers ()
+  {
+    // INSERT OR IGNORE — never overwrite an existing (possibly customised) row.
+    struct Entry
+    {
+      const char *id;
+      const char *manifest;
+    };
+    static constexpr Entry entries[] = {
+      { "planning",
+        R"({"id":"planning","version":"1.0.0","description":"General-purpose task planning adviser","capabilities":["planning"]})" },
+      { "code-writer",
+        R"({"id":"code-writer","version":"1.0.0","description":"Code writing adviser","capabilities":["code_generation"]})" },
+      { "code-reviewer",
+        R"({"id":"code-reviewer","version":"1.0.0","description":"Code review adviser","capabilities":["code_review"]})" },
+    };
+
+    static constexpr const char *sql = R"(
+      INSERT OR IGNORE INTO agents
+          (id, role, binary_path, manifest, approved_by, approved_at, enabled)
+      VALUES (?, 'adviser', '', ?, 'system', ?, 1)
+    )";
+
+    const int64_t ts = now_unix ();
+    for (const auto &e : entries)
+    {
+      Stmt stmt (prepare (sql));
+      if (!stmt.s)
+        continue;
+      sqlite3_bind_text (stmt, 1, e.id,       -1, SQLITE_STATIC);
+      sqlite3_bind_text (stmt, 2, e.manifest, -1, SQLITE_STATIC);
+      sqlite3_bind_int64 (stmt, 3, ts);
+      if (sqlite3_step (stmt) != SQLITE_DONE)
+        spdlog::error ("[database] seed_builtin_advisers '{}': {}", e.id,
+                       sqlite3_errmsg (db_));
+    }
+    spdlog::info ("[database] built-in advisers seeded");
   }
 
   void Database::close ()
@@ -543,7 +583,6 @@ namespace agentos
   {
     ::agentos::bind_optional_text (stmt, col, val);
   }
-
 
   // ========================================================================
   //  row_to_* helpers (file-scope)
@@ -1320,18 +1359,21 @@ namespace agentos
     if (!db_)
       return;
     Stmt stmt (prepare (R"(
-      INSERT OR REPLACE INTO jobs (id, phase, payload, updated_at)
-      VALUES (?, ?, ?, ?)
-  )"));
+    INSERT OR REPLACE INTO jobs (id, phase, payload, goal, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+)"));
     if (!stmt.s)
       return;
 
+    const int64_t ts = now_unix ();
     sqlite3_bind_text (stmt, 1, task.id.value ().c_str (), -1,
                        SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, db::job_phase::planning.data (), -1,
                        SQLITE_STATIC);
     sqlite3_bind_text (stmt, 3, task.input_json.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 4, now_unix ());
+    sqlite3_bind_text (stmt, 4, task.goal.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 5, ts);
+    sqlite3_bind_int64 (stmt, 6, ts);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_job: {}", sqlite3_errmsg (db_));
@@ -1342,8 +1384,8 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE jobs SET user_id = ?, updated_at = ? WHERE id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE jobs SET user_id = ?, updated_at = ? WHERE id = ?"));
     if (!stmt.s)
       return;
     sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
@@ -2190,9 +2232,9 @@ namespace agentos
   // ========================================================================
 
   std::expected<std::string, Error> Database::insert_credential (
-    const std::string &caller_id,
-    const std::string &user_id, const std::string &provider,
-    const CipherBlob &token_blob, const std::optional<CipherBlob> &refresh_blob,
+    const std::string &caller_id, const std::string &user_id,
+    const std::string &provider, const CipherBlob &token_blob,
+    const std::optional<CipherBlob> &refresh_blob,
     std::optional<int64_t> expires_at)
   {
     if (!db_)
@@ -2305,7 +2347,8 @@ namespace agentos
     return true;
   }
 
-  std::vector<CredentialRow> Database::load_credentials_by_user (const std::string &user_id)
+  std::vector<CredentialRow>
+  Database::load_credentials_by_user (const std::string &user_id)
   {
     std::vector<CredentialRow> rows;
     if (!db_)
@@ -2342,10 +2385,10 @@ namespace agentos
     return rows;
   }
 
-  bool Database::update_credential_full (const std::string &id,
-                                         const CipherBlob &token_blob,
-                                         const std::optional<CipherBlob> &refresh_blob,
-                                         std::optional<int64_t> expires_at)
+  bool Database::update_credential_full (
+    const std::string &id, const CipherBlob &token_blob,
+    const std::optional<CipherBlob> &refresh_blob,
+    std::optional<int64_t> expires_at)
   {
     if (!db_)
       return false;
@@ -2626,7 +2669,8 @@ namespace agentos
       return;
     sqlite3_bind_text (stmt, 1, p.suite_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, p.version.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 3, p.subscription_key.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, p.subscription_key.c_str (), -1,
+                       SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 4, p.purchased_at);
     bind_optional_int64 (stmt, 5, p.expires_at);
     if (sqlite3_step (stmt) != SQLITE_DONE)
@@ -2730,8 +2774,7 @@ namespace agentos
   }
 
   void Database::update_suite_availability (const std::string &suite_id,
-                                            bool available,
-                                            int64_t checked_at)
+                                            bool available, int64_t checked_at)
   {
     if (!db_)
       return;
@@ -2804,4 +2847,29 @@ namespace agentos
     return std::nullopt;
   }
 
+  std::vector<Job> Database::load_jobs_since (int64_t since_unix, int limit)
+  {
+    std::vector<Job> jobs;
+    if (!db_)
+      return jobs;
+    Stmt stmt (prepare (R"(
+    SELECT id, type, goal, tags, phase,
+           created_at, updated_at, error,
+           max_iterations, current_iteration,
+           max_repairs, current_repairs,
+           reviewer_id, acceptance_criteria, last_feedback,
+           timer_id, interval_s, starts_at, last_run_at, next_run_at
+    FROM jobs
+    WHERE updated_at >= ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  )"));
+    if (!stmt.s)
+      return jobs;
+    sqlite3_bind_int64 (stmt, 1, since_unix);
+    sqlite3_bind_int (stmt, 2, limit);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      jobs.push_back (row_to_job (stmt));
+    return jobs;
+  }
 } // namespace agentos

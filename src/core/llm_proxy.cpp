@@ -208,20 +208,22 @@ namespace agentos
     constexpr int kMaxAttempts = 3;
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
-    {
-      // Construct a fresh SSLClient each attempt.
-      // host must outlive the SSLClient; it is a local std::string.
-      httplib::SSLClient cli (host, 443);
-      cli.set_ca_cert_path (ca_path);
-      cli.set_connection_timeout (timeout_s, 0);
-      cli.set_read_timeout (timeout_s, 0);
+      {
+        // Construct a fresh SSLClient each attempt.
+        // host must outlive the SSLClient; it is a local std::string.
+        spdlog::info ("[llm_proxy] connecting to host='{}' path='{}'", host,
+                      path);
+        httplib::SSLClient cli (host, 443);
+        cli.set_ca_cert_path (ca_path);
+        cli.set_connection_timeout (timeout_s, 0);
+        cli.set_read_timeout (timeout_s, 0);
 
-      spdlog::info ("[llm_proxy] attempt {}/{} → {}{}", attempt + 1,
-                    kMaxAttempts, host, path);
+        spdlog::info ("[llm_proxy] attempt {}/{} → {}{}", attempt + 1,
+                      kMaxAttempts, host, path);
 
-      auto res = cli.Post (path, headers, body, "application/json");
+        auto res = cli.Post (path, headers, body, "application/json");
 
-      if (!res)
+        if (!res)
       {
         const std::string err = httplib::to_string (res.error ());
         spdlog::warn ("[llm_proxy] network error: {}", err);

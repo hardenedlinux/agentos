@@ -357,8 +357,9 @@ namespace agentos
     // ADR-030 Suite purchase / status / agent ref lookup
 
     void insert_suite_purchase (const SuitePurchase &p);
-    std::optional<SuitePurchase> load_suite_purchase (const std::string &suite_id,
-                                                      const std::string &version);
+    std::optional<SuitePurchase>
+    load_suite_purchase (const std::string &suite_id,
+                         const std::string &version);
     void remove_suite_purchase (const std::string &suite_id,
                                 const std::string &version);
     void remove_suite_purchase (const std::string &suite_id);
@@ -371,7 +372,9 @@ namespace agentos
     std::vector<SuiteStatus> load_all_suite_status ();
 
     std::optional<std::string> resolve_agent_binary (const std::string &ref,
-                                                     const std::string &version = "");
+                                                     const std::string &version
+                                                     = "");
+    std::vector<Job> load_jobs_since (int64_t since_unix, int limit);
 
     /// Failure modes for with_transaction.
     enum class DbTxError
@@ -433,6 +436,11 @@ namespace agentos
     // -- Internal helpers -----------------------------------------------------
 
     [[nodiscard]] bool exec_ddl (const char *sql);
+
+    // Seed built-in adviser rows into the agents table (INSERT OR IGNORE).
+    // Called at the end of open() so advisers are always available without
+    // manual DB intervention.
+    void seed_builtin_advisers ();
 
     sqlite3_stmt *prepare (const char *sql);
 

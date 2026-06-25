@@ -158,6 +158,8 @@ namespace agentos
 
     void store_job (const Task &task);
     void update_job_phase (const TaskId &id, const std::string &phase);
+    void update_job_type (const std::string &job_id,
+                          const std::string &type);
     void update_job_user (const std::string &job_id,
                           const std::string &user_id);
     void update_job_plan (const TaskId &id, const std::string &plan_json);

@@ -529,6 +529,7 @@ namespace agentos
     task.input_json = (params.HasMember ("input")) ? params_json : "{}";
     db_.store_job (task);
     db_.update_job_phase (TaskId (job_id), "planning");
+    db_.update_job_type (job_id, type);
 
     // ADR-029: persist user_id on the job row.
     db_.update_job_user (job_id, user_id);

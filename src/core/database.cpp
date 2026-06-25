@@ -381,47 +381,7 @@ namespace agentos
     }
 
     spdlog::info ("[database] opened {}", db_path_);
-    seed_builtin_advisers ();
     return true;
-  }
-
-  void Database::seed_builtin_advisers ()
-  {
-    // INSERT OR IGNORE — never overwrite an existing (possibly customised) row.
-    struct Entry
-    {
-      const char *id;
-      const char *manifest;
-    };
-    static constexpr Entry entries[] = {
-      { "planning",
-        R"({"id":"planning","version":"1.0.0","description":"General-purpose task planning adviser","capabilities":["planning"]})" },
-      { "code-writer",
-        R"({"id":"code-writer","version":"1.0.0","description":"Code writing adviser","capabilities":["code_generation"]})" },
-      { "code-reviewer",
-        R"({"id":"code-reviewer","version":"1.0.0","description":"Code review adviser","capabilities":["code_review"]})" },
-    };
-
-    static constexpr const char *sql = R"(
-      INSERT OR IGNORE INTO agents
-          (id, role, binary_path, manifest, approved_by, approved_at, enabled)
-      VALUES (?, 'adviser', '', ?, 'system', ?, 1)
-    )";
-
-    const int64_t ts = now_unix ();
-    for (const auto &e : entries)
-    {
-      Stmt stmt (prepare (sql));
-      if (!stmt.s)
-        continue;
-      sqlite3_bind_text (stmt, 1, e.id,       -1, SQLITE_STATIC);
-      sqlite3_bind_text (stmt, 2, e.manifest, -1, SQLITE_STATIC);
-      sqlite3_bind_int64 (stmt, 3, ts);
-      if (sqlite3_step (stmt) != SQLITE_DONE)
-        spdlog::error ("[database] seed_builtin_advisers '{}': {}", e.id,
-                       sqlite3_errmsg (db_));
-    }
-    spdlog::info ("[database] built-in advisers seeded");
   }
 
   void Database::close ()
@@ -1359,24 +1319,39 @@ namespace agentos
     if (!db_)
       return;
     Stmt stmt (prepare (R"(
-    INSERT OR REPLACE INTO jobs (id, phase, payload, goal, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO jobs (id, type, phase, payload, goal, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
 )"));
     if (!stmt.s)
       return;
 
     const int64_t ts = now_unix ();
-    sqlite3_bind_text (stmt, 1, task.id.value ().c_str (), -1,
-                       SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, db::job_phase::planning.data (), -1,
-                       SQLITE_STATIC);
-    sqlite3_bind_text (stmt, 3, task.input_json.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 4, task.goal.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 5, ts);
+    sqlite3_bind_text (stmt, 1, task.id.value ().c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, "oneshot",                 -1, SQLITE_STATIC);
+    sqlite3_bind_text (stmt, 3, db::job_phase::planning.data (), -1, SQLITE_STATIC);
+    sqlite3_bind_text (stmt, 4, task.input_json.c_str (),  -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, task.goal.c_str (),        -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 6, ts);
+    sqlite3_bind_int64 (stmt, 7, ts);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_job: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_job_type (const std::string &job_id,
+                                  const std::string &type)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (
+      prepare ("UPDATE jobs SET type = ?, updated_at = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, type.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 2, now_unix ());
+    sqlite3_bind_text (stmt, 3, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] update_job_type: {}", sqlite3_errmsg (db_));
   }
 
   void Database::update_job_user (const std::string &job_id,

@@ -178,17 +178,15 @@ void register_job_commands (CLI::App &app)
           {
             using namespace agentos::cli::color;
             namespace f = agentos::cli::fmt;
-            if (!result.HasMember ("job") || !result["job"].IsObject ())
+            if (!result.HasMember ("job_id") || !result["job_id"].IsString ())
             {
               std::cerr << "invalid response\n";
               return;
             }
-            const auto &job = result["job"];
 
-            std::string id = f::str (job, "id");
-            std::string type = f::str (job, "type");
-            std::string goal = f::str (job, "goal");
-            std::string phase = f::str (job, "phase");
+            std::string id    = f::str (result, "job_id");
+            std::string phase = f::str (result, "phase");
+            std::string goal  = f::str (result, "goal");
 
             std::string phaseColored;
             if (phase == "executing" || phase == "repairing")
@@ -199,14 +197,15 @@ void register_job_commands (CLI::App &app)
               phaseColored = red (phase);
             else if (phase == "planning")
               phaseColored = cyan (phase);
+            else if (phase == "cancelled")
+              phaseColored = grey (phase);
             else
               phaseColored = phase;
 
-            std::cout << "Job " << id << "  [" << phaseColored << "]  " << type
-                      << "\n";
+            std::cout << "Job " << id << "  [" << phaseColored << "]\n";
             std::cout << "Goal: " << goal << "\n";
-            std::cout << "Created: " << f::ts (job, "created_at")
-                      << "   Updated: " << f::ts (job, "updated_at") << "\n";
+            std::cout << "Created: " << f::ts (result, "created_at")
+                      << "   Updated: " << f::ts (result, "updated_at") << "\n";
 
             if (result.HasMember ("steps") && result["steps"].IsArray ())
             {
@@ -244,9 +243,9 @@ void register_job_commands (CLI::App &app)
               }
             }
 
-            if (job.HasMember ("loop") && job["loop"].IsObject ())
+            if (result.HasMember ("loop") && result["loop"].IsObject ())
             {
-              const auto &loop = job["loop"];
+              const auto &loop = result["loop"];
               int curIter = loop.HasMember ("current_iteration")
                               ? loop["current_iteration"].GetInt ()
                               : 0;
@@ -362,6 +361,8 @@ void register_job_commands (CLI::App &app)
                 return red (p);
               if (p == "planning")
                 return cyan (p);
+              if (p == "cancelled")
+                return grey (p);
               return p;
             };
 

@@ -691,13 +691,36 @@ namespace agentos
       return;
     }
     const std::string job_id = params["job_id"].GetString ();
+
+    // Job actively executing — remove from active_jobs_.
     auto it = active_jobs_.find (job_id);
-    if (it == active_jobs_.end ())
+    if (it != active_jobs_.end ())
     {
-      reply_error (identity, request_id, -32022, "Invalid state");
-      return;
+      active_jobs_.erase (it);
     }
-    finish_job (job_id, false, "cancelled");
+    else
+    {
+      // Job not executing — verify it exists and is in a cancellable phase.
+      auto job = db_.load_job (job_id);
+      if (!job)
+      {
+        reply_error (identity, request_id, -32020, "Not found");
+        return;
+      }
+      static const std::unordered_set<std::string> cancellable
+        = {"planning", "executing", "repairing"};
+      if (!cancellable.count (job->phase))
+      {
+        reply_error (identity, request_id, -32022, "Invalid state");
+        return;
+      }
+    }
+
+    // Mark as cancelled — distinct terminal state, not failed.
+    db_.update_job_phase (TaskId (job_id), "cancelled");
+    notify ("job.phase_changed",
+            R"({"job_id":")" + job_id + R"(","new_phase":"cancelled"})");
+    spdlog::info ("[orchestrator] job {} cancelled", job_id);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
 

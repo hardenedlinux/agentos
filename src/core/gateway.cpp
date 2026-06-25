@@ -40,6 +40,9 @@ namespace agentos
 
   void Gateway::start ()
   {
+    int mandatory = 1;
+    agentos_sock_.set (zmq::sockopt::router_mandatory, mandatory);
+
     const std::string socket_path
       = (agentos_home () / "run" / "agentos.sock").string ();
     agentos_sock_.bind ("ipc://" + socket_path);
@@ -73,6 +76,8 @@ namespace agentos
   {
     static constexpr int poll_timeout_ms = 100;
 
+    spdlog::info ("[gateway] poll thread started");
+
     while (running_)
     {
       zmq::pollitem_t items[]
@@ -80,38 +85,56 @@ namespace agentos
            {static_cast<void *> (inproc_pull_), 0, ZMQ_POLLIN, 0}};
 
       try
-      {
-        zmq::poll (items, 2, std::chrono::milliseconds (poll_timeout_ms));
-      }
+        {
+          zmq::poll (items, 2, std::chrono::milliseconds (poll_timeout_ms));
+        }
       catch (const zmq::error_t &)
-      {
-        continue;
-      }
+        {
+          continue;
+        }
 
       // ── 1. Drain all outbound messages first (inproc → external) ──────
       // Sender pushes [identity][payload]; forward both frames verbatim.
       // ROUTER uses the identity frame to route; DEALER receives [payload].
-      if (items[1].revents & ZMQ_POLLIN)
-      {
-        while (running_)
-        {
-          zmq::message_t part;
-          if (!inproc_pull_.recv (part, zmq::recv_flags::dontwait).has_value ())
-            break;
 
-          bool more = part.more ();
-          agentos_sock_.send (std::move (part), more ? zmq::send_flags::sndmore
-                                                     : zmq::send_flags::none);
-          while (more)
+      if (items[1].revents & ZMQ_POLLIN)
+        {
+          while (running_)
+            {
+              zmq::message_t part;
+              if (!inproc_pull_.recv (part, zmq::recv_flags::dontwait).has_value ())
+                break;
+
+              bool has_more = part.more ();
+              spdlog::info ("[gateway] forwarding frame size={} more={}",
+                            part.size (), has_more);
+              auto flags
+                = has_more ? zmq::send_flags::sndmore : zmq::send_flags::none;
+          auto r = agentos_sock_.send (std::move (part), flags);
+          if (!r)
+          {
+            spdlog::warn ("[gateway] ROUTER send returned no value");
+          }
+
+          while (has_more)
           {
             zmq::message_t next;
             if (!inproc_pull_.recv (next, zmq::recv_flags::dontwait)
                    .has_value ())
+            {
+              spdlog::error (
+                "[gateway] expected more frames from inproc but got none");
               break;
-            more = next.more ();
-            agentos_sock_.send (std::move (next), more
-                                                    ? zmq::send_flags::sndmore
-                                                    : zmq::send_flags::none);
+            }
+            has_more = next.more ();
+            auto next_flags
+              = has_more ? zmq::send_flags::sndmore : zmq::send_flags::none;
+            r = agentos_sock_.send (std::move (next), next_flags);
+            if (!r)
+            {
+              spdlog::warn (
+                "[gateway] ROUTER send (continuation) returned no value");
+            }
           }
         }
       }
@@ -122,6 +145,7 @@ namespace agentos
       // convention.
       if (running_ && (items[0].revents & ZMQ_POLLIN))
       {
+        spdlog::info ("[gateway] inbound message arrived");
         zmq::message_t identity_msg;
         if (!agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
                .has_value ())
@@ -132,13 +156,14 @@ namespace agentos
         // Second frame is the payload — no delimiter to skip.
         zmq::message_t payload_msg;
         if (!agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
-            .has_value ())
+               .has_value ())
           continue;
 
         forward_fn_ (GatewayInbound{.identity = std::move (identity),
                                     .message = payload_msg.to_string ()});
       }
     }
+    spdlog::info ("[gateway] poll thread exited");
   }
 
 } // namespace agentos

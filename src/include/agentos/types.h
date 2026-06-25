@@ -251,18 +251,19 @@ namespace agentos
   struct OrchestratorEvent
   {
     enum class Kind
-    {
-      GatewayInbound, // raw message from Gateway
-      WorkerDone,     // Dispatcher reaper: Worker completed
-      WorkerFailed,   // Dispatcher reaper: Worker failed
-      AdviserDone,    // Adviser thread completed successfully
-      AdviserFailed,  // Adviser thread exited with error
-      MasterDecision, // Master has reached a decision
-      TimerFired,     // from PeriodicExecutor (scheduled task)
-    };
+      {
+        GatewayInbound, // raw message from Gateway
+        WorkerDone,     // Dispatcher reaper: Worker completed
+        WorkerFailed,   // Dispatcher reaper: Worker failed
+        AdviserDone,    // Adviser thread completed successfully
+        AdviserFailed,  // Adviser thread exited with error
+        MasterDecision, // Master has reached a decision
+        TimerFired,     // from PeriodicExecutor (scheduled task)
+      };
 
     Kind kind;
     std::string payload_json;
+    std::string identity;
     std::string job_id; // associated job (replaces TaskId where relevant)
   };
 
@@ -270,8 +271,8 @@ namespace agentos
   struct MasterEvent
   {
     enum class Kind
-    {
-      JobSubmit,       // Orchestrator: new job needs planning
+      {
+        JobSubmit,       // Orchestrator: new job needs planning
       WorkerExhausted, // Orchestrator: no Worker can handle a step
       AdviserFailed,   // Orchestrator: Adviser thread failed
       ScheduledTask,   // PeriodicExecutor: periodic review / follow-up
@@ -412,30 +413,34 @@ namespace agentos
     std::string job_id;
     std::string step_id;
     std::string run_id;
-    std::string action;               // injected|denied|refreshed|submitted|revoked|refresh_failed
+    std::string
+      action; // injected|denied|refreshed|submitted|revoked|refresh_failed
     std::optional<std::string> reason;
     int64_t timestamp = 0;
   };
 
   // ADR-030 Suite types
-  struct SuitePurchase {
-      std::string suite_id;
-      std::string version;
-      std::string subscription_key;
-      int64_t purchased_at = 0;
-      std::optional<int64_t> expires_at;
+  struct SuitePurchase
+  {
+    std::string suite_id;
+    std::string version;
+    std::string subscription_key;
+    int64_t purchased_at = 0;
+    std::optional<int64_t> expires_at;
   };
 
-  struct SuiteStatus {
-      std::string suite_id;
-      std::string version;
-      bool available = true;
-      int64_t checked_at = 0;
+  struct SuiteStatus
+  {
+    std::string suite_id;
+    std::string version;
+    bool available = true;
+    int64_t checked_at = 0;
   };
 
-  namespace suite_error {
-  inline constexpr int suite_unavailable = -32040;
-  inline constexpr int capability_unavailable = -32041;
-  }
+  namespace suite_error
+  {
+    inline constexpr int suite_unavailable = -32040;
+    inline constexpr int capability_unavailable = -32041;
+  } // namespace suite_error
 
 } // namespace agentos

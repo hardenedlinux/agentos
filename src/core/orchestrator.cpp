@@ -35,6 +35,7 @@
 #include <spdlog/spdlog.h>
 
 #include <fstream>
+#include <iostream>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <unordered_set>
@@ -326,7 +327,10 @@ namespace agentos
     active_keys_.clear ();
     auto keys = db_.load_active_access_keys ();
     for (auto &k : keys)
-      active_keys_[k.key] = std::move (k);
+      {
+        // spdlog::info ("load key: {}", k.key);
+        active_keys_[k.key] = std::move (k);
+      }
     spdlog::info ("[orchestrator] loaded {} active access keys",
                   active_keys_.size ());
   }
@@ -334,16 +338,23 @@ namespace agentos
   std::optional<Database::AccessKey>
   Orchestrator::authenticate (const std::string &key_value) const
   {
+    // Reject malformed keys before any processing.
+    // Hex-encoded 32 bytes = exactly 64 chars, [0-9a-f] only.
+    if (key_value.size () != 64)
+      return std::nullopt;
+    for (char c : key_value)
+    {
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+        return std::nullopt;
+    }
+
     auto it = active_keys_.find (key_value);
     if (it == active_keys_.end ())
       return std::nullopt;
-
     const auto &ak = it->second;
-    // Compute SHA-256(key || salt) and compare with stored hash.
     const std::string computed = sha256_hex (key_value, ak.key_salt);
     if (!ct_equal (computed, ak.key_hash))
       return std::nullopt;
-
     return ak;
   }
 
@@ -359,6 +370,8 @@ namespace agentos
 
   void Orchestrator::handle_gateway_inbound (const OrchestratorEvent &ev)
   {
+    spdlog::info ("[orchestrator] inbound method");
+
     rapidjson::Document doc;
     if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
     {
@@ -367,10 +380,11 @@ namespace agentos
       return;
     }
 
-    const std::string identity
-      = doc.HasMember ("_identity") && doc["_identity"].IsString ()
-          ? doc["_identity"].GetString ()
-          : "";
+    // identity comes from the ZMQ identity frame, attached to the event by
+    // Central's forward_fn. It is not present in the JSON payload — the
+    // previous "_identity" lookup was a no-op that left every response
+    // unroutable.
+    const std::string identity = ev.identity;
     const std::string request_id = doc.HasMember ("id") && doc["id"].IsString ()
                                      ? doc["id"].GetString ()
                                      : "";
@@ -386,7 +400,7 @@ namespace agentos
     // 1. Missing key.
     if (key_value.empty ())
     {
-      reply_error (identity, request_id, -32010, "Unauthorized");
+      reply_error (identity, request_id, -32010, "Missing key, unauthorized");
       return;
     }
 
@@ -394,7 +408,7 @@ namespace agentos
     auto ak = authenticate (key_value);
     if (!ak)
     {
-      reply_error (identity, request_id, -32010, "Unauthorized");
+      reply_error (identity, request_id, -32010, "Failed to authorize");
       return;
     }
 
@@ -569,6 +583,8 @@ namespace agentos
                                    const std::string &identity,
                                    const std::string &request_id)
   {
+    spdlog::info ("[orchestrator] cmd_job_list called");
+
     // Return list of in-flight job IDs.
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);

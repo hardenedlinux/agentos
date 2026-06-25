@@ -37,6 +37,12 @@ static std::string resolve_socket_path()
     return base.string();
 }
 
+// ZMQ requires a transport scheme; unix-domain sockets use ipc://<path>.
+static std::string zmq_endpoint(const std::string& path)
+{
+    return "ipc://" + path;
+}
+
 // ---- access key loading -----------------------------------------------------
 
 static std::string load_admin_key()
@@ -67,6 +73,14 @@ static std::string make_uuid()
 }
 
 // ---- construction -----------------------------------------------------------
+//
+// IPC connect is asynchronous. ZMQ buffers send() until the handshake
+// completes, so we do not block here — we trust ZMQ to flush the request
+// once the link is up. The poll-for-response loop in send() has its own
+// timeout (default 5s) which is the user-visible "daemon not responding"
+// budget. A local IPC handshake is normally complete within microseconds;
+// any wait beyond that means the daemon really is not there.
+//
 
 CliClient::CliClient(int timeout_ms)
     : socket_path_(resolve_socket_path()),
@@ -75,7 +89,7 @@ CliClient::CliClient(int timeout_ms)
       ctx_(1),
       sock_(ctx_, zmq::socket_type::dealer)
 {
-    sock_.connect(socket_path_.c_str());
+    sock_.connect(zmq_endpoint(socket_path_));
 }
 
 CliClient::CliClient(std::string socket_path, std::string access_key,
@@ -86,7 +100,7 @@ CliClient::CliClient(std::string socket_path, std::string access_key,
       ctx_(1),
       sock_(ctx_, zmq::socket_type::dealer)
 {
-    sock_.connect(socket_path_.c_str());
+    sock_.connect(zmq_endpoint(socket_path_));
 }
 
 void CliClient::set_socket_path(std::string path)
@@ -95,7 +109,7 @@ void CliClient::set_socket_path(std::string path)
     socket_path_ = std::move(path);
     sock_.close();
     sock_ = zmq::socket_t(ctx_, zmq::socket_type::dealer);
-    sock_.connect(socket_path_.c_str());
+    sock_.connect(zmq_endpoint(socket_path_));
 }
 
 void CliClient::set_access_key(std::string key)

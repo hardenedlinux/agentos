@@ -69,6 +69,7 @@ namespace agentos
                   OrchestratorEvent ev;
                   ev.kind = OrchestratorEvent::Kind::GatewayInbound;
                   ev.payload_json = std::move (msg.message);
+                  ev.identity = std::move (msg.identity);
                   send_to_orchestrator (std::move (ev));
                 }),
       orchestrator_ (
@@ -119,8 +120,9 @@ namespace agentos
     // 3. Bind inproc PULL before any thread pushes to gateway-out.
     gateway_.bind_inproc ();
 
-    // 4. Bind gateway_push_ PUSH socket.
-    gateway_push_sock_.bind ("inproc://gateway-out-push");
+    // 4. Connect gateway_push_ PUSH socket, not bind, since Gateway should've
+    // done it.
+    gateway_push_sock_.connect ("inproc://gateway-out");
 
     // 5. ADR-028: disable core dumps to protect vault key in memory.
     if (prctl (PR_SET_DUMPABLE, 0) != 0)
@@ -138,8 +140,8 @@ namespace agentos
       }
     }
 
-      // 7. Init and start Orchestrator.
-      orchestrator_.init ();
+    // 7. Init and start Orchestrator.
+    orchestrator_.init ();
     orchestrator_.start ();
 
     // 8. Start Master.
@@ -224,6 +226,8 @@ namespace agentos
   void Central::gateway_push (const std::string &payload,
                               const std::string &identity)
   {
+    spdlog::info ("[central] gateway_push identity get");
+
     if (!identity.empty ())
     {
       zmq::message_t id_frame (identity.data (), identity.size ());

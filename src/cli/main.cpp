@@ -115,37 +115,39 @@ int main (int argc, char **argv)
   app.add_flag ("--json", "JSON output mode");
   app.add_flag ("--no-color", no_color_flag, "Disable terminal color");
 
+  spdlog::info ("block here?");
+
   // ---------- daemon mode ----------
   auto *run = app.add_subcommand ("run", "Start the AgentOS daemon");
   run->callback (
                  [&]
                  {
-                   print_banner ();
                    spdlog::set_level (spdlog::level::info);
                    spdlog::info ("AgentOS {} starting", "0.1.0");
 
-                   agentos::initialise_home (agentos::agentos_home ());
+      agentos::initialise_home (agentos::agentos_home ());
 
-                   std::string error;
-                   auto config = agentos::load_config (
-                                                       (agentos::agentos_home () / "config.toml").string (), error);
-                   if (!config)
-                     {
-                       agentos::cli::die (2, std::string ("config: ") + error);
-                     }
-                   agentos::read_env_api_key (*config);
+      std::string error;
+      auto config = agentos::load_config (
+        (agentos::agentos_home () / "config.toml").string (), error);
+      if (!config)
+      {
+        agentos::cli::die (2, std::string ("config: ") + error);
+      }
+      agentos::read_env_api_key (*config);
 
-                   agentos::Central central (*config);
-                   g_central = &central;
-                   std::signal (SIGINT, signal_handler);
-                   std::signal (SIGTERM, signal_handler);
+      agentos::Central central (*config);
+      g_central = &central;
+      std::signal (SIGINT, signal_handler);
+      std::signal (SIGTERM, signal_handler);
 
-                   spdlog::info ("daemon starting");
-                   central.run ();
-                 });
+      spdlog::info ("daemon starting");
+      central.run ();
+    });
 
   // ---------- register all subcommand groups ----------
   register_key_commands (app);
+  spdlog::info ("prepare to register job command");
   register_job_commands (app);
   register_worker_commands (app);
   register_adviser_commands (app);

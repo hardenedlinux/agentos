@@ -17,6 +17,8 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -261,6 +263,20 @@ namespace agentos::forge
 
   bool ForgeCoordinator::call_code_writer (ForgePipelineJob &job)
   {
+    // Fail fast on missing API key — this is a configuration error,
+    // not a transient failure. Retrying will not help (ADR-009 Enforce Layer).
+    const char *api_key_env = std::getenv ("AGENTOS_ADVISER_API_KEY");
+    if (!api_key_env || std::strlen (api_key_env) == 0)
+    {
+      spdlog::error ("[forge_coordinator] AGENTOS_ADVISER_API_KEY is not set "
+                     "— Code Writer cannot call LLM. Set the environment "
+                     "variable and restart the daemon.");
+      job.feedback = "configuration error: AGENTOS_ADVISER_API_KEY not set";
+      // Mark as terminal so process() escalates immediately without retrying.
+      job.attempt = job.max_attempts;
+      return false;
+    }
+
     // Build input JSON per ADR-019 Code Writer contract.
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -556,13 +572,19 @@ namespace agentos::forge
     mw.String (job.id.c_str ());
 
     // capabilities array — one entry built from requirement_json fields.
+    // The method name must match the command name used in the plan step
+    // so that dispatch_next_step can find this worker by capability.
+    const std::string capability_method
+      = (req_doc.IsObject () && req_doc.HasMember ("method")
+         && req_doc["method"].IsString ())
+          ? req_doc["method"].GetString ()
+          : worker_id; // fallback to worker_id if method absent
+
     mw.Key ("capabilities");
     mw.StartArray ();
     mw.StartObject ();
     mw.Key ("method");
-    // Use forge_job_id as the method name — a stable unique identifier.
-    // The Orchestrator will use this to match tasks to this worker.
-    mw.String (worker_id.c_str ());
+    mw.String (capability_method.c_str ());
     mw.Key ("description");
     if (req_doc.IsObject () && req_doc.HasMember ("description")
         && req_doc["description"].IsString ())

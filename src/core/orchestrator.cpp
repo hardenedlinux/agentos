@@ -37,6 +37,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <thread>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <unordered_set>
@@ -449,6 +450,10 @@ namespace agentos
       cmd_review_reject (params_json, identity, request_id);
     else if (method == "worker.register")
       cmd_worker_register (params_json, identity, request_id);
+    else if (method == "worker.list")
+      cmd_worker_list (params_json, identity, request_id);
+    else if (method == "adviser.list")
+      cmd_adviser_list (params_json, identity, request_id);
     // --- ADR-028: credential vault methods ---
     else if (method == "cred.submit")
       cmd_cred_submit (params_json, identity, request_id);
@@ -788,6 +793,83 @@ namespace agentos
   }
 
   // ---------------------------------------------------------------------------
+  // Command: worker.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_list (const std::string & /*params_json*/,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    auto agents = db_.load_enabled_agents ();
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("workers");
+    w.StartArray ();
+    for (const auto &a : agents)
+    {
+      if (a.role != "worker")
+        continue;
+      w.StartObject ();
+      w.Key ("id");
+      w.String (a.id.c_str ());
+      w.Key ("tier");
+      w.String ("tier0");
+      w.Key ("provenance");
+      w.String ("manual");
+      w.Key ("enabled");
+      w.Bool (true);
+      w.Key ("capabilities");
+      w.StartArray ();
+      w.EndArray ();
+      w.Key ("registered_at");
+      w.Int64 (0);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: adviser.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_adviser_list (const std::string & /*params_json*/,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    auto agents = db_.load_enabled_agents ();
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("advisers");
+    w.StartArray ();
+    for (const auto &a : agents)
+    {
+      if (a.role != "adviser")
+        continue;
+      w.StartObject ();
+      w.Key ("id");
+      w.String (a.id.c_str ());
+      w.Key ("description");
+      w.String ("");
+      w.Key ("skill_path");
+      w.String (a.binary_path.c_str ());
+      w.Key ("model");
+      w.String ("");
+      w.Key ("active");
+      w.Bool (false);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
   // Command: worker.register
   // ---------------------------------------------------------------------------
 
@@ -921,6 +1003,144 @@ namespace agentos
 
     const std::string type = doc["type"].GetString ();
 
+    if (type == "spawn_adviser")
+    {
+      // Master has selected an Adviser — spawn it as a detached thread.
+      // Thread calls LlmProxy, produces plan_ready or AdviserFailed.
+      // ADR-018: skill.md is the system prompt; Adviser owns its session.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      const std::string adviser_id
+        = doc.HasMember ("adviser_id") && doc["adviser_id"].IsString ()
+            ? doc["adviser_id"].GetString ()
+            : "";
+      const std::string goal
+        = doc.HasMember ("goal") && doc["goal"].IsString ()
+            ? doc["goal"].GetString ()
+            : "";
+
+      if (job_id.empty () || adviser_id.empty ())
+      {
+        spdlog::error (
+          "[orchestrator] spawn_adviser: missing job_id or adviser_id");
+        return;
+      }
+
+      spdlog::info ("[orchestrator] spawning adviser {} for job {}",
+                    adviser_id, job_id);
+
+      // Read skill.md as system prompt (ADR-018).
+      const char *home_env = std::getenv ("HOME");
+      const std::string skill_path
+        = std::string (home_env ? home_env : "")
+          + "/.agentos/advisers/" + adviser_id + "/skill.md";
+      std::string system_prompt;
+      {
+        std::ifstream f (skill_path);
+        if (f)
+          system_prompt.assign (std::istreambuf_iterator<char> (f),
+                                std::istreambuf_iterator<char> ());
+        else
+          spdlog::warn (
+            "[orchestrator] skill.md not found for adviser {}, using empty "
+            "system prompt",
+            adviser_id);
+      }
+
+      // Detach LLM thread — never blocks Orchestrator event loop.
+      // Captures by value; `this` is safe (Orchestrator outlives all threads).
+      std::thread (
+        [this, job_id, goal,
+         system_prompt = std::move (system_prompt)] () mutable
+        {
+          // LlmProxy has no complete(); LlmClient wraps it (ADR-017).
+          LlmClient client (llm_, config_.llm);
+
+          LlmRequest req;
+          req.system_prompt = std::move (system_prompt);
+          req.user_prompt
+            = "Decompose the following goal into an ordered list of steps. "
+              "Respond ONLY with a JSON object — no markdown, no prose — in "
+              "this exact shape: "
+              "{\"steps\":[{\"id\":\"<uuid>\",\"command\":\"<capability>\","
+              "\"description\":\"<what this step does>\"},...]}. "
+              "Goal: "
+              + goal;
+          req.max_tokens = 1024;
+
+          auto result = client.complete (req);
+
+          OrchestratorEvent ev;
+          ev.job_id = job_id;
+
+          if (!result.ok)
+          {
+            spdlog::error (
+              "[orchestrator] adviser LLM call failed for job {}: {}", job_id,
+              result.error);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json = R"({"job_id":")" + job_id
+                              + R"(","reason":"LLM call failed"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          // Parse steps JSON from LLM response.
+          rapidjson::Document resp;
+          const std::string &content = result.value.content;
+          if (resp.Parse (content.c_str ()).HasParseError ()
+              || !resp.IsObject () || !resp.HasMember ("steps")
+              || !resp["steps"].IsArray ())
+          {
+            spdlog::error (
+              "[orchestrator] adviser produced invalid plan for job {}: {}",
+              job_id, content);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json = R"({"job_id":")" + job_id
+                              + R"(","reason":"invalid plan JSON"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          // Assign stable UUIDs to any steps that lack one.
+          for (auto &s : resp["steps"].GetArray ())
+          {
+            if (!s.HasMember ("id") || !s["id"].IsString ()
+                || std::string (s["id"].GetString ()).empty ())
+            {
+              s.AddMember (
+                rapidjson::Value ("id", resp.GetAllocator ()),
+                rapidjson::Value (new_uuid ().c_str (), resp.GetAllocator ()),
+                resp.GetAllocator ());
+            }
+          }
+
+          // Build plan_ready payload — enqueue directly as MasterDecision
+          // so handle_master_decision picks it up on the Orchestrator thread.
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("type");
+          w.String ("plan_ready");
+          w.Key ("job_id");
+          w.String (job_id.c_str ());
+          w.Key ("job_type");
+          w.String ("oneshot");
+          w.Key ("steps");
+          resp["steps"].Accept (w);
+          w.EndObject ();
+
+          ev.kind = OrchestratorEvent::Kind::MasterDecision;
+          ev.payload_json = buf.GetString ();
+          enqueue (std::move (ev));
+        })
+        .detach ();
+
+      return;
+    }
+
     if (type == "plan_ready")
     {
       // Master has produced a plan — build ActiveJob and start pipeline.
@@ -940,6 +1160,7 @@ namespace agentos
 
       if (doc.HasMember ("steps") && doc["steps"].IsArray ())
       {
+        int order = 0;
         for (const auto &s : doc["steps"].GetArray ())
         {
           ActiveStep as;
@@ -949,6 +1170,8 @@ namespace agentos
             as.step.command = s["command"].GetString ();
           if (s.HasMember ("description") && s["description"].IsString ())
             as.step.description = s["description"].GetString ();
+          // Persist step to DB so job.status can display it (ADR-022).
+          db_.store_pipeline_task (TaskId (job_id), as.step, order++);
           job.pending_steps.push_back (std::move (as));
         }
       }
@@ -956,6 +1179,69 @@ namespace agentos
       db_.update_job_phase (TaskId (job_id), "executing");
       active_jobs_[job_id] = std::move (job);
       dispatch_next_step (active_jobs_[job_id]);
+    }
+    else if (type == "trigger_forge")
+    {
+      // Launch Forge pipeline to generate a Worker for the missing capability.
+      // ADR-019: ForgeCoordinator owns the state machine; Orchestrator just
+      // creates the DB record and posts the request.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      const std::string command
+        = doc.HasMember ("command") && doc["command"].IsString ()
+            ? doc["command"].GetString ()
+            : "";
+
+      if (job_id.empty () || command.empty ())
+      {
+        spdlog::error ("[orchestrator] trigger_forge: missing job_id or command");
+        finish_job (job_id, false, "trigger_forge: missing fields");
+        return;
+      }
+
+      // Build requirement_json (ADR-019 Code Writer input contract).
+      rapidjson::StringBuffer req_buf;
+      rapidjson::Writer<rapidjson::StringBuffer> rw (req_buf);
+      rw.StartObject ();
+      rw.Key ("description");
+      rw.String (("Implement capability: " + command).c_str ());
+      rw.Key ("method");
+      rw.String (command.c_str ());
+      rw.Key ("input_schema");
+      rw.StartObject (); rw.EndObject ();
+      rw.Key ("output_schema");
+      rw.StartObject (); rw.EndObject ();
+      rw.EndObject ();
+      const std::string requirement_json = req_buf.GetString ();
+
+      // Create and persist the forge_pipeline_jobs row (persist-before-act).
+      const std::string forge_job_id = new_uuid ();
+      ForgePipelineJob fpj;
+      fpj.id               = forge_job_id;
+      fpj.task_id          = job_id;
+      fpj.status           = ForgeStatus::drafting;
+      fpj.requirement_json = requirement_json;
+      fpj.attempt          = 0;
+      fpj.max_attempts     = 3;
+      fpj.created_at       = now_unix ();
+      fpj.updated_at       = now_unix ();
+      db_.store_forge_pipeline_job (fpj);
+
+      spdlog::info ("[orchestrator] trigger_forge job_id={} command={} "
+                    "forge_job_id={}",
+                    job_id, command, forge_job_id);
+
+      // Post to ForgeCoordinator — returns immediately.
+      forge::ForgeRequest freq;
+      freq.forge_job_id     = forge_job_id;
+      freq.task_id          = job_id;
+      freq.requirement_json = requirement_json;
+      freq.feedback         = "";
+      freq.attempt          = 0;
+      freq.max_attempts     = 3;
+      forge_.post (std::move (freq));
     }
     else if (type == "forge_complete")
     {
@@ -967,12 +1253,30 @@ namespace agentos
       const int outcome = doc.HasMember ("outcome") && doc["outcome"].IsInt ()
                             ? doc["outcome"].GetInt ()
                             : -1;
+      const std::string worker_id
+        = doc.HasMember ("worker_id") && doc["worker_id"].IsString ()
+            ? doc["worker_id"].GetString ()
+            : "";
+
+      spdlog::info ("[orchestrator] forge_complete task_id={} outcome={} "
+                    "worker_id={} active_jobs_size={}",
+                    task_id, outcome, worker_id, active_jobs_.size ());
 
       if (outcome == 0) // ForgeResult::Outcome::promoted
       {
         auto it = active_jobs_.find (task_id);
         if (it != active_jobs_.end ())
+        {
+          spdlog::info ("[orchestrator] forge_complete: resuming job {}",
+                        task_id);
           dispatch_next_step (it->second);
+        }
+        else
+        {
+          spdlog::error ("[orchestrator] forge_complete: job {} not in "
+                         "active_jobs_ — cannot resume",
+                         task_id);
+        }
       }
       else
       {

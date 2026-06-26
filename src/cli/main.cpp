@@ -102,7 +102,20 @@ int main (int argc, char **argv)
   spdlog::set_default_logger (logger);
   spdlog::set_level (spdlog::level::off);
 
-  if (!completing)
+  // Print banner only for bare `agentos` invocation (no subcommand args).
+  // Subcommands (job, key, worker, ...) suppress the banner so only
+  // the actual command output reaches the terminal.
+  bool has_subcommand = false;
+  for (int i = 1; i < argc; ++i)
+  {
+    std::string_view arg (argv[i]);
+    if (!arg.empty () && arg[0] != '-')
+    {
+      has_subcommand = true;
+      break;
+    }
+  }
+  if (!completing && !has_subcommand)
     print_banner ();
 
   CLI::App app{"AgentOS — AI agent orchestration daemon"};
@@ -115,7 +128,6 @@ int main (int argc, char **argv)
   app.add_flag ("--json", "JSON output mode");
   app.add_flag ("--no-color", no_color_flag, "Disable terminal color");
 
-  spdlog::info ("block here?");
 
   // ---------- daemon mode ----------
   auto *run = app.add_subcommand ("run", "Start the AgentOS daemon");
@@ -147,7 +159,6 @@ int main (int argc, char **argv)
 
   // ---------- register all subcommand groups ----------
   register_key_commands (app);
-  spdlog::info ("prepare to register job command");
   register_job_commands (app);
   register_worker_commands (app);
   register_adviser_commands (app);

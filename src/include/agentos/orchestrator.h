@@ -163,6 +163,14 @@ namespace agentos
                               const std::string &identity,
                               const std::string &request_id);
 
+    void cmd_worker_list (const std::string &params_json,
+                          const std::string &identity,
+                          const std::string &request_id);
+
+    void cmd_adviser_list (const std::string &params_json,
+                           const std::string &identity,
+                           const std::string &request_id);
+
     // --- ADR-028: cred.* methods ---
     void cmd_cred_submit (const std::string &params_json,
                           const std::string &identity,

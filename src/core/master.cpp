@@ -405,6 +405,24 @@ namespace agentos
       spdlog::error ("[master] no advisers registered");
       return "";
     }
+
+    // For ordinary job planning, always use the 'planning' adviser (ADR-002).
+    // code-writer and code-reviewer are Forge-internal and must never be
+    // selected here. Fall back to LLM selection only when no 'planning'
+    // adviser is registered (custom deployments).
+    for (const auto &a : advisers)
+    {
+      if (a.id.value () == "planning")
+      {
+        spdlog::info ("[master] job {} → planning adviser (direct)", job_id);
+        return "planning";
+      }
+    }
+
+    spdlog::warn ("[master] no 'planning' adviser found, falling back to LLM "
+                  "selection for job {}",
+                  job_id);
+
     if (advisers.size () == 1)
       return advisers.front ().id.value ();
 
@@ -412,7 +430,7 @@ namespace agentos
     req.system_prompt
       = "You are the Master of an agent orchestration system. "
         "Given a task goal and a list of available advisers, select the most "
-        "appropriate adviser. "
+        "appropriate adviser for planning. "
         "Respond with a JSON object containing only 'adviser_id'. "
         "Available advisers: "
         + build_adviser_context ();
@@ -424,7 +442,7 @@ namespace agentos
     {
       spdlog::error ("[master] LLM adviser selection failed for job {}: {}",
                      job_id, result.error);
-      return advisers.front ().id.value (); // fallback to first
+      return advisers.front ().id.value ();
     }
 
     rapidjson::Document doc;

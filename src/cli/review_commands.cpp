@@ -4,6 +4,7 @@
 #include "agentos/cli_format.h"
 #include "agentos/review_params.h"
 #include <CLI/CLI.hpp>
+#include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
@@ -25,12 +26,12 @@ void register_review_commands(CLI::App& app) {
     auto* review = app.add_subcommand("review", "Manage human review queue");
     review->require_subcommand(1);
 
-    int         timeout_ms  = 5000;
-    std::string socket_path;
-    bool        json_flag   = false;
-    review->add_option("--timeout", timeout_ms)->default_val(5000);
-    review->add_option("--socket",  socket_path);
-    review->add_flag("--json",      json_flag);
+    auto timeout_ms  = std::make_shared<int>(5000);
+    auto socket_path = std::make_shared<std::string>();
+    auto json_flag   = std::make_shared<bool>(false);
+    review->add_option("--timeout", *timeout_ms)->default_val(5000);
+    review->add_option("--socket",  *socket_path);
+    review->add_flag("--json",      *json_flag);
 
     // ---- review list ----
     {
@@ -38,13 +39,13 @@ void register_review_commands(CLI::App& app) {
         std::string status, type;
         rlist->add_option("--status", status);
         rlist->add_option("--type", type);
-        rlist->callback([&] {
+        rlist->callback([timeout_ms, socket_path, json_flag, status, type] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_review_list_params(status, type);
                 auto result = client.send("review.list", std::move(params));
-                if (json_flag) {
+                if (*json_flag) {
                     print_json(result);
                 } else {
                     using namespace agentos::cli::color;
@@ -109,10 +110,10 @@ void register_review_commands(CLI::App& app) {
         auto* rshow = review->add_subcommand("show", "Show review details");
         std::string review_id;
         rshow->add_option("review_id", review_id)->required();
-        rshow->callback([&] {
+        rshow->callback([timeout_ms, socket_path, review_id] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_review_id_params(review_id);
                 auto result = client.send("review.show", std::move(params));
                 print_json(result);
@@ -128,13 +129,13 @@ void register_review_commands(CLI::App& app) {
         auto* rapprove = review->add_subcommand("approve", "Approve a review");
         std::string review_id;
         rapprove->add_option("review_id", review_id)->required();
-        rapprove->callback([&] {
+        rapprove->callback([timeout_ms, socket_path, json_flag, review_id] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_review_id_params(review_id);
                 auto result = client.send("review.approve", std::move(params));
-                if (json_flag) { print_json(result); }
+                if (*json_flag) { print_json(result); }
                 else { std::cout << "approved: " << review_id << "\n"; }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
@@ -149,13 +150,13 @@ void register_review_commands(CLI::App& app) {
         std::string review_id, message;
         rreject->add_option("review_id", review_id)->required();
         rreject->add_option("-m,--message", message)->required();
-        rreject->callback([&] {
+        rreject->callback([timeout_ms, socket_path, json_flag, review_id, message] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_review_reject_params(review_id, message);
                 auto result = client.send("review.reject", std::move(params));
-                if (json_flag) { print_json(result); }
+                if (*json_flag) { print_json(result); }
                 else { std::cout << "rejected: " << review_id << "\n"; }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());

@@ -110,6 +110,8 @@ namespace agentos
 
     master_.start ();
 
+    forge_coordinator_.start ();
+
     periodic_.init ();
     periodic_.start ();
 

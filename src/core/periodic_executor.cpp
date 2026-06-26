@@ -54,11 +54,44 @@ void PeriodicExecutor::init ()
   // timer_tasks DDL lives in Database::open() — no DDL here.
   load_enabled_tasks ();
   seed_heartbeat_if_absent ();
+  seed_reaper_if_absent ();
 
   spdlog::info ("[periodic_executor] initialised: heartbeat={}s",
                 (config_.gateway.heartbeat_interval_s > 0)
                   ? config_.gateway.heartbeat_interval_s
                   : 30);
+}
+
+// ---------------------------------------------------------------------------
+// seed_reaper_if_absent — reap worker children every 5 seconds
+// ---------------------------------------------------------------------------
+
+void PeriodicExecutor::seed_reaper_if_absent ()
+{
+  if (db_.timer_task_exists ("reaper"))
+    return;
+
+  const int64_t now = now_s ();
+
+  TimerTask tt;
+  tt.id           = "reaper";
+  tt.interval_s   = 5;
+  tt.next_fire    = now + 5;
+  tt.target       = TaskTarget::Orchestrator;
+  tt.payload_json = "";
+  tt.enabled      = true;
+  tt.created_at   = now;
+  db_.insert_timer_task (tt);
+
+  Task t;
+  t.id           = "reaper";
+  t.next_fire    = tt.next_fire;
+  t.interval_s   = 5;
+  t.target       = TaskTarget::Orchestrator;
+  t.payload_json = "";
+  heap_.push (std::move (t));
+
+  spdlog::info ("[periodic_executor] seeded reaper task (interval=5s)");
 }
 
 // ---------------------------------------------------------------------------

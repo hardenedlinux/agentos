@@ -4,6 +4,7 @@
 #include "agentos/cli_format.h"
 #include "agentos/forge_params.h"
 #include <CLI/CLI.hpp>
+#include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
@@ -25,25 +26,25 @@ void register_forge_commands(CLI::App& app) {
     auto* forge = app.add_subcommand("forge", "Inspect forge pipeline");
     forge->require_subcommand(1);
 
-    int         timeout_ms  = 5000;
-    std::string socket_path;
-    bool        json_flag   = false;
-    forge->add_option("--timeout", timeout_ms)->default_val(5000);
-    forge->add_option("--socket",  socket_path);
-    forge->add_flag("--json",      json_flag);
+    auto timeout_ms  = std::make_shared<int>(5000);
+    auto socket_path = std::make_shared<std::string>();
+    auto json_flag   = std::make_shared<bool>(false);
+    forge->add_option("--timeout", *timeout_ms)->default_val(5000);
+    forge->add_option("--socket",  *socket_path);
+    forge->add_flag("--json",      *json_flag);
 
     // ---- forge list ----
     {
         auto* flist = forge->add_subcommand("list", "List forge jobs");
         std::string phase;
         flist->add_option("--phase", phase);
-        flist->callback([&] {
+        flist->callback([timeout_ms, socket_path, json_flag, phase] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_forge_list_params(phase);
                 auto result = client.send("forge.list", std::move(params));
-                if (json_flag) {
+                if (*json_flag) {
                     print_json(result);
                 } else {
                     using namespace agentos::cli::color;
@@ -115,10 +116,10 @@ void register_forge_commands(CLI::App& app) {
         auto* fstatus = forge->add_subcommand("status", "Show forge job status");
         std::string forge_id;
         fstatus->add_option("forge_id", forge_id)->required();
-        fstatus->callback([&] {
+        fstatus->callback([timeout_ms, socket_path, forge_id] {
             try {
-                agentos::cli::CliClient client(timeout_ms);
-                if (!socket_path.empty()) client.set_socket_path(socket_path);
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
                 auto params = agentos::cli::build_forge_status_params(forge_id);
                 auto result = client.send("forge.status", std::move(params));
                 print_json(result);

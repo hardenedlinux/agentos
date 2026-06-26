@@ -613,6 +613,11 @@ namespace agentos
       j.schedule = std::move (s);
     }
 
+    // user_id (column 20) — present when SELECTed by load_jobs_since
+    if (sqlite3_column_count (stmt) > 20
+        && sqlite3_column_type (stmt, 20) != SQLITE_NULL)
+      j.user_id = column_text_or_empty (stmt, 20);
+
     return j;
   }
 
@@ -1319,8 +1324,8 @@ namespace agentos
     if (!db_)
       return;
     Stmt stmt (prepare (R"(
-    INSERT OR REPLACE INTO jobs (id, type, phase, payload, goal, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO jobs (id, type, phase, payload, goal, user_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 )"));
     if (!stmt.s)
       return;
@@ -1331,8 +1336,9 @@ namespace agentos
     sqlite3_bind_text (stmt, 3, db::job_phase::planning.data (), -1, SQLITE_STATIC);
     sqlite3_bind_text (stmt, 4, task.input_json.c_str (),  -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, task.goal.c_str (),        -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 6, ts);
+    sqlite3_bind_text (stmt, 6, task.user_id.c_str (),     -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 7, ts);
+    sqlite3_bind_int64 (stmt, 8, ts);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_job: {}", sqlite3_errmsg (db_));
@@ -1354,21 +1360,6 @@ namespace agentos
       spdlog::error ("[database] update_job_type: {}", sqlite3_errmsg (db_));
   }
 
-  void Database::update_job_user (const std::string &job_id,
-                                  const std::string &user_id)
-  {
-    if (!db_)
-      return;
-    Stmt stmt (
-      prepare ("UPDATE jobs SET user_id = ?, updated_at = ? WHERE id = ?"));
-    if (!stmt.s)
-      return;
-    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 2, now_unix ());
-    sqlite3_bind_text (stmt, 3, job_id.c_str (), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step (stmt) != SQLITE_DONE)
-      spdlog::error ("[database] update_job_user: {}", sqlite3_errmsg (db_));
-  }
 
   void Database::update_job_phase (const TaskId &id, const std::string &phase)
   {
@@ -2822,27 +2813,42 @@ namespace agentos
     return std::nullopt;
   }
 
-  std::vector<Job> Database::load_jobs_since (int64_t since_unix, int limit)
+  std::vector<Job> Database::load_jobs_since (std::optional<int64_t> since_unix,
+                                              int limit,
+                                              std::optional<std::string> user_id_filter)
   {
     std::vector<Job> jobs;
     if (!db_)
       return jobs;
-    Stmt stmt (prepare (R"(
+
+    std::string sql = R"(
     SELECT id, type, goal, tags, phase,
            created_at, updated_at, error,
            max_iterations, current_iteration,
            max_repairs, current_repairs,
            reviewer_id, acceptance_criteria, last_feedback,
-           timer_id, interval_s, starts_at, last_run_at, next_run_at
+           timer_id, interval_s, starts_at, last_run_at, next_run_at,
+           user_id
     FROM jobs
-    WHERE updated_at >= ?
-    ORDER BY updated_at DESC
-    LIMIT ?
-  )"));
+    WHERE 1=1
+)";
+    if (since_unix)
+      sql += " AND updated_at >= ?";
+    if (user_id_filter)
+      sql += " AND user_id = ?";
+    sql += " ORDER BY updated_at DESC LIMIT ?";
+
+    Stmt stmt (prepare (sql.c_str ()));
     if (!stmt.s)
       return jobs;
-    sqlite3_bind_int64 (stmt, 1, since_unix);
-    sqlite3_bind_int (stmt, 2, limit);
+
+    int bind_idx = 1;
+    if (since_unix)
+      sqlite3_bind_int64 (stmt, bind_idx++, *since_unix);
+    if (user_id_filter)
+      sqlite3_bind_text (stmt, bind_idx++, user_id_filter->c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, bind_idx, limit);
+
     while (sqlite3_step (stmt) == SQLITE_ROW)
       jobs.push_back (row_to_job (stmt));
     return jobs;

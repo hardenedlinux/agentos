@@ -283,14 +283,23 @@ void register_job_commands (CLI::App &app)
     auto type_filter = std::make_shared<std::string> ();
     auto limit = std::make_shared<int> (50);
     auto offset = std::make_shared<int> (0);
+    auto user_filter = std::make_shared<std::string> ();
+    auto show_user = std::make_shared<bool> (false);
+    auto all_jobs = std::make_shared<bool> (false);
+    auto since_minutes = std::make_shared<int> (0);
 
     list->add_option ("--phase", *phase);
     list->add_option ("--type", *type_filter);
     list->add_option ("--limit", *limit)->default_val (50);
     list->add_option ("--offset", *offset)->default_val (0);
+    list->add_option ("--user", *user_filter, "Filter by user_id");
+    list->add_flag ("--show-user", *show_user, "Show user_id column in table");
+    list->add_flag ("--all", *all_jobs, "Show all jobs (no time limit)");
+    list->add_option ("--since", *since_minutes, "Show jobs updated in last N minutes (default: 10)");
 
     list->callback (
-      [timeout_ms, socket_path, json_flag, access_key, phase, type_filter, limit, offset]
+      [timeout_ms, socket_path, json_flag, access_key, phase, type_filter,
+       limit, offset, user_filter, show_user, all_jobs, since_minutes]
       {
         try
         {
@@ -307,6 +316,18 @@ void register_job_commands (CLI::App &app)
 
           auto params = agentos::cli::build_job_list_params (
             *phase, *type_filter, *limit, *offset);
+          if (!user_filter->empty ())
+            params.AddMember ("user_id",
+                              rapidjson::Value (user_filter->c_str (),
+                                               params.GetAllocator ()),
+                              params.GetAllocator ());
+          if (*all_jobs)
+            params.AddMember ("all", rapidjson::Value (true),
+                              params.GetAllocator ());
+          else if (*since_minutes > 0)
+            params.AddMember ("since_minutes",
+                              rapidjson::Value (*since_minutes),
+                              params.GetAllocator ());
           auto result = client.send ("job.list", std::move (params));
           if (*json_flag)
           {
@@ -324,7 +345,7 @@ void register_job_commands (CLI::App &app)
             const auto &jobs = result["jobs"];
             struct Row
             {
-              std::string id, type, phase, goal, created;
+              std::string id, type, phase, goal, created, user_id;
             };
             std::vector<Row> rows;
             for (const auto &j : jobs.GetArray ())
@@ -336,10 +357,12 @@ void register_job_commands (CLI::App &app)
               if (goal.size () > 40)
                 goal = goal.substr (0, 40) + "...";
               std::string created = f::ts (j, "created_at");
-              rows.push_back ({id, type, phase, goal, created});
+              std::string uid = f::str (j, "user_id");
+              rows.push_back ({id, type, phase, goal, created, uid});
             }
 
-            size_t w_id = 2, w_type = 4, w_phase = 5, w_goal = 5, w_created = 7;
+            size_t w_id = 2, w_type = 4, w_phase = 5, w_goal = 5,
+                   w_created = 7, w_user = 4;
             for (const auto &r : rows)
             {
               w_id = std::max (w_id, r.id.size ());
@@ -347,9 +370,13 @@ void register_job_commands (CLI::App &app)
               w_phase = std::max (w_phase, r.phase.size ());
               w_goal = std::max (w_goal, r.goal.size ());
               w_created = std::max (w_created, r.created.size ());
+              if (*show_user)
+                w_user = std::max (w_user, r.user_id.size ());
             }
 
             size_t total_w = w_id + w_type + w_phase + w_goal + w_created + 8;
+            if (*show_user)
+              total_w += w_user + 2;
 
             auto phase_color = [&] (const std::string &p) -> std::string
             {
@@ -369,8 +396,10 @@ void register_job_commands (CLI::App &app)
             std::cout << bold (f::col ("ID", w_id))
                       << bold (f::col ("TYPE", w_type))
                       << bold (f::col ("PHASE", w_phase))
-                      << bold (f::col ("GOAL", w_goal)) << bold ("CREATED")
-                      << "\n";
+                      << bold (f::col ("GOAL", w_goal));
+            if (*show_user)
+              std::cout << bold (f::col ("USER", w_user));
+            std::cout << bold ("CREATED") << "\n";
             std::cout << f::separator (total_w) << "\n";
 
             for (const auto &r : rows)
@@ -378,7 +407,10 @@ void register_job_commands (CLI::App &app)
               std::cout << f::col (r.id, w_id) << f::col (r.type, w_type)
                         << f::col_colored (phase_color (r.phase), r.phase,
                                            w_phase)
-                        << f::col (r.goal, w_goal) << r.created << "\n";
+                        << f::col (r.goal, w_goal);
+              if (*show_user)
+                std::cout << f::col (r.user_id, w_user);
+              std::cout << r.created << "\n";
             }
 
             int total = (result.HasMember ("total") && result["total"].IsInt ())

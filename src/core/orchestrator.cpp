@@ -527,12 +527,10 @@ namespace agentos
     task.id = TaskId (job_id);
     task.goal = goal;
     task.input_json = (params.HasMember ("input")) ? params_json : "{}";
+    task.user_id = user_id;
     db_.store_job (task);
     db_.update_job_phase (TaskId (job_id), "planning");
     db_.update_job_type (job_id, type);
-
-    // ADR-029: persist user_id on the job row.
-    db_.update_job_user (job_id, user_id);
 
     spdlog::info ("[orchestrator] job.submit job_id={} user_id={} goal='{}'",
                   job_id, user_id, goal);
@@ -631,15 +629,36 @@ namespace agentos
   // ---------------------------------------------------------------------------
   // Command: job.list
   // ---------------------------------------------------------------------------
-  void Orchestrator::cmd_job_list (const std::string & /*params_json*/,
+  void Orchestrator::cmd_job_list (const std::string &params_json,
                                    const std::string &identity,
                                    const std::string &request_id)
   {
     spdlog::info ("[orchestrator] cmd_job_list called");
 
-    // Default: jobs active in the last 10 minutes (updated_at >= now - 600).
-    // All phases shown; CLI applies colour by phase.
-    auto jobs = db_.load_jobs_since (now_unix () - 600, 100);
+    rapidjson::Document params;
+    params.Parse (params_json.c_str ());
+
+    std::optional<std::string> user_id_filter;
+    if (!params.HasParseError ()
+        && params.HasMember ("user_id") && params["user_id"].IsString ())
+      user_id_filter = params["user_id"].GetString ();
+
+    // --all: no time filter; --since <minutes>: override default 10min window
+    std::optional<int64_t> since_unix = now_unix () - 600; // default: 10 min
+    if (!params.HasParseError ())
+    {
+      if (params.HasMember ("all") && params["all"].IsBool ()
+          && params["all"].GetBool ())
+        since_unix = std::nullopt;
+      else if (params.HasMember ("since_minutes") && params["since_minutes"].IsInt ())
+        since_unix = now_unix () - static_cast<int64_t> (params["since_minutes"].GetInt ()) * 60;
+    }
+
+    int limit = 100;
+    if (!params.HasParseError () && params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto jobs = db_.load_jobs_since (since_unix, limit, user_id_filter);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -657,6 +676,8 @@ namespace agentos
       w.String (j.phase.c_str ());
       w.Key ("goal");
       w.String (j.goal.c_str ());
+      w.Key ("user_id");
+      w.String (j.user_id.c_str ());
       w.Key ("created_at");
       w.Int64 (j.created_at);
       w.Key ("updated_at");

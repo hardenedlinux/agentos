@@ -160,8 +160,7 @@ namespace agentos
     void update_job_phase (const TaskId &id, const std::string &phase);
     void update_job_type (const std::string &job_id,
                           const std::string &type);
-    void update_job_user (const std::string &job_id,
-                          const std::string &user_id);
+
     void update_job_plan (const TaskId &id, const std::string &plan_json);
     std::string load_plan_json (const TaskId &job_id);
     std::vector<InFlightJob> resume_in_flight ();
@@ -376,7 +375,8 @@ namespace agentos
     std::optional<std::string> resolve_agent_binary (const std::string &ref,
                                                      const std::string &version
                                                      = "");
-    std::vector<Job> load_jobs_since (int64_t since_unix, int limit);
+    std::vector<Job> load_jobs_since (std::optional<int64_t> since_unix, int limit,
+                                      std::optional<std::string> user_id_filter = std::nullopt);
 
     /// Failure modes for with_transaction.
     enum class DbTxError

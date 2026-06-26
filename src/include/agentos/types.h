@@ -155,8 +155,9 @@ namespace agentos
   struct Task
   {
     TaskId id;
-    std::string goal;       // natural language goal from user
-    std::string input_json; // structured input (may be empty)
+    std::string goal;            // natural language goal from user
+    std::string input_json;      // structured input (may be empty)
+    std::string user_id = "0";   // ADR-029: submitting user
   };
 
   struct TaskResult

@@ -633,6 +633,8 @@ namespace agentos
     s.completed_at = column_int64_opt (stmt, 6);
     if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
       s.error = column_text_or_empty (stmt, 7);
+    if (sqlite3_column_type (stmt, 8) != SQLITE_NULL)
+      s.result_json = column_text_or_empty (stmt, 8);
     return s;
   }
 
@@ -1070,7 +1072,7 @@ namespace agentos
       return std::nullopt;
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             started_at, completed_at, error
+             started_at, completed_at, error, result
       FROM tasks WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1091,7 +1093,7 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             started_at, completed_at, error
+             started_at, completed_at, error, result
       FROM tasks WHERE job_id = ? ORDER BY step_order ASC
     )"));
     if (!stmt.s)
@@ -1290,7 +1292,7 @@ namespace agentos
 
     std::string sql
       = std::string ("SELECT id, job_id, step_order, description, status, "
-                     "started_at, completed_at, error "
+                     "started_at, completed_at, error, result "
                      "FROM tasks WHERE job_id IN (")
         + placeholders + ") AND status != ? ORDER BY step_order ASC";
 
@@ -1919,6 +1921,36 @@ namespace agentos
       rows.push_back (std::move (row));
     }
     return rows;
+  }
+
+  void Database::set_worker_enabled (const std::string &worker_id, bool enabled)
+  {
+    if (!db_)
+      return;
+    // Only update rows that are not already revoked (enabled = -1).
+    Stmt stmt (prepare (
+      "UPDATE agents SET enabled=? WHERE id=? AND enabled != -1"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, enabled ? 1 : 0);
+    sqlite3_bind_text (stmt, 2, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_worker_enabled: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::revoke_worker (const std::string &worker_id)
+  {
+    if (!db_)
+      return;
+    // enabled = -1 marks the row as permanently revoked.
+    // load_enabled_agents (WHERE enabled = 1) will never return it again.
+    Stmt stmt (prepare (
+      "UPDATE agents SET enabled=-1 WHERE id=? AND enabled != -1"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] revoke_worker: {}", sqlite3_errmsg (db_));
   }
 
   // ---------------------------------------------------------------------------

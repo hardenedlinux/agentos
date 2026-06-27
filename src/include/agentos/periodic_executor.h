@@ -105,6 +105,7 @@ private:
 
   // Seed the heartbeat task if absent, load timer_tasks into the heap.
   void        seed_heartbeat_if_absent ();
+  void        seed_reaper_if_absent ();
   void        load_enabled_tasks ();
 
   // ---------------------------------------------------------------------------

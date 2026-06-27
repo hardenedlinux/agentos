@@ -217,16 +217,32 @@ void register_job_commands (CLI::App &app)
                               : -1;
                 std::string desc = f::str (step, "description");
                 std::string stepStatus = f::str (step, "status");
-                std::string started
-                  = (step.HasMember ("started_at")
-                     && step["started_at"].IsInt64 ())
-                      ? f::time_ago (step["started_at"].GetInt64 ())
-                      : "-";
-                std::string completed
-                  = (step.HasMember ("completed_at")
-                     && step["completed_at"].IsInt64 ())
-                      ? f::time_ago (step["completed_at"].GetInt64 ())
-                      : "-";
+
+                // For done/failed steps show elapsed time (fixed value).
+                // For pending/running show started_at as time_ago.
+                std::string timing;
+                bool has_started = step.HasMember ("started_at")
+                                   && step["started_at"].IsInt64 ()
+                                   && step["started_at"].GetInt64 () > 0;
+                bool has_completed = step.HasMember ("completed_at")
+                                     && step["completed_at"].IsInt64 ()
+                                     && step["completed_at"].GetInt64 () > 0;
+
+                if (has_started && has_completed)
+                {
+                  int64_t elapsed = step["completed_at"].GetInt64 ()
+                                    - step["started_at"].GetInt64 ();
+                  timing = std::to_string (elapsed) + "s";
+                }
+                else if (has_started)
+                {
+                  timing = f::time_ago (step["started_at"].GetInt64 ());
+                }
+                else
+                {
+                  timing = "-";
+                }
+
                 std::string colStatus;
                 if (stepStatus == "done")
                   colStatus = green (stepStatus);
@@ -238,9 +254,17 @@ void register_job_commands (CLI::App &app)
                   colStatus = grey (stepStatus);
 
                 std::cout << "  " << order << "  " << colStatus << "      "
-                          << desc << "          " << started << " \xe2\x86\x92 "
-                          << completed << "\n";
+                          << desc << "          " << timing << "\n";
               }
+
+            // Show result for done jobs.
+            if (phase == "done" && result.HasMember ("result_json")
+                && result["result_json"].IsString ())
+            {
+              std::string rj = result["result_json"].GetString ();
+              if (!rj.empty () && rj != "null")
+                std::cout << "\nResult:\n" << rj << "\n";
+            }
             }
 
             if (result.HasMember ("loop") && result["loop"].IsObject ())

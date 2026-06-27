@@ -232,7 +232,7 @@ namespace agentos
         {
           OrchestratorEvent oe;
           oe.kind = OrchestratorEvent::Kind::WorkerDone;
-          oe.job_id = ev.run_id; // Orchestrator resolves job via run_id
+          oe.job_id = {}; // handle_worker_done resolves job via run_id
           oe.payload_json = R"({"run_id":")" + ev.run_id + R"(","step_id":")"
                             + ev.step_id + R"(","exit_code":0,"job_dir":")"
                             + ev.job_dir + R"("})";
@@ -242,7 +242,7 @@ namespace agentos
         {
           OrchestratorEvent oe;
           oe.kind = OrchestratorEvent::Kind::WorkerFailed;
-          oe.job_id = ev.run_id;
+          oe.job_id = {}; // handle_worker_failed resolves job via run_id
           oe.payload_json = R"({"run_id":")" + ev.run_id + R"(","step_id":")"
                             + ev.step_id + R"(","exit_code":)"
                             + std::to_string (exit_code) + R"(,"job_dir":")"
@@ -452,6 +452,12 @@ namespace agentos
       cmd_worker_register (params_json, identity, request_id);
     else if (method == "worker.list")
       cmd_worker_list (params_json, identity, request_id);
+    else if (method == "worker.enable")
+      cmd_worker_enable (params_json, identity, request_id);
+    else if (method == "worker.disable")
+      cmd_worker_disable (params_json, identity, request_id);
+    else if (method == "worker.revoke")
+      cmd_worker_revoke (params_json, identity, request_id);
     else if (method == "adviser.list")
       cmd_adviser_list (params_json, identity, request_id);
     // --- ADR-028: credential vault methods ---
@@ -618,6 +624,11 @@ namespace agentos
         w.Int64 (*s.completed_at);
       else
         w.Null ();
+      if (!s.result_json.empty ())
+      {
+        w.Key ("result_json");
+        w.String (s.result_json.c_str ());
+      }
       if (s.error)
       {
         w.Key ("error");
@@ -626,6 +637,15 @@ namespace agentos
       w.EndObject ();
     }
     w.EndArray ();
+
+    // Expose last step's result as job-level result_json for done jobs.
+    if (job->phase == "done" && !steps.empty ()
+        && !steps.back ().result_json.empty ())
+    {
+      w.Key ("result_json");
+      w.String (steps.back ().result_json.c_str ());
+    }
+
     w.EndObject ();
 
     reply_ok (identity, request_id, buf.GetString ());
@@ -800,7 +820,16 @@ namespace agentos
                                       const std::string &identity,
                                       const std::string &request_id)
   {
+    // Load all agents (enabled=1) and all their capabilities in two queries,
+    // then join in memory. This avoids N+1 queries and keeps all SQL in
+    // database.cpp per ADR-021.
     auto agents = db_.load_enabled_agents ();
+    auto caps   = db_.load_capabilities ();
+
+    // Build a map: agent_id → list of method names.
+    std::unordered_map<std::string, std::vector<std::string>> caps_by_agent;
+    for (const auto &c : caps)
+      caps_by_agent[c.agent_id].push_back (c.method);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -811,20 +840,35 @@ namespace agentos
     {
       if (a.role != "worker")
         continue;
+
+      // Determine provenance from manifest JSON: look for "provenance" key.
+      // Fall back to "manual" if not present or unparseable.
+      std::string provenance = "manual";
+      {
+        rapidjson::Document mf;
+        if (!mf.Parse (a.manifest.c_str ()).HasParseError ()
+            && mf.HasMember ("provenance") && mf["provenance"].IsObject ()
+            && mf["provenance"].HasMember ("forge_job_id"))
+          provenance = "forge";
+      }
+
       w.StartObject ();
       w.Key ("id");
       w.String (a.id.c_str ());
       w.Key ("tier");
       w.String ("tier0");
       w.Key ("provenance");
-      w.String ("manual");
+      w.String (provenance.c_str ());
       w.Key ("enabled");
-      w.Bool (true);
+      w.Bool (true); // load_enabled_agents already filters enabled=1
       w.Key ("capabilities");
       w.StartArray ();
+      if (auto it = caps_by_agent.find (a.id); it != caps_by_agent.end ())
+        for (const auto &method : it->second)
+          w.String (method.c_str ());
       w.EndArray ();
       w.Key ("registered_at");
-      w.Int64 (0);
+      w.Int64 (0); // approved_at not yet exposed by AgentRow; kept as 0
       w.EndObject ();
     }
     w.EndArray ();
@@ -885,6 +929,90 @@ namespace agentos
       return;
     }
     // TODO: validate manifest and register worker via Registry.
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.enable
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_enable (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id")
+        || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+    db_.set_worker_enabled (worker_id, true);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.disable
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_disable (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id")
+        || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+    db_.set_worker_enabled (worker_id, false);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.revoke
+  //
+  // Soft-deletes a worker: sets enabled = -1 (revoked) in the agents table.
+  // Refuses if the worker has any running steps in active jobs (error -32022).
+  // Does not touch the filesystem — directory management is the operator's
+  // responsibility.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_revoke (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id")
+        || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+
+    // Refuse if there are running worker_runs for this worker_id.
+    // We check active_runs from DB — if any run for this worker is still
+    // in status=running (0), reject with -32022 Invalid state.
+    for (const auto &run : db_.get_active_worker_runs ())
+    {
+      if (run.worker_id == worker_id)
+      {
+        reply_error (identity, request_id, -32022,
+                     "Worker has active runs — disable it first or wait for "
+                     "jobs to complete");
+        return;
+      }
+    }
+
+    db_.revoke_worker (worker_id);
+    spdlog::info ("[orchestrator] worker revoked: {}", worker_id);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
 
@@ -1338,7 +1466,10 @@ namespace agentos
   {
     if (job.pending_steps.empty ())
     {
-      finish_job (job.job_id, true);
+      // Copy job_id before finish_job() erases the ActiveJob from
+      // active_jobs_ — the reference would dangle otherwise (UB).
+      const std::string job_id = job.job_id;
+      finish_job (job_id, true);
       return;
     }
 
@@ -1368,8 +1499,35 @@ namespace agentos
     req.step_id = step.step.id;
     req.worker_id = worker->id.value ();
     req.binary_path = worker->binary_path;
-    req.task_json = R"({"job_id":")" + job.job_id + R"(","step_id":")"
-                    + step.step.id + R"("})";
+    // Build task_json with all step data the worker needs (ADR-019).
+    // command and description give the worker its semantic context.
+    // $prev_result carries the previous step's output (ADR-022).
+    {
+      rapidjson::StringBuffer tbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> tw (tbuf);
+      tw.StartObject ();
+      tw.Key ("job_id");
+      tw.String (job.job_id.c_str ());
+      tw.Key ("step_id");
+      tw.String (step.step.id.c_str ());
+      tw.Key ("command");
+      tw.String (step.step.command.c_str ());
+      tw.Key ("description");
+      tw.String (step.step.description.c_str ());
+      // Inject previous step result as $prev_result (empty object if first step).
+      tw.Key ("$prev_result");
+      if (!job.last_step_result.empty ())
+        tw.RawValue (job.last_step_result.c_str (),
+                     job.last_step_result.size (),
+                     rapidjson::kObjectType);
+      else
+      {
+        tw.StartObject ();
+        tw.EndObject ();
+      }
+      tw.EndObject ();
+      req.task_json = tbuf.GetString ();
+    }
     req.network = false; // from manifest; TODO: load from Registry
 
     // Persist worker_run before fork (ADR-022: persist before act).
@@ -1404,6 +1562,9 @@ namespace agentos
     job.current_run_id = run_id;
     step.job_dir = result.job_dir;
 
+    // Mark step as running with started_at timestamp (ADR-025).
+    db_.update_step_status (step.step.id, db::step_status::running);
+
     spdlog::info ("[orchestrator] dispatched step {} run_id={} pid={}",
                   step.step.id, run_id, result.pid);
   }
@@ -1428,12 +1589,17 @@ namespace agentos
       return;
     }
 
-    // Store result in DB.
+    // Store result in DB (ADR-022: persist before act).
+    // $prev_result injection reads from DB when multi-step pipeline is
+    // implemented; no in-memory field on ActiveStep for result.
     if (!job.pending_steps.empty ())
     {
       db_.update_step_result (job.pending_steps.front ().step.id,
                               collected.result_json);
     }
+
+    // Save result for $prev_result injection into the next step (ADR-022).
+    job.last_step_result = collected.result_json;
 
     // Advance pipeline.
     job.pending_steps.pop_front ();

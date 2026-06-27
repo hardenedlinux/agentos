@@ -59,8 +59,10 @@ namespace agentos
     std::string type;                     // oneshot | scheduled | loop
     std::deque<ActiveStep> pending_steps; // steps not yet dispatched
     std::string current_run_id;           // run_id of the step in flight
+    std::string last_step_result;         // result_json of the last completed step;
+                                          // injected as $prev_result into the next step
     int current_iteration = 0;            // loop jobs
-    int current_repairs = 0;              // loop jobs
+    int current_repairs = 0;             // loop jobs
   };
 
   // ---------------------------------------------------------------------------
@@ -210,6 +212,16 @@ namespace agentos
     void cmd_user_profile (const std::string &params_json,
                            const std::string &identity,
                            const std::string &request_id);
+
+    void cmd_worker_enable (const std::string &params_json,
+                            const std::string &identity,
+                            const std::string &request_id);
+    void cmd_worker_disable (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+    void cmd_worker_revoke (const std::string &params_json,
+                            const std::string &identity,
+                            const std::string &request_id);
 
     // ---------------------------------------------------------------------------
     // Pipeline execution

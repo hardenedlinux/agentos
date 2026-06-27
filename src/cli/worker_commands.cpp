@@ -36,13 +36,13 @@ void register_worker_commands(CLI::App& app) {
     // ---- worker register ----
     {
         auto* reg = worker->add_subcommand("register", "Register a worker");
-        std::string path;
-        reg->add_option("--path", path)->required();
+        auto path = std::make_shared<std::string>();
+        reg->add_option("--path", *path)->required();
         reg->callback([timeout_ms, socket_path, json_flag, path] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_register_params(path);
+                auto params = agentos::cli::build_worker_register_params(*path);
                 auto result = client.send("worker.register", std::move(params));
                 if (*json_flag) { print_json(result); }
                 else { std::cout << "worker_id: " << result["worker_id"].GetString() << "\n"; }
@@ -56,13 +56,13 @@ void register_worker_commands(CLI::App& app) {
     // ---- worker list ----
     {
         auto* list = worker->add_subcommand("list", "List workers");
-        std::string enabled_str;
-        list->add_option("--enabled", enabled_str);
+        auto enabled_str = std::make_shared<std::string>();
+        list->add_option("--enabled", *enabled_str);
         list->callback([timeout_ms, socket_path, json_flag, enabled_str] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_list_params(enabled_str);
+                auto params = agentos::cli::build_worker_list_params(*enabled_str);
                 auto result = client.send("worker.list", std::move(params));
                 if (*json_flag) {
                     print_json(result);
@@ -134,16 +134,16 @@ void register_worker_commands(CLI::App& app) {
     // ---- worker enable ----
     {
         auto* enable = worker->add_subcommand("enable", "Enable a worker");
-        std::string worker_id;
-        enable->add_option("worker_id", worker_id)->required();
+        auto worker_id = std::make_shared<std::string>();
+        enable->add_option("worker_id", *worker_id)->required();
         enable->callback([timeout_ms, socket_path, json_flag, worker_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_toggle_params(worker_id);
+                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
                 auto result = client.send("worker.enable", std::move(params));
                 if (*json_flag) { print_json(result); }
-                else { std::cout << "enabled: " << worker_id << "\n"; }
+                else { std::cout << "enabled: " << *worker_id << "\n"; }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
             }
@@ -154,21 +154,41 @@ void register_worker_commands(CLI::App& app) {
     // ---- worker disable ----
     {
         auto* disable = worker->add_subcommand("disable", "Disable a worker");
-        std::string worker_id;
-        disable->add_option("worker_id", worker_id)->required();
+        auto worker_id = std::make_shared<std::string>();
+        disable->add_option("worker_id", *worker_id)->required();
         disable->callback([timeout_ms, socket_path, json_flag, worker_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_toggle_params(worker_id);
+                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
                 auto result = client.send("worker.disable", std::move(params));
                 if (*json_flag) { print_json(result); }
-                else { std::cout << "disabled: " << worker_id << "\n"; }
+                else { std::cout << "disabled: " << *worker_id << "\n"; }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
             }
         });
         agentos::cli::add_completion(disable);
+    }
+
+    // ---- worker revoke ----
+    {
+        auto* rev = worker->add_subcommand("revoke", "Revoke a worker (soft-delete from registry)");
+        auto worker_id = std::make_shared<std::string>();
+        rev->add_option("worker_id", *worker_id)->required();
+        rev->callback([timeout_ms, socket_path, json_flag, worker_id] {
+            try {
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
+                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
+                auto result = client.send("worker.revoke", std::move(params));
+                if (*json_flag) { print_json(result); }
+                else { std::cout << "revoked: " << *worker_id << "\n"; }
+            } catch (const agentos::cli::CliError& e) {
+                agentos::cli::die(2, e.what());
+            }
+        });
+        agentos::cli::add_completion(rev);
     }
 
     agentos::cli::add_completion(worker);

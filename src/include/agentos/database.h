@@ -232,6 +232,15 @@ namespace agentos
                             const std::string &input_schema);
     std::vector<CapabilityRow> load_capabilities ();
 
+    // Toggle a worker's enabled flag (1=enabled, 0=disabled).
+    // Silently no-ops if worker_id does not exist.
+    void set_worker_enabled (const std::string &worker_id, bool enabled);
+
+    // Soft-delete a worker: sets enabled = -1 (revoked).
+    // Revoked workers are excluded from load_enabled_agents() and are never
+    // dispatched. The row is retained for audit purposes.
+    void revoke_worker (const std::string &worker_id);
+
     // -- HumanReview table (original, preserved for ABI compatibility) --------
 
     void insert_human_review (const std::string &id, const std::string &reason,

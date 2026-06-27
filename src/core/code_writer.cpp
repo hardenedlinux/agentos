@@ -226,14 +226,34 @@ namespace agentos::forge
       return make_error ("LLM call failed: " + llm_result.error);
 
     // ── 6. Parse LLM response
-    // ───────────────────────────────────────────────── LLM must return a JSON
-    // object with understanding, language, entry_point, code, capability,
-    // notes. Parse and validate mandatory fields.
+    // Strip markdown fences if present (LLMs often wrap JSON in ```json ... ```)
+    std::string raw_content = llm_result.value.content;
+    {
+      // Remove leading ```json or ``` fence
+      auto fence_start = raw_content.find ("```");
+      if (fence_start != std::string::npos)
+      {
+        auto content_start = raw_content.find ('\n', fence_start);
+        if (content_start != std::string::npos)
+        {
+          auto fence_end = raw_content.rfind ("```");
+          if (fence_end != std::string::npos && fence_end > content_start)
+            raw_content = raw_content.substr (content_start + 1,
+                                              fence_end - content_start - 1);
+        }
+      }
+      // Trim leading/trailing whitespace
+      const auto trim_start = raw_content.find_first_not_of (" \t\r\n");
+      const auto trim_end = raw_content.find_last_not_of (" \t\r\n");
+      if (trim_start != std::string::npos)
+        raw_content = raw_content.substr (trim_start,
+                                          trim_end - trim_start + 1);
+    }
+
     rapidjson::Document llm_doc;
-    llm_doc.Parse (llm_result.value.content.c_str ());
+    llm_doc.Parse (raw_content.c_str ());
     if (llm_doc.HasParseError () || !llm_doc.IsObject ())
-      return make_error ("LLM response is not valid JSON: "
-                         + llm_result.value.content);
+      return make_error ("LLM response is not valid JSON: " + raw_content);
 
     auto require_llm_string = [&] (const char *key, std::string &out) -> bool
     {
@@ -270,8 +290,9 @@ namespace agentos::forge
 
     // ── 7. Build output JSON per ADR-019 contract
     // ─────────────────────────────
+    // task_id is intentionally omitted from LLM output — it is an AgentOS
+    // internal identifier injected by forge_coordinator after validation.
     // {
-    //   "task_id":      "...",
     //   "understanding":"...",
     //   "language":     "python" | "guile",
     //   "entry_point":  "...",
@@ -283,8 +304,6 @@ namespace agentos::forge
     out.SetObject ();
     auto &alloc = out.GetAllocator ();
 
-    out.AddMember ("task_id",
-                   rapidjson::Value (task_id.c_str (), alloc).Move (), alloc);
     out.AddMember ("understanding",
                    rapidjson::Value (understanding.c_str (), alloc).Move (),
                    alloc);

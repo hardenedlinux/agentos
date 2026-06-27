@@ -177,6 +177,9 @@ namespace agentos::forge
         dup2 (out_fd, STDERR_FILENO);
         close (out_fd);
 
+        // Set AGENTOS_RUN_DIR so the worker knows where to write result.json
+        setenv ("AGENTOS_RUN_DIR", scratch_dir.c_str (), 1);
+
         // exec: interpreter <script>
         execlp (worker_binary.c_str (), worker_binary.c_str (),
                 code_path.c_str (), nullptr);
@@ -366,6 +369,11 @@ namespace agentos::forge
 
     // ── 7. Output schema validation
     // ───────────────────────────────────────────
+    // Worker writes result.json to AGENTOS_RUN_DIR (ADR-016 contract).
+    // Read that file — sandbox_output (stdout) is a log, not the result.
+    const std::string result_json_path = scratch + "/result.json";
+    const std::string result_json_content = read_file (result_json_path);
+
     const rapidjson::Value &output_schema = [&] () -> const rapidjson::Value &
     {
       auto it = requirement.FindMember ("output_schema");
@@ -374,10 +382,40 @@ namespace agentos::forge
       return empty_schema;
     }();
 
-    rapidjson::Document output_doc;
-    output_doc.Parse (sandbox_output.c_str ());
-    if (output_doc.HasParseError () || !output_doc.IsObject ())
+    rapidjson::Document result_envelope;
+    result_envelope.Parse (result_json_content.c_str ());
+    if (result_envelope.HasParseError () || !result_envelope.IsObject ())
       return make_reject_verdict (task_id, "sandbox output is not valid JSON");
+
+    // Unwrap the {status, result} envelope written by the worker.
+    auto status_field = result_envelope.FindMember ("status");
+    if (status_field == result_envelope.MemberEnd ()
+        || !status_field->value.IsString ())
+      return make_reject_verdict (task_id,
+                                  "sandbox output missing 'status' field");
+
+    if (std::string (status_field->value.GetString ()) == "error")
+    {
+      std::string worker_err = "worker reported error";
+      auto err_it = result_envelope.FindMember ("error");
+      if (err_it != result_envelope.MemberEnd ()
+          && err_it->value.IsString ())
+        worker_err = err_it->value.GetString ();
+      return make_reject_verdict (task_id, worker_err);
+    }
+
+    // Extract the `result` payload for schema validation.
+    rapidjson::Document output_doc;
+    auto result_it = result_envelope.FindMember ("result");
+    if (result_it != result_envelope.MemberEnd ()
+        && result_it->value.IsObject ())
+    {
+      output_doc.CopyFrom (result_it->value, output_doc.GetAllocator ());
+    }
+    else
+    {
+      output_doc.SetObject ();
+    }
 
     const std::string schema_err
       = validate_output_schema (output_doc, output_schema);
@@ -393,8 +431,16 @@ namespace agentos::forge
       system_prompt = read_file (skill_path_env);
     if (system_prompt.empty ())
       system_prompt
-        = "You are a code reviewer. Evaluate the code for functional "
-          "correctness against the requirement. "
+        = "You are a code reviewer for AgentOS worker code. "
+          "Evaluate the code for functional correctness against the "
+          "requirement. "
+          "IMPORTANT: All workers MUST read input from stdin (sys.stdin.read()) "
+          "as part of the AgentOS worker contract — do NOT reject code for "
+          "reading stdin, even when the input schema is empty. "
+          "Workers MUST write their result to a file at "
+          "os.environ['AGENTOS_RUN_DIR']/result.json — this is mandatory. "
+          "Only reject if the code is functionally incorrect, unsafe, or "
+          "violates the capability declaration (network/exec). "
           "Respond with JSON only: "
           "{\"status\": \"accept\" or \"reject\", \"reason\": \"...\"}";
 
@@ -425,7 +471,7 @@ namespace agentos::forge
     const std::string user_prompt
       = "Requirement:\n" + description + "\n\nWriter's understanding:\n"
         + understanding + "\n\nCode:\n```\n" + code + "\n```"
-        + "\n\nSandbox result: exit code 0, output: " + sandbox_output
+        + "\n\nSandbox result: exit code 0, result.json: " + result_json_content
         + "\n\nRespond with JSON only: "
           "{\"status\": \"accept\" or \"reject\", \"reason\": \"...\"}";
 
@@ -460,12 +506,31 @@ namespace agentos::forge
     if (!llm_result.ok)
       return make_error ("LLM call failed: " + llm_result.error);
 
-    // Parse LLM response
+    // Parse LLM response — strip markdown fences first.
+    std::string raw_review = llm_result.value.content;
+    {
+      auto fence_start = raw_review.find ("```");
+      if (fence_start != std::string::npos)
+      {
+        auto content_start = raw_review.find ('\n', fence_start);
+        if (content_start != std::string::npos)
+        {
+          auto fence_end = raw_review.rfind ("```");
+          if (fence_end != std::string::npos && fence_end > content_start)
+            raw_review = raw_review.substr (content_start + 1,
+                                            fence_end - content_start - 1);
+        }
+      }
+      const auto ts = raw_review.find_first_not_of (" \t\r\n");
+      const auto te = raw_review.find_last_not_of (" \t\r\n");
+      if (ts != std::string::npos)
+        raw_review = raw_review.substr (ts, te - ts + 1);
+    }
+
     rapidjson::Document llm_doc;
-    llm_doc.Parse (llm_result.value.content.c_str ());
+    llm_doc.Parse (raw_review.c_str ());
     if (llm_doc.HasParseError () || !llm_doc.IsObject ())
-      return make_error ("LLM response is not valid JSON: "
-                         + llm_result.value.content);
+      return make_error ("LLM response is not valid JSON: " + raw_review);
 
     auto status_it = llm_doc.FindMember ("status");
     if (status_it == llm_doc.MemberEnd () || !status_it->value.IsString ())

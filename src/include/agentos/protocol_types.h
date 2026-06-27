@@ -68,6 +68,7 @@ namespace agentos
     std::optional<int64_t> started_at;
     std::optional<int64_t> completed_at;
     std::optional<std::string> error; // failure summary, if failed
+    std::string result_json;          // ADR-016 result payload, set on done
   };
 
   // --- Worker (Executor) ---

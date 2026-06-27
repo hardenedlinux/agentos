@@ -300,13 +300,27 @@ namespace agentos::forge
     rapidjson::Document doc;
     if (doc.Parse (output.c_str ()).HasParseError ())
     {
-      spdlog::error ("[forge_coordinator] code_writer returned invalid JSON");
+      spdlog::error ("[forge_coordinator] code_writer returned invalid JSON: {}",
+                     output.substr (0, 200));
       job.feedback = "code_writer returned invalid JSON";
       return false;
     }
 
-    for (const char *field : {"task_id", "understanding", "language",
-                              "entry_point", "code", "capability"})
+    // If code_writer itself returned an error envelope, surface the real reason.
+    if (doc.HasMember ("error") && doc["error"].IsString ())
+    {
+      const std::string reason = doc["error"].GetString ();
+      spdlog::error ("[forge_coordinator] code_writer reported error: {}",
+                     reason);
+      job.feedback = "code_writer error: " + reason;
+      return false;
+    }
+
+    // Validate required business fields.
+    // task_id is NOT expected from LLM output -- it is an AgentOS internal
+    // identifier injected by forge_coordinator from job.task_id.
+    for (const char *field : {"understanding", "language",
+                               "entry_point", "code", "capability"})
     {
       if (!doc.HasMember (field))
       {
@@ -329,8 +343,20 @@ namespace agentos::forge
       return false;
     }
 
-    // Persist Writer output.
-    job.writer_output_json = output;
+    // Inject task_id from job (not from LLM output -- LLM must not echo it).
+    {
+      auto &alloc = doc.GetAllocator ();
+      if (doc.HasMember ("task_id"))
+        doc.RemoveMember ("task_id");
+      doc.AddMember (
+        "task_id",
+        rapidjson::Value (job.task_id.c_str (), alloc).Move (),
+        alloc);
+      rapidjson::StringBuffer sbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> sw (sbuf);
+      doc.Accept (sw);
+      job.writer_output_json = sbuf.GetString ();
+    }
 
     // Write code file to disk.
     const std::string code = doc["code"].GetString ();

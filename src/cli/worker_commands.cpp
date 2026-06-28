@@ -175,15 +175,30 @@ void register_worker_commands(CLI::App& app) {
     {
         auto* rev = worker->add_subcommand("revoke", "Revoke a worker (soft-delete from registry)");
         auto worker_id = std::make_shared<std::string>();
+        auto force     = std::make_shared<bool>(false);
         rev->add_option("worker_id", *worker_id)->required();
-        rev->callback([timeout_ms, socket_path, json_flag, worker_id] {
+        rev->add_flag("--force", *force,
+                      "Kill active runs and revoke immediately "
+                      "(use when worker is stuck in a dead loop)");
+        rev->callback([timeout_ms, socket_path, json_flag, worker_id, force] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
+                rapidjson::Document params(rapidjson::kObjectType);
+                auto& alloc = params.GetAllocator();
+                params.AddMember("worker_id",
+                                 rapidjson::Value(worker_id->c_str(), alloc),
+                                 alloc);
+                params.AddMember("force",
+                                 rapidjson::Value(*force),
+                                 alloc);
                 auto result = client.send("worker.revoke", std::move(params));
                 if (*json_flag) { print_json(result); }
-                else { std::cout << "revoked: " << *worker_id << "\n"; }
+                else {
+                    std::cout << "revoked: " << *worker_id;
+                    if (*force) std::cout << " (forced)";
+                    std::cout << "\n";
+                }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
             }

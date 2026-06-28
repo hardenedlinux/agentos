@@ -276,16 +276,52 @@ namespace agentos
     const std::string job_id = msg.job_id;
 
     rapidjson::Document doc;
-    std::string command;
-    if (!doc.Parse (msg.payload_json.c_str ()).HasParseError ()
-        && doc.HasMember ("command") && doc["command"].IsString ())
-      command = doc["command"].GetString ();
+    std::string command, step_description;
+    bool needs_forge = false;
+    if (!doc.Parse (msg.payload_json.c_str ()).HasParseError ())
+    {
+      if (doc.HasMember ("command") && doc["command"].IsString ())
+        command = doc["command"].GetString ();
+      if (doc.HasMember ("needs_forge") && doc["needs_forge"].IsBool ())
+        needs_forge = doc["needs_forge"].GetBool ();
+      if (doc.HasMember ("step_description")
+          && doc["step_description"].IsString ())
+        step_description = doc["step_description"].GetString ();
+    }
 
-    spdlog::info ("[master] worker exhausted for job {} command={}", job_id,
-                  command);
+    spdlog::info ("[master] worker exhausted for job {} command={} "
+                  "needs_forge={}",
+                  job_id, command, needs_forge);
+
+    // ADR-031: Planning Adviser declared needs_forge=true — skip decide_forge
+    // LLM call and trigger Forge immediately with step description context.
+    if (needs_forge)
+    {
+      spdlog::info ("[master] needs_forge=true, bypassing decide_forge for "
+                    "job {} command={}",
+                    job_id, command);
+      OrchestratorEvent ev;
+      ev.kind = OrchestratorEvent::Kind::MasterDecision;
+      ev.job_id = job_id;
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("type");
+      w.String ("trigger_forge");
+      w.Key ("job_id");
+      w.String (job_id.c_str ());
+      w.Key ("command");
+      w.String (command.c_str ());
+      w.Key ("step_description");
+      w.String (step_description.c_str ());
+      w.EndObject ();
+      ev.payload_json = buf.GetString ();
+      send_to_orchestrator_ (std::move (ev));
+      return;
+    }
 
     std::thread (
-      [this, job_id, command] ()
+      [this, job_id, command, step_description] ()
       {
         const bool trigger = decide_forge (job_id, command);
 
@@ -300,6 +336,8 @@ namespace agentos
         w.Bool (trigger);
         w.Key ("command");
         w.String (command.c_str ());
+        w.Key ("step_description");
+        w.String (step_description.c_str ());
         w.EndObject ();
 
         MasterEvent result;
@@ -333,6 +371,10 @@ namespace agentos
       = doc.HasMember ("command") && doc["command"].IsString ()
           ? doc["command"].GetString ()
           : "";
+    const std::string step_description
+      = doc.HasMember ("step_description") && doc["step_description"].IsString ()
+          ? doc["step_description"].GetString ()
+          : "";
 
     OrchestratorEvent ev;
     ev.kind = OrchestratorEvent::Kind::MasterDecision;
@@ -351,6 +393,8 @@ namespace agentos
       w.String (job_id.c_str ());
       w.Key ("command");
       w.String (command.c_str ());
+      w.Key ("step_description");
+      w.String (step_description.c_str ());
       w.EndObject ();
       ev.payload_json = buf.GetString ();
     }
@@ -445,8 +489,24 @@ namespace agentos
       return advisers.front ().id.value ();
     }
 
+    // Strip markdown fence if LLM wrapped response in ```json...```
+    std::string llm_content = result.value.content;
+    if (llm_content.size () >= 3 && llm_content.substr (0, 3) == "```")
+    {
+      auto first_nl = llm_content.find ('\n');
+      if (first_nl != std::string::npos)
+        llm_content = llm_content.substr (first_nl + 1);
+      if (llm_content.size () >= 3
+          && llm_content.substr (llm_content.size () - 3) == "```")
+        llm_content.erase (llm_content.size () - 3);
+      while (!llm_content.empty ()
+             && (llm_content.back () == '\n' || llm_content.back () == '\r'
+                 || llm_content.back () == ' '))
+        llm_content.pop_back ();
+    }
+
     rapidjson::Document doc;
-    if (doc.Parse (result.value.content.c_str ()).HasParseError ()
+    if (doc.Parse (llm_content.c_str ()).HasParseError ()
         || !doc.IsObject () || !doc.HasMember ("adviser_id")
         || !doc["adviser_id"].IsString ())
     {
@@ -479,8 +539,24 @@ namespace agentos
       return ""; // fail open
     }
 
+    // Strip markdown fence if LLM wrapped response in ```json...```
+    std::string llm_content = result.value.content;
+    if (llm_content.size () >= 3 && llm_content.substr (0, 3) == "```")
+    {
+      auto first_nl = llm_content.find ('\n');
+      if (first_nl != std::string::npos)
+        llm_content = llm_content.substr (first_nl + 1);
+      if (llm_content.size () >= 3
+          && llm_content.substr (llm_content.size () - 3) == "```")
+        llm_content.erase (llm_content.size () - 3);
+      while (!llm_content.empty ()
+             && (llm_content.back () == '\n' || llm_content.back () == '\r'
+                 || llm_content.back () == ' '))
+        llm_content.pop_back ();
+    }
+
     rapidjson::Document doc;
-    if (doc.Parse (result.value.content.c_str ()).HasParseError ()
+    if (doc.Parse (llm_content.c_str ()).HasParseError ()
         || !doc.IsObject () || !doc.HasMember ("approved")
         || !doc["approved"].IsBool ())
     {
@@ -517,8 +593,24 @@ namespace agentos
       return true; // fail open — try Forge
     }
 
+    // Strip markdown fence if LLM wrapped response in ```json...```
+    std::string llm_content = result.value.content;
+    if (llm_content.size () >= 3 && llm_content.substr (0, 3) == "```")
+    {
+      auto first_nl = llm_content.find ('\n');
+      if (first_nl != std::string::npos)
+        llm_content = llm_content.substr (first_nl + 1);
+      if (llm_content.size () >= 3
+          && llm_content.substr (llm_content.size () - 3) == "```")
+        llm_content.erase (llm_content.size () - 3);
+      while (!llm_content.empty ()
+             && (llm_content.back () == '\n' || llm_content.back () == '\r'
+                 || llm_content.back () == ' '))
+        llm_content.pop_back ();
+    }
+
     rapidjson::Document doc;
-    if (doc.Parse (result.value.content.c_str ()).HasParseError ()
+    if (doc.Parse (llm_content.c_str ()).HasParseError ()
         || !doc.IsObject () || !doc.HasMember ("trigger_forge")
         || !doc["trigger_forge"].IsBool ())
     {

@@ -144,6 +144,7 @@ namespace agentos
       std::string role;
       std::string binary_path;
       std::string manifest;
+      int64_t approved_at = 0;
     };
 
     struct CapabilityRow
@@ -158,8 +159,7 @@ namespace agentos
 
     void store_job (const Task &task);
     void update_job_phase (const TaskId &id, const std::string &phase);
-    void update_job_type (const std::string &job_id,
-                          const std::string &type);
+    void update_job_type (const std::string &job_id, const std::string &type);
 
     void update_job_plan (const TaskId &id, const std::string &plan_json);
     std::string load_plan_json (const TaskId &job_id);
@@ -240,6 +240,12 @@ namespace agentos
     // Revoked workers are excluded from load_enabled_agents() and are never
     // dispatched. The row is retained for audit purposes.
     void revoke_worker (const std::string &worker_id);
+
+    // Force-revoke a worker: marks all running worker_runs as failed (status=2)
+    // then sets enabled=-1. Callers must have already sent SIGTERM/SIGKILL to
+    // the active PIDs before calling this. Used when a worker is stuck and
+    // cannot exit cleanly.
+    void force_revoke_worker (const std::string &worker_id);
 
     // -- HumanReview table (original, preserved for ABI compatibility) --------
 
@@ -384,8 +390,9 @@ namespace agentos
     std::optional<std::string> resolve_agent_binary (const std::string &ref,
                                                      const std::string &version
                                                      = "");
-    std::vector<Job> load_jobs_since (std::optional<int64_t> since_unix, int limit,
-                                      std::optional<std::string> user_id_filter = std::nullopt);
+    std::vector<Job>
+    load_jobs_since (std::optional<int64_t> since_unix, int limit,
+                     std::optional<std::string> user_id_filter = std::nullopt);
 
     /// Failure modes for with_transaction.
     enum class DbTxError

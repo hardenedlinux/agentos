@@ -57,6 +57,7 @@ namespace agentos
   {
     std::string job_id;
     std::string type;                     // oneshot | scheduled | loop
+    std::string goal;                     // original user goal, injected into every task
     std::deque<ActiveStep> pending_steps; // steps not yet dispatched
     std::string current_run_id;           // run_id of the step in flight
     std::string last_step_result;         // result_json of the last completed step;

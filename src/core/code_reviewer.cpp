@@ -264,13 +264,31 @@ namespace agentos::forge
       return make_error ("missing or invalid 'writer_output'");
     const rapidjson::Value &writer_output = wo_it->value;
 
-    std::string code, language, understanding;
-    if (!require_string (writer_output, "code", code))
-      return make_error ("missing or invalid 'writer_output.code'");
+    std::string impl_code, language, understanding;
+    // ADR-031: impl_code replaces code; fall back to code for old attempts.
+    if (!require_string (writer_output, "impl_code", impl_code))
+    {
+      if (!require_string (writer_output, "code", impl_code))
+        return make_error ("missing or invalid 'writer_output.impl_code'");
+    }
     if (!require_string (writer_output, "language", language))
       return make_error ("missing or invalid 'writer_output.language'");
     if (!require_string (writer_output, "understanding", understanding))
       return make_error ("missing or invalid 'writer_output.understanding'");
+
+    // Extract signatures if present (LLM-generated, used to guide Reviewer).
+    std::string signatures_json = "{}";
+    {
+      auto sigs_it = writer_output.FindMember ("signatures");
+      if (sigs_it != writer_output.MemberEnd ()
+          && sigs_it->value.IsObject ())
+      {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> sw (sb);
+        sigs_it->value.Accept (sw);
+        signatures_json = sb.GetString ();
+      }
+    }
 
     auto cap_it = writer_output.FindMember ("capability");
     if (cap_it == writer_output.MemberEnd () || !cap_it->value.IsObject ())
@@ -306,26 +324,46 @@ namespace agentos::forge
     }
     const std::string scratch = scratch_dir.string ();
 
-    // ── 4. Write code file
-    // ────────────────────────────────────────────────────
+    // ── 4. Write worker_impl.py and worker.py to scratch directory
+    // ADR-031: two-file structure; sandbox runs worker.py which imports impl.
     std::string worker_binary;
-    std::string code_ext;
     if (language == "python")
-    {
       worker_binary = "/usr/bin/python3";
-      code_ext = ".py";
-    }
     else if (language == "guile")
-    {
       worker_binary = "/usr/bin/guile";
-      code_ext = ".scm";
-    }
     else
       return make_error ("unsupported language: " + language);
 
-    const std::string code_path = scratch + "/sandbox_probe" + code_ext;
-    if (!write_file (code_path, code))
-      return make_error ("failed to write code file");
+    // Write worker_impl.py (generated business logic).
+    const std::string impl_path = scratch + "/worker_impl.py";
+    if (!write_file (impl_path, impl_code))
+      return make_error ("failed to write worker_impl.py");
+
+    // Copy worker_template.py → worker.py (fixed runtime entry point).
+    const std::string worker_py_path = scratch + "/worker.py";
+    {
+      std::filesystem::path template_src
+        = agentos_home () / "skills" / "worker_template.py";
+      if (std::filesystem::exists (template_src))
+      {
+        std::error_code ec;
+        std::filesystem::copy_file (
+          template_src, worker_py_path,
+          std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec)
+          spdlog::warn ("[code_reviewer] cannot copy worker template: {}",
+                        ec.message ());
+      }
+      else
+      {
+        // Fallback: write impl_code directly so sandbox can still run.
+        spdlog::warn ("[code_reviewer] worker_template.py missing, "
+                      "writing impl directly as worker.py (degraded)");
+        if (!write_file (worker_py_path, impl_code))
+          return make_error ("failed to write worker.py fallback");
+      }
+    }
+    const std::string code_path = worker_py_path;
 
     // ── 5. Generate mock input
     // ────────────────────────────────────────────────
@@ -461,7 +499,8 @@ namespace agentos::forge
     const int max_tokens = max_tokens_env ? std::atoi (max_tokens_env) : 1024;
     const int llm_timeout = timeout_env ? std::atoi (timeout_env) : 60;
 
-    // Build user prompt
+    // Build user prompt — include impl_code, signatures, and sandbox result.
+    // Reviewer will either accept/reject or request a test run.
     std::string description;
     {
       auto it = requirement.FindMember ("description");
@@ -469,11 +508,21 @@ namespace agentos::forge
         description = it->value.GetString ();
     }
     const std::string user_prompt
-      = "Requirement:\n" + description + "\n\nWriter's understanding:\n"
-        + understanding + "\n\nCode:\n```\n" + code + "\n```"
-        + "\n\nSandbox result: exit code 0, result.json: " + result_json_content
-        + "\n\nRespond with JSON only: "
-          "{\"status\": \"accept\" or \"reject\", \"reason\": \"...\"}";
+      = "Requirement:\n" + description
+        + "\n\nWriter's understanding:\n" + understanding
+        + "\n\nFunction signatures (LLM-generated):\n" + signatures_json
+        + "\n\nworker_impl.py source:\n```python\n" + impl_code + "\n```"
+        + "\n\nSandbox run result (worker.py entry point):\n"
+          "exit code: " + std::to_string (exit_code == 0 ? 0 : exit_code)
+        + "\nresult.json: " + result_json_content
+        + "\n\nRespond with JSON only:\n"
+          "{\"status\": \"accept\" | \"reject\" | \"needs_test_run\", "
+          "\"reason\": \"...\", "
+          "\"test_code\": \"<test script or empty string>\"}"
+          "\nUse \"needs_test_run\" with a test_code script to run unit tests "
+          "against worker_impl.py before deciding. "
+          "The test script must import worker_impl using importlib from the same "
+          "directory and print \"ALL TESTS PASSED\" on success.";
 
     // Determine api_path from base_url
     const bool is_anthropic
@@ -536,16 +585,142 @@ namespace agentos::forge
     if (status_it == llm_doc.MemberEnd () || !status_it->value.IsString ())
       return make_error ("LLM response missing 'status' field");
 
-    const std::string status = status_it->value.GetString ();
-    if (status != "accept" && status != "reject")
-      return make_error ("LLM response status must be 'accept' or 'reject'");
+    std::string status = status_it->value.GetString ();
+    if (status != "accept" && status != "reject" && status != "needs_test_run")
+      return make_error ("LLM response status must be accept/reject/needs_test_run");
 
     std::string reason;
     auto reason_it = llm_doc.FindMember ("reason");
     if (reason_it != llm_doc.MemberEnd () && reason_it->value.IsString ())
       reason = reason_it->value.GetString ();
 
-    // ── 9. Build final verdict
+    // ── 9. Handle needs_test_run — run Reviewer-written tests, feed result back
+    if (status == "needs_test_run")
+    {
+      std::string test_code;
+      auto tc_it = llm_doc.FindMember ("test_code");
+      if (tc_it == llm_doc.MemberEnd () || !tc_it->value.IsString ()
+          || std::string (tc_it->value.GetString ()).empty ())
+      {
+        spdlog::warn ("[code_reviewer] needs_test_run but no test_code — "
+                      "treating as reject");
+        status = "reject";
+        reason = "Reviewer requested test run but provided no test code";
+      }
+      else
+      {
+        test_code = tc_it->value.GetString ();
+
+        // Write test script alongside worker_impl.py.
+        const std::string test_path = scratch + "/reviewer_test.py";
+        if (!write_file (test_path, test_code))
+        {
+          spdlog::warn ("[code_reviewer] cannot write test script");
+          status = "reject";
+          reason = "failed to write Reviewer test script";
+        }
+        else
+        {
+          // Run test script in same sandbox with worker_impl.py present.
+          std::string test_output;
+          const int test_exit = run_sandbox (
+            worker_binary, test_path,
+            mock_input_path,  // stdin not used by tests but sandbox needs it
+            scratch, /*timeout_s=*/30, test_output);
+
+          const bool tests_passed
+            = (test_exit == 0
+               && test_output.find ("ALL TESTS PASSED") != std::string::npos);
+
+          spdlog::info ("[code_reviewer] test run exit={} passed={} output={}",
+                        test_exit, tests_passed,
+                        test_output.substr (0, 200));
+
+          // Second LLM call: give Reviewer the test results for final verdict.
+          const std::string test_result_summary
+            = "Test exit code: " + std::to_string (test_exit)
+              + "\nTest output:\n" + test_output.substr (0, 1000);
+
+          const std::string second_prompt
+            = "Requirement:\n" + description
+              + "\n\nworker_impl.py source:\n```python\n" + impl_code
+              + "\n```\n\nUnit test code you wrote:\n```python\n" + test_code
+              + "\n```\n\n" + test_result_summary
+              + "\n\nBased on the source code review AND test results, "
+                "respond with JSON only:\n"
+                "{\"status\": \"accept\" | \"reject\", "
+                "\"reason\": \"...\", \"test_code\": \"\"}\n"
+                "Remember: test passing does not guarantee correctness -- "
+                "check the implementation logic too.";
+
+          // Build second LLM request using same config as first.
+          LlmRequest second_req;
+          second_req.base_url = base_url_env ? base_url_env
+                                             : "https://api.anthropic.com";
+          second_req.api_key  = api_key_env  ? api_key_env  : "";
+          second_req.model    = model_env    ? model_env    : "claude-opus-4-5";
+          second_req.max_tokens = max_tokens_env
+                                    ? std::atoi (max_tokens_env) : 1024;
+          second_req.api_path
+            = (second_req.base_url.find ("anthropic.com") != std::string::npos)
+                ? "/v1/messages" : "/v1/chat/completions";
+          second_req.system_prompt = system_prompt;
+          second_req.user_prompt   = second_prompt;
+          auto second_fut = proxy.enqueue (second_req);
+          Result<LlmResponse> second_result;
+          try { second_result = second_fut.get (); }
+          catch (const std::exception &e)
+          {
+            return make_error ("second LLM call threw: "
+                               + std::string (e.what ()));
+          }
+
+          if (!second_result.ok)
+            return make_error ("second LLM call failed: " + second_result.error);
+
+          std::string raw2 = second_result.value.content;
+          {
+            auto fs2 = raw2.find ("```");
+            if (fs2 != std::string::npos)
+            {
+              auto cs2 = raw2.find ('\n', fs2);
+              if (cs2 != std::string::npos)
+              {
+                auto fe2 = raw2.rfind ("```");
+                if (fe2 != std::string::npos && fe2 > cs2)
+                  raw2 = raw2.substr (cs2 + 1, fe2 - cs2 - 1);
+              }
+            }
+            auto ts2 = raw2.find_first_not_of (" \t\r\n");
+            auto te2 = raw2.find_last_not_of  (" \t\r\n");
+            if (ts2 != std::string::npos)
+              raw2 = raw2.substr (ts2, te2 - ts2 + 1);
+          }
+
+          rapidjson::Document doc2;
+          doc2.Parse (raw2.c_str ());
+          if (!doc2.HasParseError () && doc2.IsObject ())
+          {
+            auto s2 = doc2.FindMember ("status");
+            auto r2 = doc2.FindMember ("reason");
+            if (s2 != doc2.MemberEnd () && s2->value.IsString ())
+              status = s2->value.GetString ();
+            if (r2 != doc2.MemberEnd () && r2->value.IsString ())
+              reason = r2->value.GetString ();
+          }
+          else
+          {
+            spdlog::warn ("[code_reviewer] second LLM response invalid JSON, "
+                          "falling back to test exit code");
+            status = tests_passed ? "accept" : "reject";
+            reason = tests_passed ? "Tests passed (fallback decision)"
+                                  : "Tests failed (fallback decision)";
+          }
+        }
+      }
+    }
+
+    // ── 10 (was 9). Build final verdict
     // ────────────────────────────────────────────────
     rapidjson::Document verdict;
     verdict.SetObject ();

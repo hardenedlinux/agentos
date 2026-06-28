@@ -65,8 +65,9 @@ namespace agentos
     int step_order = 0;
     std::string description;
     std::string status; // pending | running | done | failed
-    std::optional<int64_t> started_at;
-    std::optional<int64_t> completed_at;
+    std::optional<int64_t> queued_at;    // when step was added to the plan
+    std::optional<int64_t> started_at;   // when worker dispatch began
+    std::optional<int64_t> completed_at; // when worker finished
     std::optional<std::string> error; // failure summary, if failed
     std::string result_json;          // ADR-016 result payload, set on done
   };

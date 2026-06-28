@@ -195,6 +195,10 @@ namespace agentos::forge
 
           if (accepted)
           {
+            // ADR-031 Section 7: method name is controlled by promote_worker
+            // which reads it directly from requirement_json.method — the LLM
+            // has no input on the method name, so no consistency check against
+            // writer output is needed here.
             auto worker_id = promote_worker (job);
             if (worker_id)
             {
@@ -316,11 +320,10 @@ namespace agentos::forge
       return false;
     }
 
-    // Validate required business fields.
-    // task_id is NOT expected from LLM output -- it is an AgentOS internal
-    // identifier injected by forge_coordinator from job.task_id.
-    for (const char *field : {"understanding", "language",
-                               "entry_point", "code", "capability"})
+    // Validate required business fields (ADR-031: impl_code replaces code).
+    // task_id is NOT expected from LLM output.
+    for (const char *field : {"language", "entry_point", "impl_code",
+                               "signatures", "capability"})
     {
       if (!doc.HasMember (field))
       {
@@ -330,6 +333,14 @@ namespace agentos::forge
           = std::string ("code_writer response missing field: ") + field;
         return false;
       }
+    }
+
+    // signatures must be an object
+    if (!doc["signatures"].IsObject ())
+    {
+      spdlog::error ("[forge_coordinator] code_writer 'signatures' is not an object");
+      job.feedback = "code_writer response: 'signatures' must be a JSON object";
+      return false;
     }
 
     // Language must be python or guile (bash forbidden, ADR-006).
@@ -358,9 +369,9 @@ namespace agentos::forge
       job.writer_output_json = sbuf.GetString ();
     }
 
-    // Write code file to disk.
-    const std::string code = doc["code"].GetString ();
-    write_code_file (job, code, lang);
+    // Write worker_impl.py and copy worker.py template to disk.
+    const std::string impl_code = doc["impl_code"].GetString ();
+    write_code_file (job, impl_code, lang);
 
     return true;
   }
@@ -493,11 +504,13 @@ namespace agentos::forge
   }
 
   // ---------------------------------------------------------------------------
-  // Write code file
+  // Write code file (ADR-031: two-file structure)
+  // Writes worker_impl.py to the forge attempt directory.
+  // Also copies worker_template.py from ~/.agentos/skills/ as worker.py.
   // ---------------------------------------------------------------------------
 
   bool ForgeCoordinator::write_code_file (ForgePipelineJob &job,
-                                          const std::string &code,
+                                          const std::string &impl_code,
                                           const std::string &language)
   {
     const std::string ext = (language == "guile") ? "scm" : "py";
@@ -511,20 +524,42 @@ namespace agentos::forge
       return false;
     }
 
-    fs::path file_path
-      = forge_dir / ("attempt_" + std::to_string (job.attempt) + "." + ext);
-    std::ofstream out (file_path);
-    if (!out)
+    // Write worker_impl.<ext> (the generated business logic).
+    fs::path impl_path
+      = forge_dir / ("attempt_" + std::to_string (job.attempt) + "_impl." + ext);
     {
-      spdlog::error ("[forge_coordinator] cannot write code file {}",
-                     file_path.string ());
-      return false;
+      std::ofstream out (impl_path);
+      if (!out)
+      {
+        spdlog::error ("[forge_coordinator] cannot write impl file {}",
+                       impl_path.string ());
+        return false;
+      }
+      out << impl_code;
     }
-    out << code;
-    out.close ();
 
-    job.last_code_path = file_path.string ();
-    spdlog::info ("[forge_coordinator] wrote code to {}", file_path.string ());
+    // Copy worker_template.py from ~/.agentos/skills/ as worker.py alongside.
+    // The template is the fixed runtime entry point (ADR-031).
+    fs::path template_src = agentos_home () / "skills" / "worker_template.py";
+    fs::path worker_path
+      = forge_dir / ("attempt_" + std::to_string (job.attempt) + "_worker.py");
+    if (fs::exists (template_src))
+    {
+      fs::copy_file (template_src, worker_path,
+                     fs::copy_options::overwrite_existing, ec);
+      if (ec)
+        spdlog::warn ("[forge_coordinator] cannot copy worker template: {}",
+                      ec.message ());
+    }
+    else
+    {
+      spdlog::warn ("[forge_coordinator] worker_template.py not found at {}; "
+                    "sandbox will use impl directly",
+                    template_src.string ());
+    }
+
+    job.last_code_path = impl_path.string ();
+    spdlog::info ("[forge_coordinator] wrote impl to {}", impl_path.string ());
     return true;
   }
 
@@ -547,14 +582,18 @@ namespace agentos::forge
     const std::string language = writer_doc.HasMember ("language")
                                    ? writer_doc["language"].GetString ()
                                    : "python";
-    const std::string code
-      = writer_doc.HasMember ("code") ? writer_doc["code"].GetString () : "";
+    // ADR-031: impl_code replaces code — two-file worker structure.
+    const std::string impl_code
+      = writer_doc.HasMember ("impl_code")
+          ? writer_doc["impl_code"].GetString ()
+          : (writer_doc.HasMember ("code")
+               ? writer_doc["code"].GetString ()  // backward compat
+               : "");
 
     // Generate worker_id — use forge_job_id as the stable identifier (ADR-019).
     const std::string worker_id = job.id;
-    const std::string ext = (language == "guile") ? "scm" : "py";
 
-    // 1. Write worker code to ~/.agentos/workers/<worker-id>/worker.<ext>
+    // 1. Write worker_impl.py and worker.py (template) to worker directory.
     fs::path worker_dir = agentos_home () / "workers" / worker_id;
     std::error_code ec;
     fs::create_directories (worker_dir, ec);
@@ -565,16 +604,51 @@ namespace agentos::forge
       return std::nullopt;
     }
 
-    fs::path binary_path = worker_dir / ("worker." + ext);
+    // Write worker_impl.py — generated business logic.
+    fs::path impl_path = worker_dir / "worker_impl.py";
     {
-      std::ofstream out (binary_path);
+      std::ofstream out (impl_path);
       if (!out)
       {
-        spdlog::error ("[forge_coordinator] cannot write worker file {}",
-                       binary_path.string ());
+        spdlog::error ("[forge_coordinator] cannot write worker_impl.py {}",
+                       impl_path.string ());
         return std::nullopt;
       }
-      out << code;
+      out << impl_code;
+    }
+
+    // Copy worker_template.py → worker.py (fixed runtime entry point).
+    fs::path binary_path = worker_dir / "worker.py";
+    {
+      fs::path template_src
+        = agentos_home () / "skills" / "worker_template.py";
+      if (fs::exists (template_src))
+      {
+        fs::copy_file (template_src, binary_path,
+                       fs::copy_options::overwrite_existing, ec);
+        if (ec)
+        {
+          spdlog::error (
+            "[forge_coordinator] cannot copy worker template to {}: {}",
+            binary_path.string (), ec.message ());
+          return std::nullopt;
+        }
+      }
+      else
+      {
+        // Fallback: write impl_code directly as worker.py so the worker
+        // can still run (degraded — no template separation).
+        spdlog::warn ("[forge_coordinator] worker_template.py missing, "
+                      "writing impl directly to worker.py (degraded)");
+        std::ofstream out (binary_path);
+        if (!out)
+        {
+          spdlog::error ("[forge_coordinator] cannot write worker.py {}",
+                         binary_path.string ());
+          return std::nullopt;
+        }
+        out << impl_code;
+      }
     }
 
     // 2. Build capability_json per finalize_worker_promotion contract
@@ -682,7 +756,7 @@ namespace agentos::forge
     }
 
     // 4. Insert into agents + capabilities tables via Registry.
-    registry_.finalize_worker_promotion (job, code, manifest_json, db_);
+    registry_.finalize_worker_promotion (job, impl_code, manifest_json, db_);
 
     spdlog::info ("[forge_coordinator] worker {} promoted and registered",
                   worker_id);

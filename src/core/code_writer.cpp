@@ -177,26 +177,35 @@ namespace agentos::forge
                      + feedback;
 
     user_prompt
-      += "\n\nRespond with a JSON object only (no markdown, no explanation):\n"
+      += "\n\nYou MUST respond with ONLY a JSON object. No markdown fences, "
+         "no explanation, no prose before or after. The JSON object MUST "
+         "contain ALL of these fields with EXACTLY these names:\n"
          "{\n"
          "  \"understanding\": \"<your interpretation of the requirement>\",\n"
-         "  \"language\": \"python\" | \"guile\",\n"
-         "  \"entry_point\": \"<function or module entry point>\",\n"
-         "  \"code\": \"<full source code as a single string>\",\n"
+         "  \"language\": \"python\",\n"
+         "  \"entry_point\": \"run\",\n"
+         "  \"impl_code\": \"<complete worker_impl.py source — only business "
+         "logic, no main(), no stdin, no file I/O>\",\n"
+         "  \"signatures\": {\n"
+         "    \"run\": {\n"
+         "      \"signature\": \"(task: dict) -> dict\",\n"
+         "      \"doc\": \"<one-line description of what run() does>\"\n"
+         "    }\n"
+         "  },\n"
          "  \"capability\": {\n"
          "    \"network\": false,\n"
          "    \"fs_read\": [],\n"
          "    \"fs_write\": [],\n"
          "    \"exec\": false\n"
          "  },\n"
-         "  \"notes\": \"<optional remarks for the reviewer>\"\n"
+         "  \"notes\": \"\"\n"
          "}\n"
-         "The capability block must accurately reflect what the code actually "
-         "does.\n"
-         "bash is forbidden. Only python or guile are allowed.\n"
-      "network and exec must be false unless the requirement explicitly "
-      "demands "
-      "them (they will be rejected if true).";
+         "impl_code must define a top-level function run(task: dict) -> dict. "
+         "Do NOT include main(), sys.stdin, open(), or os.environ in impl_code. "
+         "The signatures object must have an entry for every public function. "
+         "Missing any field will cause the entire attempt to be rejected. "
+         "network and exec must be false unless the requirement explicitly "
+         "demands them.";
 
     // ── 5. Call LLM
     // ───────────────────────────────────────────────────────────
@@ -264,15 +273,46 @@ namespace agentos::forge
       return true;
     };
 
-    std::string understanding, language, entry_point, code;
+    std::string understanding, language, entry_point, impl_code;
     if (!require_llm_string ("understanding", understanding))
+    {
+      spdlog::error ("[code_writer] LLM response missing 'understanding'. "
+                     "Raw response: {}",
+                     raw_content.substr (0, 500));
       return make_error ("LLM response missing 'understanding'");
+    }
     if (!require_llm_string ("language", language))
+    {
+      spdlog::error ("[code_writer] LLM response missing 'language'. "
+                     "Raw response: {}",
+                     raw_content.substr (0, 500));
       return make_error ("LLM response missing 'language'");
+    }
     if (!require_llm_string ("entry_point", entry_point))
+    {
+      spdlog::error ("[code_writer] LLM response missing 'entry_point'. "
+                     "Raw response: {}",
+                     raw_content.substr (0, 500));
       return make_error ("LLM response missing 'entry_point'");
-    if (!require_llm_string ("code", code))
-      return make_error ("LLM response missing 'code'");
+    }
+    // ADR-031: two-file structure — impl_code replaces code
+    if (!require_llm_string ("impl_code", impl_code))
+    {
+      spdlog::error ("[code_writer] LLM response missing 'impl_code'. "
+                     "Raw response: {}",
+                     raw_content.substr (0, 500));
+      return make_error ("LLM response missing 'impl_code'");
+    }
+
+    // signatures is an object — validate it exists and is an object
+    auto sigs_it = llm_doc.FindMember ("signatures");
+    if (sigs_it == llm_doc.MemberEnd () || !sigs_it->value.IsObject ())
+    {
+      spdlog::error ("[code_writer] LLM response missing 'signatures' object. "
+                     "Raw response: {}",
+                     raw_content.substr (0, 500));
+      return make_error ("LLM response missing 'signatures' object");
+    }
 
     if (language != "python" && language != "guile")
       return make_error ("LLM chose forbidden language: " + language);
@@ -288,17 +328,16 @@ namespace agentos::forge
         notes = it->value.GetString ();
     }
 
-    // ── 7. Build output JSON per ADR-019 contract
-    // ─────────────────────────────
-    // task_id is intentionally omitted from LLM output — it is an AgentOS
-    // internal identifier injected by forge_coordinator after validation.
+    // ── 7. Build output JSON (ADR-031 two-file structure)
+    // task_id injected by forge_coordinator after validation.
     // {
-    //   "understanding":"...",
-    //   "language":     "python" | "guile",
-    //   "entry_point":  "...",
-    //   "code":         "...",
-    //   "capability":   { "network": bool, "fs_read": [...], "fs_write": [...],
-    //   "exec": bool }, "notes":        "..."
+    //   "understanding": "...",
+    //   "language":      "python",
+    //   "entry_point":   "run",
+    //   "impl_code":     "<worker_impl.py source>",
+    //   "signatures":    { "<fn>": { "signature": "...", "doc": "..." }, ... },
+    //   "capability":    { ... },
+    //   "notes":         "..."
     // }
     rapidjson::Document out;
     out.SetObject ();
@@ -312,8 +351,12 @@ namespace agentos::forge
     out.AddMember ("entry_point",
                    rapidjson::Value (entry_point.c_str (), alloc).Move (),
                    alloc);
-    out.AddMember ("code", rapidjson::Value (code.c_str (), alloc).Move (),
-                   alloc);
+    out.AddMember ("impl_code",
+                   rapidjson::Value (impl_code.c_str (), alloc).Move (), alloc);
+
+    // Deep-copy signatures object from LLM response
+    rapidjson::Value sigs_copy (sigs_it->value, alloc);
+    out.AddMember ("signatures", sigs_copy.Move (), alloc);
 
     // Deep-copy capability block from LLM response
     rapidjson::Value cap_copy (cap_it->value, alloc);

@@ -240,6 +240,7 @@ namespace agentos
     std::string command;     // capability method name
     std::string description; // natural language (Master‑generated)
     std::unordered_map<std::string, std::string> params;
+    bool needs_forge = false; // ADR-031: true = Forge should be triggered if Registry misses
   };
 
   struct PipelinePlan

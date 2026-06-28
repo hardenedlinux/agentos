@@ -329,6 +329,35 @@ namespace agentos
   }
 
   // -----------------------------------------------------------------------
+  // ADR-031: validate capability method format (namespace.verb)
+  // Same rule as Database::insert_capability — kept in sync.
+  // -----------------------------------------------------------------------
+  static bool is_valid_method (const std::string &method)
+  {
+    if (method.empty () || method.size () > 64)
+      return false;
+    const auto dot = method.find ('.');
+    if (dot == std::string::npos || dot != method.rfind ('.')
+        || dot == 0 || dot + 1 == method.size ())
+      return false;
+    auto valid_segment = [] (const std::string &s, size_t start,
+                              size_t len) -> bool
+    {
+      if (len == 0 || !(s[start] >= 'a' && s[start] <= 'z'))
+        return false;
+      for (size_t i = start + 1; i < start + len; ++i)
+      {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+          return false;
+      }
+      return true;
+    };
+    return valid_segment (method, 0, dot)
+           && valid_segment (method, dot + 1, method.size () - dot - 1);
+  }
+
+  // -----------------------------------------------------------------------
   // ADR-019: worker registration after forge pipeline promotes
   // -----------------------------------------------------------------------
   void Registry::finalize_worker_promotion (const ForgePipelineJob &job,
@@ -347,18 +376,10 @@ namespace agentos
       return;
     }
 
-    // Write worker source file
+    // ADR-031: worker.py and worker_impl.py are written by
+    // ForgeCoordinator::promote_worker before this call.
+    // This function only writes manifest.json and handles DB/in-memory sync.
     auto code_path = worker_dir / "worker.py";
-    {
-      std::ofstream out (code_path);
-      if (!out)
-      {
-        spdlog::error ("[registry] cannot write worker code to {}",
-                       code_path.string ());
-        return;
-      }
-      out << worker_code;
-    }
 
     // Write manifest.json
     auto manifest_path = worker_dir / "manifest.json";
@@ -391,6 +412,19 @@ namespace agentos
           continue;
 
         const std::string method = cap["method"].GetString ();
+
+        // ADR-031: reject non-conforming method names before any write.
+        // in-memory sync below uses the same guard, so DB and Registry
+        // are always consistent.
+        if (!is_valid_method (method))
+        {
+          spdlog::error (
+            "[registry] finalize_worker_promotion: invalid method format '{}' "
+            "for worker '{}' — skipping capability registration (ADR-031)",
+            method, job.id);
+          continue;
+        }
+
         const std::string desc
           = cap.HasMember ("description") && cap["description"].IsString ()
               ? cap["description"].GetString ()
@@ -434,6 +468,10 @@ namespace agentos
           continue;
         CommandSchema cmd;
         cmd.name = cap["method"].GetString ();
+        // ADR-031: skip non-conforming method names — they were already
+        // rejected in the DB insert pass above.
+        if (!is_valid_method (cmd.name))
+          continue;
         cmd.description
           = cap.HasMember ("description") && cap["description"].IsString ()
           ? cap["description"].GetString ()
@@ -444,6 +482,16 @@ namespace agentos
 
     for (const auto &cmd : executor.commands)
       {
+        // ADR-031: only register methods that passed format validation above.
+        // This prevents non-conforming names from entering the in-memory
+        // Registry even when DB insert was already rejected.
+        if (!is_valid_method (cmd.name))
+        {
+          spdlog::warn ("[registry] skipping in-memory registration of "
+                        "invalid method '{}' for worker '{}'",
+                        cmd.name, job.id);
+          continue;
+        }
         impl_->command_to_worker[cmd.name] = job.id;
         impl_->command_schemas[cmd.name] = cmd;
       }

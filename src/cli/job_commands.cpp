@@ -22,6 +22,7 @@
 #include "agentos/job_params.h"
 #include <CLI/CLI.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -218,9 +219,9 @@ void register_job_commands (CLI::App &app)
                 std::string desc = f::str (step, "description");
                 std::string stepStatus = f::str (step, "status");
 
-                // For done/failed steps show elapsed time (fixed value).
-                // For pending/running show started_at as time_ago.
-                std::string timing;
+                bool has_queued = step.HasMember ("queued_at")
+                                  && step["queued_at"].IsInt64 ()
+                                  && step["queued_at"].GetInt64 () > 0;
                 bool has_started = step.HasMember ("started_at")
                                    && step["started_at"].IsInt64 ()
                                    && step["started_at"].GetInt64 () > 0;
@@ -228,19 +229,63 @@ void register_job_commands (CLI::App &app)
                                      && step["completed_at"].IsInt64 ()
                                      && step["completed_at"].GetInt64 () > 0;
 
+                // Compute per-phase durations:
+                //   waiting  = started_at  - queued_at   (time in queue)
+                //   running  = completed_at - started_at  (actual execution)
+                //   total    = completed_at - queued_at   (wall time)
+                std::string timing_detail;
                 if (has_started && has_completed)
                 {
-                  int64_t elapsed = step["completed_at"].GetInt64 ()
-                                    - step["started_at"].GetInt64 ();
-                  timing = std::to_string (elapsed) + "s";
+                  int64_t run_s = step["completed_at"].GetInt64 ()
+                                  - step["started_at"].GetInt64 ();
+                  if (has_queued)
+                  {
+                    int64_t wait_s = step["started_at"].GetInt64 ()
+                                     - step["queued_at"].GetInt64 ();
+                    int64_t total_s = step["completed_at"].GetInt64 ()
+                                      - step["queued_at"].GetInt64 ();
+                    timing_detail = "total " + std::to_string (total_s) + "s"
+                                    + "  (queued " + std::to_string (wait_s) + "s"
+                                    + " + ran " + std::to_string (run_s) + "s)";
+                  }
+                  else
+                  {
+                    timing_detail = "ran " + std::to_string (run_s) + "s";
+                  }
                 }
                 else if (has_started)
                 {
-                  timing = f::time_ago (step["started_at"].GetInt64 ());
+                  // Still running — show how long it has been running.
+                  auto now_s = static_cast<int64_t> (
+                    std::chrono::duration_cast<std::chrono::seconds> (
+                      std::chrono::system_clock::now ().time_since_epoch ())
+                      .count ());
+                  int64_t run_s = now_s - step["started_at"].GetInt64 ();
+                  if (has_queued)
+                  {
+                    int64_t wait_s = step["started_at"].GetInt64 ()
+                                     - step["queued_at"].GetInt64 ();
+                    timing_detail = "running " + std::to_string (run_s) + "s"
+                                    + "  (queued " + std::to_string (wait_s) + "s)";
+                  }
+                  else
+                  {
+                    timing_detail = "running " + std::to_string (run_s) + "s";
+                  }
+                }
+                else if (has_queued)
+                {
+                  // Pending — show how long it has been waiting.
+                  auto now_s = static_cast<int64_t> (
+                    std::chrono::duration_cast<std::chrono::seconds> (
+                      std::chrono::system_clock::now ().time_since_epoch ())
+                      .count ());
+                  int64_t wait_s = now_s - step["queued_at"].GetInt64 ();
+                  timing_detail = "queued " + std::to_string (wait_s) + "s";
                 }
                 else
                 {
-                  timing = "-";
+                  timing_detail = "-";
                 }
 
                 std::string colStatus;
@@ -253,8 +298,12 @@ void register_job_commands (CLI::App &app)
                 else
                   colStatus = grey (stepStatus);
 
-                std::cout << "  " << order << "  " << colStatus << "      "
-                          << desc << "          " << timing << "\n";
+                // Step header line: order + status + description
+                std::cout << "  " << order << "  "
+                          << colStatus
+                          << "  " << desc << "\n";
+                // Timing detail indented under the step
+                std::cout << "       " << grey (timing_detail) << "\n";
               }
 
             // Show result for done jobs.

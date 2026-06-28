@@ -35,11 +35,13 @@
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 
+#include <chrono>
+#include <csignal>
 #include <fstream>
 #include <iostream>
-#include <thread>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <thread>
 #include <unordered_set>
 
 namespace agentos
@@ -664,8 +666,8 @@ namespace agentos
     params.Parse (params_json.c_str ());
 
     std::optional<std::string> user_id_filter;
-    if (!params.HasParseError ()
-        && params.HasMember ("user_id") && params["user_id"].IsString ())
+    if (!params.HasParseError () && params.HasMember ("user_id")
+        && params["user_id"].IsString ())
       user_id_filter = params["user_id"].GetString ();
 
     // --all: no time filter; --since <minutes>: override default 10min window
@@ -675,12 +677,16 @@ namespace agentos
       if (params.HasMember ("all") && params["all"].IsBool ()
           && params["all"].GetBool ())
         since_unix = std::nullopt;
-      else if (params.HasMember ("since_minutes") && params["since_minutes"].IsInt ())
-        since_unix = now_unix () - static_cast<int64_t> (params["since_minutes"].GetInt ()) * 60;
+      else if (params.HasMember ("since_minutes")
+               && params["since_minutes"].IsInt ())
+        since_unix
+          = now_unix ()
+            - static_cast<int64_t> (params["since_minutes"].GetInt ()) * 60;
     }
 
     int limit = 100;
-    if (!params.HasParseError () && params.HasMember ("limit") && params["limit"].IsInt ())
+    if (!params.HasParseError () && params.HasMember ("limit")
+        && params["limit"].IsInt ())
       limit = params["limit"].GetInt ();
 
     auto jobs = db_.load_jobs_since (since_unix, limit, user_id_filter);
@@ -824,7 +830,7 @@ namespace agentos
     // then join in memory. This avoids N+1 queries and keeps all SQL in
     // database.cpp per ADR-021.
     auto agents = db_.load_enabled_agents ();
-    auto caps   = db_.load_capabilities ();
+    auto caps = db_.load_capabilities ();
 
     // Build a map: agent_id → list of method names.
     std::unordered_map<std::string, std::vector<std::string>> caps_by_agent;
@@ -868,7 +874,7 @@ namespace agentos
           w.String (method.c_str ());
       w.EndArray ();
       w.Key ("registered_at");
-      w.Int64 (0); // approved_at not yet exposed by AgentRow; kept as 0
+      w.Int64 (a.approved_at);
       w.EndObject ();
     }
     w.EndArray ();
@@ -942,8 +948,7 @@ namespace agentos
   {
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
-        || !params.HasMember ("worker_id")
-        || !params["worker_id"].IsString ())
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
     {
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
@@ -963,8 +968,7 @@ namespace agentos
   {
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
-        || !params.HasMember ("worker_id")
-        || !params["worker_id"].IsString ())
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
     {
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
@@ -977,9 +981,12 @@ namespace agentos
   // ---------------------------------------------------------------------------
   // Command: worker.revoke
   //
-  // Soft-deletes a worker: sets enabled = -1 (revoked) in the agents table.
-  // Refuses if the worker has any running steps in active jobs (error -32022).
-  // Does not touch the filesystem — directory management is the operator's
+  // Soft revoke (default): refuses if the worker has any running runs (-32022).
+  // Force revoke (force=true): sends SIGTERM then SIGKILL to all active run
+  // PIDs, marks them failed in DB, marks affected jobs failed in memory and
+  // DB, then permanently revokes the worker entry (enabled=-1).
+  // Use --force when a worker is stuck in a dead loop and cannot exit cleanly.
+  // Does not touch the filesystem — directory cleanup is the operator's
   // responsibility.
   // ---------------------------------------------------------------------------
 
@@ -989,30 +996,81 @@ namespace agentos
   {
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
-        || !params.HasMember ("worker_id")
-        || !params["worker_id"].IsString ())
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
     {
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
     const std::string worker_id = params["worker_id"].GetString ();
+    const bool force = params.HasMember ("force") && params["force"].IsBool ()
+                       && params["force"].GetBool ();
 
-    // Refuse if there are running worker_runs for this worker_id.
-    // We check active_runs from DB — if any run for this worker is still
-    // in status=running (0), reject with -32022 Invalid state.
+    // Collect active runs for this worker from DB.
+    std::vector<WorkerRun> active_runs;
     for (const auto &run : db_.get_active_worker_runs ())
     {
       if (run.worker_id == worker_id)
+        active_runs.push_back (run);
+    }
+
+    if (!active_runs.empty () && !force)
+    {
+      reply_error (identity, request_id, -32022,
+                   "Worker has active runs — use --force to kill them, "
+                   "or wait for jobs to complete");
+      return;
+    }
+
+    if (force && !active_runs.empty ())
+    {
+      // Step 1: SIGTERM all active PIDs.
+      for (const auto &run : active_runs)
       {
-        reply_error (identity, request_id, -32022,
-                     "Worker has active runs — disable it first or wait for "
-                     "jobs to complete");
-        return;
+        if (run.pid > 0)
+        {
+          spdlog::warn ("[orchestrator] force-revoke {}: SIGTERM pid {}",
+                        worker_id, run.pid);
+          ::kill (run.pid, SIGTERM);
+        }
+      }
+
+      // Step 2: brief grace period then SIGKILL.
+      std::this_thread::sleep_for (std::chrono::milliseconds (200));
+      for (const auto &run : active_runs)
+      {
+        if (run.pid > 0)
+          ::kill (run.pid, SIGKILL);
+      }
+
+      // Step 3: find and fail all in-memory jobs whose current_run_id
+      // matches one of the killed runs. Must collect job_ids first to
+      // avoid iterator invalidation inside finish_job().
+      std::vector<std::string> jobs_to_fail;
+      for (const auto &[jid, job] : active_jobs_)
+      {
+        for (const auto &run : active_runs)
+        {
+          if (job.current_run_id == run.run_id)
+          {
+            jobs_to_fail.push_back (jid);
+            break;
+          }
+        }
+      }
+      for (const auto &jid : jobs_to_fail)
+      {
+        spdlog::warn (
+          "[orchestrator] force-revoke: failing job {} (worker {} killed)", jid,
+          worker_id);
+        finish_job (jid, false, "worker force-revoked by operator");
       }
     }
 
-    db_.revoke_worker (worker_id);
-    spdlog::info ("[orchestrator] worker revoked: {}", worker_id);
+    // Step 4: commit to DB — mark runs failed + set enabled=-1.
+    // For soft revoke (no active runs) this is equivalent to revoke_worker().
+    db_.force_revoke_worker (worker_id);
+    spdlog::warn ("[orchestrator] worker {} revoked (force={})", worker_id,
+                  force);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
 
@@ -1144,10 +1202,9 @@ namespace agentos
         = doc.HasMember ("adviser_id") && doc["adviser_id"].IsString ()
             ? doc["adviser_id"].GetString ()
             : "";
-      const std::string goal
-        = doc.HasMember ("goal") && doc["goal"].IsString ()
-            ? doc["goal"].GetString ()
-            : "";
+      const std::string goal = doc.HasMember ("goal") && doc["goal"].IsString ()
+                                 ? doc["goal"].GetString ()
+                                 : "";
 
       if (job_id.empty () || adviser_id.empty ())
       {
@@ -1156,14 +1213,14 @@ namespace agentos
         return;
       }
 
-      spdlog::info ("[orchestrator] spawning adviser {} for job {}",
-                    adviser_id, job_id);
+      spdlog::info ("[orchestrator] spawning adviser {} for job {}", adviser_id,
+                    job_id);
 
       // Read skill.md as system prompt (ADR-018).
       const char *home_env = std::getenv ("HOME");
-      const std::string skill_path
-        = std::string (home_env ? home_env : "")
-          + "/.agentos/advisers/" + adviser_id + "/skill.md";
+      const std::string skill_path = std::string (home_env ? home_env : "")
+                                     + "/.agentos/advisers/" + adviser_id
+                                     + "/skill.md";
       std::string system_prompt;
       {
         std::ifstream f (skill_path);
@@ -1177,11 +1234,37 @@ namespace agentos
             adviser_id);
       }
 
+      // Query Registry for current enabled capabilities — inject at spawn time
+      // so the Planning Adviser selects from actual registered methods
+      // (ADR-031). This is dynamic data; it must NOT live in skill.md.
+      std::string capability_list_str;
+      {
+        auto caps = db_.load_capabilities ();
+        if (caps.empty ())
+        {
+          capability_list_str = "Available capabilities: none registered\n";
+        }
+        else
+        {
+          capability_list_str
+            = "Available capabilities (use ONLY these exact strings as command "
+              "values):\n";
+          for (const auto &c : caps)
+          {
+            capability_list_str += "  " + c.method;
+            if (!c.description.empty ())
+              capability_list_str += "  — " + c.description;
+            capability_list_str += "\n";
+          }
+        }
+      }
+
       // Detach LLM thread — never blocks Orchestrator event loop.
       // Captures by value; `this` is safe (Orchestrator outlives all threads).
       std::thread (
         [this, job_id, goal,
-         system_prompt = std::move (system_prompt)] () mutable
+         system_prompt = std::move (system_prompt),
+         capability_list_str = std::move (capability_list_str)] () mutable
         {
           // LlmProxy has no complete(); LlmClient wraps it (ADR-017).
           LlmClient client (llm_, config_.llm);
@@ -1189,13 +1272,16 @@ namespace agentos
           LlmRequest req;
           req.system_prompt = std::move (system_prompt);
           req.user_prompt
-            = "Decompose the following goal into an ordered list of steps. "
+            = "Decompose the following goal into an ordered list of steps.\n"
               "Respond ONLY with a JSON object — no markdown, no prose — in "
-              "this exact shape: "
+              "this exact shape:\n"
               "{\"steps\":[{\"id\":\"<uuid>\",\"command\":\"<capability>\","
-              "\"description\":\"<what this step does>\"},...]}. "
-              "Goal: "
-              + goal;
+              "\"needs_forge\":<bool>,"
+              "\"description\":\"<what this step does>\"},...]}.\n"
+              "Set needs_forge:true for any step whose required capability is "
+              "not in the Available capabilities list.\n\n"
+              + capability_list_str
+              + "\nGoal: " + goal;
           req.max_tokens = 1024;
 
           auto result = client.complete (req);
@@ -1209,15 +1295,30 @@ namespace agentos
               "[orchestrator] adviser LLM call failed for job {}: {}", job_id,
               result.error);
             ev.kind = OrchestratorEvent::Kind::AdviserFailed;
-            ev.payload_json = R"({"job_id":")" + job_id
-                              + R"(","reason":"LLM call failed"})";
+            ev.payload_json
+              = R"({"job_id":")" + job_id + R"(","reason":"LLM call failed"})";
             enqueue (std::move (ev));
             return;
           }
 
+          // Strip markdown fence if LLM wrapped response in ```json...```
+          std::string content = result.value.content;
+          if (content.size () >= 3 && content.substr (0, 3) == "```")
+          {
+            auto first_nl = content.find ('\n');
+            if (first_nl != std::string::npos)
+              content = content.substr (first_nl + 1);
+            if (content.size () >= 3
+                && content.substr (content.size () - 3) == "```")
+              content.erase (content.size () - 3);
+            while (!content.empty ()
+                   && (content.back () == '\n' || content.back () == '\r'
+                       || content.back () == ' '))
+              content.pop_back ();
+          }
+
           // Parse steps JSON from LLM response.
           rapidjson::Document resp;
-          const std::string &content = result.value.content;
           if (resp.Parse (content.c_str ()).HasParseError ()
               || !resp.IsObject () || !resp.HasMember ("steps")
               || !resp["steps"].IsArray ())
@@ -1285,6 +1386,9 @@ namespace agentos
       job.type = (doc.HasMember ("job_type") && doc["job_type"].IsString ())
                    ? doc["job_type"].GetString ()
                    : "oneshot";
+      // Load goal from DB so it is available for task injection (ADR-031 B).
+      if (auto j = db_.load_job (job_id); j)
+        job.goal = j->goal;
 
       if (doc.HasMember ("steps") && doc["steps"].IsArray ())
       {
@@ -1298,6 +1402,18 @@ namespace agentos
             as.step.command = s["command"].GetString ();
           if (s.HasMember ("description") && s["description"].IsString ())
             as.step.description = s["description"].GetString ();
+          // ADR-031: needs_forge is required; absence is a Planning Adviser
+          // failure — treat missing field as false and log a warning.
+          if (s.HasMember ("needs_forge") && s["needs_forge"].IsBool ())
+            as.step.needs_forge = s["needs_forge"].GetBool ();
+          else
+          {
+            spdlog::warn ("[orchestrator] plan step missing needs_forge field "
+                          "for job {} step {} — treating as false",
+                          job_id,
+                          as.step.id);
+            as.step.needs_forge = false;
+          }
           // Persist step to DB so job.status can display it (ADR-022).
           db_.store_pipeline_task (TaskId (job_id), as.step, order++);
           job.pending_steps.push_back (std::move (as));
@@ -1324,7 +1440,8 @@ namespace agentos
 
       if (job_id.empty () || command.empty ())
       {
-        spdlog::error ("[orchestrator] trigger_forge: missing job_id or command");
+        spdlog::error (
+          "[orchestrator] trigger_forge: missing job_id or command");
         finish_job (job_id, false, "trigger_forge: missing fields");
         return;
       }
@@ -1338,23 +1455,25 @@ namespace agentos
       rw.Key ("method");
       rw.String (command.c_str ());
       rw.Key ("input_schema");
-      rw.StartObject (); rw.EndObject ();
+      rw.StartObject ();
+      rw.EndObject ();
       rw.Key ("output_schema");
-      rw.StartObject (); rw.EndObject ();
+      rw.StartObject ();
+      rw.EndObject ();
       rw.EndObject ();
       const std::string requirement_json = req_buf.GetString ();
 
       // Create and persist the forge_pipeline_jobs row (persist-before-act).
       const std::string forge_job_id = new_uuid ();
       ForgePipelineJob fpj;
-      fpj.id               = forge_job_id;
-      fpj.task_id          = job_id;
-      fpj.status           = ForgeStatus::drafting;
+      fpj.id = forge_job_id;
+      fpj.task_id = job_id;
+      fpj.status = ForgeStatus::drafting;
       fpj.requirement_json = requirement_json;
-      fpj.attempt          = 0;
-      fpj.max_attempts     = 3;
-      fpj.created_at       = now_unix ();
-      fpj.updated_at       = now_unix ();
+      fpj.attempt = 0;
+      fpj.max_attempts = 3;
+      fpj.created_at = now_unix ();
+      fpj.updated_at = now_unix ();
       db_.store_forge_pipeline_job (fpj);
 
       spdlog::info ("[orchestrator] trigger_forge job_id={} command={} "
@@ -1363,12 +1482,12 @@ namespace agentos
 
       // Post to ForgeCoordinator — returns immediately.
       forge::ForgeRequest freq;
-      freq.forge_job_id     = forge_job_id;
-      freq.task_id          = job_id;
+      freq.forge_job_id = forge_job_id;
+      freq.task_id = job_id;
       freq.requirement_json = requirement_json;
-      freq.feedback         = "";
-      freq.attempt          = 0;
-      freq.max_attempts     = 3;
+      freq.feedback = "";
+      freq.attempt = 0;
+      freq.max_attempts = 3;
       forge_.post (std::move (freq));
     }
     else if (type == "forge_complete")
@@ -1477,16 +1596,46 @@ namespace agentos
 
     // Look up Worker for this step's command.
     auto worker = registry_.find_worker_for_command (step.step.command);
+
+    // ADR-031: needs_forge semantics.
+    //   needs_forge=true  + Registry miss  → trigger Forge immediately.
+    //   needs_forge=true  + Registry hit   → dispatch found worker (already
+    //                                        exists; Forge not needed).
+    //   needs_forge=false + Registry hit   → dispatch (normal path).
+    //   needs_forge=false + Registry miss  → anomaly; log WARNING then fall
+    //                                        through to WorkerExhausted so
+    //                                        Master can decide.
     if (!worker)
     {
-      spdlog::info ("[orchestrator] no worker for command '{}', asking Master",
-                    step.step.command);
-      MasterEvent me;
-      me.kind = MasterEvent::Kind::WorkerExhausted;
-      me.job_id = job.job_id;
-      me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
-                        + step.step.command + R"("})";
-      send_to_master_ (std::move (me));
+      if (step.step.needs_forge)
+      {
+        spdlog::info ("[orchestrator] needs_forge=true, no worker for '{}', "
+                      "triggering Forge for job {}",
+                      step.step.command, job.job_id);
+        MasterEvent me;
+        me.kind = MasterEvent::Kind::WorkerExhausted;
+        me.job_id = job.job_id;
+        // Encode needs_forge=true so Master skips WorkerExhausted handling
+        // and goes straight to trigger_forge.
+        me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
+                          + step.step.command
+                          + R"(","needs_forge":true})";
+        send_to_master_ (std::move (me));
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] needs_forge=false but no worker for '{}' "
+                      "in job {} — Planning Adviser violated capability "
+                      "constraint (ADR-031)",
+                      step.step.command, job.job_id);
+        MasterEvent me;
+        me.kind = MasterEvent::Kind::WorkerExhausted;
+        me.job_id = job.job_id;
+        me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
+                          + step.step.command
+                          + R"(","needs_forge":false})";
+        send_to_master_ (std::move (me));
+      }
       return;
     }
 
@@ -1514,17 +1663,21 @@ namespace agentos
       tw.String (step.step.command.c_str ());
       tw.Key ("description");
       tw.String (step.step.description.c_str ());
-      // Inject previous step result as $prev_result (empty object if first step).
+      // Inject previous step result as $prev_result (empty object if first
+      // step).
       tw.Key ("$prev_result");
       if (!job.last_step_result.empty ())
         tw.RawValue (job.last_step_result.c_str (),
-                     job.last_step_result.size (),
-                     rapidjson::kObjectType);
+                     job.last_step_result.size (), rapidjson::kObjectType);
       else
       {
         tw.StartObject ();
         tw.EndObject ();
       }
+      // Inject the original job goal so workers can access the full user
+      // intent and any data embedded in it (e.g. literal lists, numbers).
+      tw.Key ("goal");
+      tw.String (job.goal.c_str ());
       tw.EndObject ();
       req.task_json = tbuf.GetString ();
     }
@@ -1622,22 +1775,25 @@ namespace agentos
     if (it == active_jobs_.end ())
       return;
 
-    // Try another Worker with the same capability.
     ActiveJob &job = it->second;
-    if (!job.pending_steps.empty ())
-    {
-      job.pending_steps.front ().attempts++;
-      if (job.pending_steps.front ().attempts < 3)
-      {
-        dispatch_next_step (job);
-        return;
-      }
-    }
 
-    // Exhausted retries — escalate to Master.
+    // Extract command and needs_forge from the current step before escalating.
+    // pending_steps.front() is the step that just failed — it has not been
+    // popped yet (pop_front only happens on success in on_step_complete).
+    const std::string command = (!job.pending_steps.empty ())
+                                  ? job.pending_steps.front ().step.command
+                                  : "";
+    const bool needs_forge = (!job.pending_steps.empty ())
+                               ? job.pending_steps.front ().step.needs_forge
+                               : false;
+
+    // Escalate to Master with full context so trigger_forge has what it needs.
     MasterEvent me;
     me.kind = MasterEvent::Kind::WorkerExhausted;
     me.job_id = job_id;
+    me.payload_json = R"({"job_id":")" + job_id + R"(","command":")" + command
+                      + R"(","needs_forge":)" + (needs_forge ? "true" : "false")
+                      + "}";
     send_to_master_ (std::move (me));
   }
 
@@ -1652,8 +1808,8 @@ namespace agentos
     active_jobs_.erase (job_id);
 
     notify ("job.phase_changed", R"({"job_id":")" + job_id
-            + R"(","new_phase":")"
-            + (success ? "done" : "failed") + R"("})");
+                                   + R"(","new_phase":")"
+                                   + (success ? "done" : "failed") + R"("})");
 
     spdlog::info ("[orchestrator] job {} {}", job_id,
                   success ? "done" : ("failed: " + error));

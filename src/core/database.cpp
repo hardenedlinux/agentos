@@ -133,6 +133,7 @@ namespace agentos
         result       TEXT,
         description  TEXT,
         step_order   INTEGER,
+        queued_at    INTEGER,
         started_at   INTEGER,
         completed_at INTEGER,
         error        TEXT
@@ -320,6 +321,7 @@ namespace agentos
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN result TEXT");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN description TEXT");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN step_order INTEGER");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN queued_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN started_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN completed_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN error TEXT");
@@ -629,12 +631,13 @@ namespace agentos
     s.step_order = sqlite3_column_int (stmt, 2);
     s.description = column_text_or_empty (stmt, 3);
     s.status = column_text_or_empty (stmt, 4);
-    s.started_at = column_int64_opt (stmt, 5);
-    s.completed_at = column_int64_opt (stmt, 6);
-    if (sqlite3_column_type (stmt, 7) != SQLITE_NULL)
-      s.error = column_text_or_empty (stmt, 7);
+    s.queued_at = column_int64_opt (stmt, 5);   // ADR-031: plan time
+    s.started_at = column_int64_opt (stmt, 6);
+    s.completed_at = column_int64_opt (stmt, 7);
     if (sqlite3_column_type (stmt, 8) != SQLITE_NULL)
-      s.result_json = column_text_or_empty (stmt, 8);
+      s.error = column_text_or_empty (stmt, 8);
+    if (sqlite3_column_type (stmt, 9) != SQLITE_NULL)
+      s.result_json = column_text_or_empty (stmt, 9);
     return s;
   }
 
@@ -1010,8 +1013,8 @@ namespace agentos
       return;
     Stmt stmt (prepare (R"(
       INSERT INTO tasks (id, job_id, step_order, description, status,
-                         result, started_at, completed_at, error)
-      VALUES (?,?,?,?,?, NULL,?,?,?)
+                         result, queued_at, started_at, completed_at, error)
+      VALUES (?,?,?,?,?, NULL,?,?,?,?)
     )"));
     if (!stmt.s)
       return;
@@ -1072,7 +1075,7 @@ namespace agentos
       return std::nullopt;
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             started_at, completed_at, error, result
+             queued_at, started_at, completed_at, error, result
       FROM tasks WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1093,7 +1096,7 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             started_at, completed_at, error, result
+             queued_at, started_at, completed_at, error, result
       FROM tasks WHERE job_id = ? ORDER BY step_order ASC
     )"));
     if (!stmt.s)
@@ -1292,7 +1295,7 @@ namespace agentos
 
     std::string sql
       = std::string ("SELECT id, job_id, step_order, description, status, "
-                     "started_at, completed_at, error, result "
+                     "queued_at, started_at, completed_at, error, result "
                      "FROM tasks WHERE job_id IN (")
         + placeholders + ") AND status != ? ORDER BY step_order ASC";
 
@@ -1333,12 +1336,14 @@ namespace agentos
       return;
 
     const int64_t ts = now_unix ();
-    sqlite3_bind_text (stmt, 1, task.id.value ().c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, "oneshot",                 -1, SQLITE_STATIC);
-    sqlite3_bind_text (stmt, 3, db::job_phase::planning.data (), -1, SQLITE_STATIC);
-    sqlite3_bind_text (stmt, 4, task.input_json.c_str (),  -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 5, task.goal.c_str (),        -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 6, task.user_id.c_str (),     -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, task.id.value ().c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, "oneshot", -1, SQLITE_STATIC);
+    sqlite3_bind_text (stmt, 3, db::job_phase::planning.data (), -1,
+                       SQLITE_STATIC);
+    sqlite3_bind_text (stmt, 4, task.input_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, task.goal.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 6, task.user_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 7, ts);
     sqlite3_bind_int64 (stmt, 8, ts);
 
@@ -1361,7 +1366,6 @@ namespace agentos
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] update_job_type: {}", sqlite3_errmsg (db_));
   }
-
 
   void Database::update_job_phase (const TaskId &id, const std::string &phase)
   {
@@ -1447,9 +1451,9 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       INSERT OR REPLACE INTO tasks
-          (id, job_id, agent_id, method, params,
-           description, step_order, status)
-      VALUES (?, ?, '', ?, ?, ?, ?, 'pending')
+          (id, job_id, method, params,
+           description, step_order, status, queued_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
     )"));
     if (!stmt.s)
       return;
@@ -1470,7 +1474,8 @@ namespace agentos
     sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
                        SQLITE_TRANSIENT);
-    sqlite3_bind_int (stmt, 6, step_order);
+    sqlite3_bind_int  (stmt, 6, step_order);
+    sqlite3_bind_int64 (stmt, 7, now_unix ());  // queued_at = plan time
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_pipeline_task: {}",
@@ -1829,21 +1834,22 @@ namespace agentos
       return rows;
 
     Stmt stmt (prepare (R"(
-      SELECT id, role, binary_path, manifest
+      SELECT id, role, binary_path, manifest, approved_at
       FROM agents WHERE enabled = 1
   )"));
     if (!stmt.s)
       return rows;
 
     while (sqlite3_step (stmt) == SQLITE_ROW)
-    {
-      AgentRow row;
-      row.id = column_text_or_empty (stmt, 0);
-      row.role = column_text_or_empty (stmt, 1);
-      row.binary_path = column_text_or_empty (stmt, 2);
-      row.manifest = column_text_or_empty (stmt, 3);
-      rows.push_back (std::move (row));
-    }
+      {
+        AgentRow row;
+        row.id = column_text_or_empty (stmt, 0);
+        row.role = column_text_or_empty (stmt, 1);
+        row.binary_path = column_text_or_empty (stmt, 2);
+        row.manifest = column_text_or_empty (stmt, 3);
+        row.approved_at = sqlite3_column_int64 (stmt, 4);
+        rows.push_back (std::move (row));
+      }
     return rows;
   }
 
@@ -1928,8 +1934,8 @@ namespace agentos
     if (!db_)
       return;
     // Only update rows that are not already revoked (enabled = -1).
-    Stmt stmt (prepare (
-      "UPDATE agents SET enabled=? WHERE id=? AND enabled != -1"));
+    Stmt stmt (
+      prepare ("UPDATE agents SET enabled=? WHERE id=? AND enabled != -1"));
     if (!stmt.s)
       return;
     sqlite3_bind_int (stmt, 1, enabled ? 1 : 0);
@@ -1944,13 +1950,54 @@ namespace agentos
       return;
     // enabled = -1 marks the row as permanently revoked.
     // load_enabled_agents (WHERE enabled = 1) will never return it again.
-    Stmt stmt (prepare (
-      "UPDATE agents SET enabled=-1 WHERE id=? AND enabled != -1"));
+    Stmt stmt (
+      prepare ("UPDATE agents SET enabled=-1 WHERE id=? AND enabled != -1"));
     if (!stmt.s)
       return;
     sqlite3_bind_text (stmt, 1, worker_id.c_str (), -1, SQLITE_TRANSIENT);
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] revoke_worker: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::force_revoke_worker (const std::string &worker_id)
+  {
+    if (!db_)
+      return;
+
+    const int64_t ts = now_unix ();
+
+    // Mark all running worker_runs for this worker as failed (status=2).
+    // Callers (Orchestrator) must have already sent SIGTERM/SIGKILL to the
+    // PIDs before calling this — we only update the DB record here.
+    {
+      Stmt stmt (prepare ("UPDATE worker_runs SET status=2, ended_at=? "
+                          "WHERE worker_id=? AND status=0"));
+      if (stmt.s)
+      {
+        sqlite3_bind_int64 (stmt, 1, ts);
+        sqlite3_bind_text (stmt, 2, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step (stmt) != SQLITE_DONE)
+          spdlog::error ("[database] force_revoke_worker runs: {}",
+                         sqlite3_errmsg (db_));
+      }
+    }
+
+    // Permanently revoke the agent entry (enabled = -1).
+    {
+      Stmt stmt (
+        prepare ("UPDATE agents SET enabled=-1 WHERE id=? AND enabled != -1"));
+      if (stmt.s)
+      {
+        sqlite3_bind_text (stmt, 1, worker_id.c_str (), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step (stmt) != SQLITE_DONE)
+          spdlog::error ("[database] force_revoke_worker agent: {}",
+                         sqlite3_errmsg (db_));
+      }
+    }
+
+    spdlog::warn (
+      "[database] force_revoke_worker: {} — active runs forcibly terminated",
+      worker_id);
   }
 
   // ---------------------------------------------------------------------------
@@ -2845,9 +2892,9 @@ namespace agentos
     return std::nullopt;
   }
 
-  std::vector<Job> Database::load_jobs_since (std::optional<int64_t> since_unix,
-                                              int limit,
-                                              std::optional<std::string> user_id_filter)
+  std::vector<Job>
+  Database::load_jobs_since (std::optional<int64_t> since_unix, int limit,
+                             std::optional<std::string> user_id_filter)
   {
     std::vector<Job> jobs;
     if (!db_)
@@ -2878,7 +2925,8 @@ namespace agentos
     if (since_unix)
       sqlite3_bind_int64 (stmt, bind_idx++, *since_unix);
     if (user_id_filter)
-      sqlite3_bind_text (stmt, bind_idx++, user_id_filter->c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, bind_idx++, user_id_filter->c_str (), -1,
+                         SQLITE_TRANSIENT);
     sqlite3_bind_int (stmt, bind_idx, limit);
 
     while (sqlite3_step (stmt) == SQLITE_ROW)

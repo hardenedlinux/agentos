@@ -139,12 +139,8 @@ top-level function:
 
     def run(task: dict) -> dict
 
-`run` receives the full task dict (with keys "description", "$prev_result", etc.)
-and returns the result as a plain dict. It must NOT write files, read stdin, or
-touch AGENTOS_RUN_DIR — the template handles all of that.
-
-Every other helper function in the module is also fine. Keep run() as the sole
-public entry point.
+`run` receives the full task dict and returns the result as a plain dict.
+It must NOT write files, read stdin, or touch AGENTOS_RUN_DIR.
 
 ## What you must NOT do
 - Do not write a main() function or if __name__ == "__main__" block.
@@ -177,64 +173,33 @@ ALL of these fields are required:
   "notes": ""
 }
 
-The "signatures" object must include an entry for every public function
-(no leading underscore) defined in impl_code, especially "run".
+## How to read input data
 
-## Example signatures block
-{
-  "run": {
-    "signature": "(task: dict) -> dict",
-    "doc": "Accepts task dict, returns result dict with monad demo output"
-  },
-  "maybe_bind": {
-    "signature": "(value, func)",
-    "doc": "Applies func to value if not None, propagates None otherwise"
-  }
-}
+The task dict always contains:
+  task["description"] — the step description (may contain literal data)
+  task["goal"]        — the original user goal verbatim (always present)
+  task["$prev_result"] — the previous step's result dict (empty {} if first step)
 
-## Handling input data
+### When data comes from a previous step
+If the description says anything like "from the previous step", "from step N",
+"computed above", "identified above", or "from the result", the input data is
+in task["$prev_result"]. Read it directly — do NOT try to parse it from text.
 
-The run() function receives a task dict. When input_schema is empty or absent,
-there is no structured input — all data the worker needs comes from
-task["description"] as a natural language string. In this case you MUST parse
-the description string to extract the required data before processing it.
+Example:
+  prev = task.get("$prev_result", {})
+  numbers = prev.get("result", [])  # use whatever key the previous step wrote
 
-- Use ast.literal_eval() to safely parse Python literals embedded in the string
-  (lists, dicts, numbers, tuples).
-- Use re to extract numeric or other patterns when the literal is embedded in
-  prose (e.g. "sort [3,1,4]" or "compute fibonacci(10)").
-- Never return an empty or placeholder result just because a structured key
-  like task["data"] or task["items"] is absent. The data is in the description.
+### When data is embedded in the description or goal
+When there is no previous step result to use, parse the data from text.
+Always try task["description"] first, then fall back to task["goal"].
 
-Example pattern:
   import ast, re
-  desc = task.get("description", "")
-  m = re.search(r"\[[\d,\s]+\]", desc)
-  numbers = ast.literal_eval(m.group()) if m else []
-
-## Handling input data
-
-The run() function receives a task dict. When input_schema is empty or absent,
-there is no structured input — all data the worker needs comes from
-task["description"] as a natural language string. In this case you MUST parse
-the description string to extract the required data before processing it.
-
-- Use ast.literal_eval() to safely parse Python literals embedded in the string
-  (lists, dicts, numbers, tuples).
-- Use re to extract numeric or other patterns when the literal is embedded in
-  prose (e.g. "sort [3,1,4]" or "compute fibonacci(10)").
-- Never return an empty or placeholder result just because a structured key
-  like task["data"] or task["items"] is absent. The data is in the description.
-- task["goal"] contains the original user goal verbatim. When task["description"]
-  does not contain the data, try task["goal"] as a fallback — it may contain
-  the raw input (e.g. "sort a list of numbers [3,1,4,1,5,9,2,6]").
-
-Example pattern:
-  import ast, re
-  # Try description first, fall back to goal
   text = task.get("description", "") or task.get("goal", "")
-  m = re.search(r"\[([\d,\s]+)\]", text)
+  m = re.search(r"\[[\d,\s\.]+\]", text)
   numbers = ast.literal_eval(m.group()) if m else []
+
+Never return empty results just because a structured key like task["data"]
+is absent — the data is either in $prev_result or in the text fields.
 
 ## Critical rules
 - Use standard library only unless the requirement explicitly demands packages.

@@ -616,6 +616,11 @@ namespace agentos
       w.String (s.description.c_str ());
       w.Key ("status");
       w.String (s.status.c_str ());
+      w.Key ("queued_at");
+      if (s.queued_at)
+        w.Int64 (*s.queued_at);
+      else
+        w.Null ();
       w.Key ("started_at");
       if (s.started_at)
         w.Int64 (*s.started_at);
@@ -1282,7 +1287,7 @@ namespace agentos
               "not in the Available capabilities list.\n\n"
               + capability_list_str
               + "\nGoal: " + goal;
-          req.max_tokens = 1024;
+          req.max_tokens = 4096;
 
           auto result = client.complete (req);
 
@@ -1386,9 +1391,6 @@ namespace agentos
       job.type = (doc.HasMember ("job_type") && doc["job_type"].IsString ())
                    ? doc["job_type"].GetString ()
                    : "oneshot";
-      // Load goal from DB so it is available for task injection (ADR-031 B).
-      if (auto j = db_.load_job (job_id); j)
-        job.goal = j->goal;
 
       if (doc.HasMember ("steps") && doc["steps"].IsArray ())
       {
@@ -1674,10 +1676,6 @@ namespace agentos
         tw.StartObject ();
         tw.EndObject ();
       }
-      // Inject the original job goal so workers can access the full user
-      // intent and any data embedded in it (e.g. literal lists, numbers).
-      tw.Key ("goal");
-      tw.String (job.goal.c_str ());
       tw.EndObject ();
       req.task_json = tbuf.GetString ();
     }

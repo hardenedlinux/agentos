@@ -226,6 +226,11 @@ namespace agentos
     void insert_agent (const std::string &id, const std::string &role,
                        const std::string &binary_path,
                        const std::string &manifest);
+    // Accumulate LLM token usage for a step (additive — safe to call
+    // multiple times for Planning + Forge contributions).
+    void update_step_tokens (const std::string &step_id,
+                             int prompt_tokens, int completion_tokens);
+
     void insert_capability (const std::string &agent_id,
                             const std::string &method,
                             const std::string &description,

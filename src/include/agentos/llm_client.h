@@ -23,6 +23,8 @@ struct LlmRequest {
 
 struct LlmResponse {
     std::string content;         // raw text from the LLM
+    int prompt_tokens     = 0;   // input tokens consumed
+    int completion_tokens = 0;   // output tokens generated
 };
 
 class LlmClient {

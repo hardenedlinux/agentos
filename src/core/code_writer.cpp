@@ -143,7 +143,7 @@ namespace agentos::forge
       = base_url_env ? base_url_env : "https://api.anthropic.com";
     const std::string api_key = api_key_env;
     const std::string model = model_env ? model_env : "claude-opus-4-5";
-    const int max_tokens = max_tokens_env ? std::atoi (max_tokens_env) : 2048;
+    const int max_tokens = max_tokens_env ? std::atoi (max_tokens_env) : 8192;
 
     const bool is_anthropic
       = base_url.find ("anthropic.com") != std::string::npos;
@@ -184,14 +184,8 @@ namespace agentos::forge
          "  \"understanding\": \"<your interpretation of the requirement>\",\n"
          "  \"language\": \"python\",\n"
          "  \"entry_point\": \"run\",\n"
-         "  \"impl_code\": \"<complete worker_impl.py source — only business "
-         "logic, no main(), no stdin, no file I/O>\",\n"
-         "  \"signatures\": {\n"
-         "    \"run\": {\n"
-         "      \"signature\": \"(task: dict) -> dict\",\n"
-         "      \"doc\": \"<one-line description of what run() does>\"\n"
-         "    }\n"
-         "  },\n"
+         "  \"impl_code\": \"<complete worker_impl.py — only business logic, no main(), no stdin, no file I/O>\",\n"
+         "  \"signatures\": {\"run\": {\"signature\": \"(task: dict) -> dict\", \"doc\": \"<one-line description>\"}},\n"
          "  \"capability\": {\n"
          "    \"network\": false,\n"
          "    \"fs_read\": [],\n"
@@ -200,9 +194,8 @@ namespace agentos::forge
          "  },\n"
          "  \"notes\": \"\"\n"
          "}\n"
-         "impl_code must define a top-level function run(task: dict) -> dict. "
-         "Do NOT include main(), sys.stdin, open(), or os.environ in impl_code. "
-         "The signatures object must have an entry for every public function. "
+         "impl_code must define run(task: dict) -> dict. "
+         "Do NOT include main(), sys.stdin, or file I/O in impl_code. "
          "Missing any field will cause the entire attempt to be rejected. "
          "network and exec must be false unless the requirement explicitly "
          "demands them.";
@@ -295,7 +288,6 @@ namespace agentos::forge
                      raw_content.substr (0, 500));
       return make_error ("LLM response missing 'entry_point'");
     }
-    // ADR-031: two-file structure — impl_code replaces code
     if (!require_llm_string ("impl_code", impl_code))
     {
       spdlog::error ("[code_writer] LLM response missing 'impl_code'. "
@@ -303,15 +295,13 @@ namespace agentos::forge
                      raw_content.substr (0, 500));
       return make_error ("LLM response missing 'impl_code'");
     }
-
-    // signatures is an object — validate it exists and is an object
     auto sigs_it = llm_doc.FindMember ("signatures");
     if (sigs_it == llm_doc.MemberEnd () || !sigs_it->value.IsObject ())
     {
-      spdlog::error ("[code_writer] LLM response missing 'signatures' object. "
+      spdlog::error ("[code_writer] LLM response missing 'signatures'. "
                      "Raw response: {}",
                      raw_content.substr (0, 500));
-      return make_error ("LLM response missing 'signatures' object");
+      return make_error ("LLM response missing 'signatures'");
     }
 
     if (language != "python" && language != "guile")
@@ -328,16 +318,17 @@ namespace agentos::forge
         notes = it->value.GetString ();
     }
 
-    // ── 7. Build output JSON (ADR-031 two-file structure)
-    // task_id injected by forge_coordinator after validation.
+    // ── 7. Build output JSON per ADR-019 contract
+    // ─────────────────────────────
+    // task_id is intentionally omitted from LLM output — it is an AgentOS
+    // internal identifier injected by forge_coordinator after validation.
     // {
-    //   "understanding": "...",
-    //   "language":      "python",
-    //   "entry_point":   "run",
-    //   "impl_code":     "<worker_impl.py source>",
-    //   "signatures":    { "<fn>": { "signature": "...", "doc": "..." }, ... },
-    //   "capability":    { ... },
-    //   "notes":         "..."
+    //   "understanding":"...",
+    //   "language":     "python" | "guile",
+    //   "entry_point":  "...",
+    //   "code":         "...",
+    //   "capability":   { "network": bool, "fs_read": [...], "fs_write": [...],
+    //   "exec": bool }, "notes":        "..."
     // }
     rapidjson::Document out;
     out.SetObject ();
@@ -364,6 +355,10 @@ namespace agentos::forge
 
     out.AddMember ("notes", rapidjson::Value (notes.c_str (), alloc).Move (),
                    alloc);
+
+    // Include token usage so ForgeCoordinator can track cumulative cost.
+    out.AddMember ("tokens_prompt", llm_result.value.prompt_tokens, alloc);
+    out.AddMember ("tokens_completion", llm_result.value.completion_tokens, alloc);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);

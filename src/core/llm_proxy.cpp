@@ -130,6 +130,17 @@ namespace agentos
       doc.AddMember ("messages", messages, alloc);
       doc.AddMember ("max_tokens", req.max_tokens, alloc);
 
+      // Disable DeepSeek chain-of-thought reasoning by default (ADR future).
+      // Reasoning adds significant latency and token cost with no benefit for
+      // structured JSON outputs. Will be made configurable per-Adviser later.
+      // Both fields for compatibility across DeepSeek API versions.
+      rapidjson::Value thinking (rapidjson::kObjectType);
+      thinking.AddMember ("type",
+                          rapidjson::Value ("disabled", alloc).Move (),
+                          alloc);
+      doc.AddMember ("thinking", thinking.Move (), alloc);
+      doc.AddMember ("enable_thinking", false, alloc);
+
       rapidjson::StringBuffer buf;
       rapidjson::Writer<rapidjson::StringBuffer> w (buf);
       doc.Accept (w);
@@ -172,6 +183,21 @@ namespace agentos
           Error{"LLM message.content is not a string"}, ErrorTag{});
 
       return Result<std::string> (std::string (c.GetString ()));
+    }
+
+    // Parse token usage from OpenAI-compatible response (best-effort).
+    void extract_openai_usage (const rapidjson::Document &d,
+                               int &prompt_tokens, int &completion_tokens)
+    {
+      prompt_tokens = 0;
+      completion_tokens = 0;
+      if (!d.HasMember ("usage") || !d["usage"].IsObject ())
+        return;
+      const auto &u = d["usage"];
+      if (u.HasMember ("prompt_tokens") && u["prompt_tokens"].IsInt ())
+        prompt_tokens = u["prompt_tokens"].GetInt ();
+      if (u.HasMember ("completion_tokens") && u["completion_tokens"].IsInt ())
+        completion_tokens = u["completion_tokens"].GetInt ();
     }
 
   } // namespace
@@ -272,10 +298,17 @@ namespace agentos
       if (!content_result.ok)
         return Result<LlmResponse> (Error{content_result.error}, ErrorTag{});
 
-      spdlog::debug ("[llm_proxy] response ({} chars)",
-                     content_result.value.size ());
-      return Result<LlmResponse> (
-        LlmResponse{std::move (content_result.value)});
+      LlmResponse resp;
+      resp.content = std::move (content_result.value);
+
+      // Extract token usage (OpenAI-compatible only; Anthropic TBD).
+      if (!is_anthropic)
+        extract_openai_usage (d, resp.prompt_tokens, resp.completion_tokens);
+
+      spdlog::debug ("[llm_proxy] response ({} chars, tokens: {}p+{}c)",
+                     resp.content.size (),
+                     resp.prompt_tokens, resp.completion_tokens);
+      return Result<LlmResponse> (std::move (resp));
     }
 
     return Result<LlmResponse> (Error{"Max attempts exceeded"}, ErrorTag{});

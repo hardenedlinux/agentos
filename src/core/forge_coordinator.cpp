@@ -132,6 +132,15 @@ namespace agentos::forge
 
     ForgePipelineJob job = std::move (*opt);
 
+    // step_id is the pipeline tasks row to update with token usage.
+    // task_id on the job is job_id (used for resume); step_id is separate.
+    const std::string step_id = req.step_id;
+
+    // Accumulate LLM token usage across all attempts for this Forge job.
+    // Written to the associated pipeline step on successful promotion.
+    int forge_tokens_prompt = 0;
+    int forge_tokens_completion = 0;
+
     // Outer retry loop — each iteration is one full attempt.
     while (true)
     {
@@ -143,7 +152,8 @@ namespace agentos::forge
                     job.attempt, job.max_attempts);
 
       // --- Code Writer ---
-      if (!call_code_writer (job))
+      int w_pt = 0, w_ct = 0;
+      if (!call_code_writer (job, w_pt, w_ct))
       {
         // Hard error (LLM failure, bad JSON) — count as a failed attempt.
         spdlog::warn (
@@ -167,7 +177,10 @@ namespace agentos::forge
           job.status = ForgeStatus::reviewing;
           persist (job);
 
-          bool accepted = call_code_reviewer (job);
+          int r_pt = 0, r_ct = 0;
+          bool accepted = call_code_reviewer (job, r_pt, r_ct);
+          forge_tokens_prompt += w_pt + r_pt;
+          forge_tokens_completion += w_ct + r_ct;
 
           // Enforce Layer check again on Reviewer-accepted output (ADR-009).
           // Even a Reviewer accept cannot bypass Enforce Layer.
@@ -206,6 +219,16 @@ namespace agentos::forge
               persist (job);
               spdlog::info ("[forge_coordinator] job {} promoted → worker {}",
                             job.id, *worker_id);
+              // Record cumulative Forge token usage on the pipeline step.
+              // Write Forge token usage to the pipeline step row.
+              // Use step_id (not job.task_id which is the job_id).
+              const std::string &token_target
+                = step_id.empty () ? job.task_id : step_id;
+              if (forge_tokens_prompt > 0 || forge_tokens_completion > 0)
+                db_.update_step_tokens (token_target,
+                                        forge_tokens_prompt,
+                                        forge_tokens_completion);
+
               on_complete_ (ForgeResult{job.id,
                                         job.task_id,
                                         ForgeResult::Outcome::promoted,
@@ -265,7 +288,9 @@ namespace agentos::forge
   // Code Writer
   // ---------------------------------------------------------------------------
 
-  bool ForgeCoordinator::call_code_writer (ForgePipelineJob &job)
+  bool ForgeCoordinator::call_code_writer (ForgePipelineJob &job,
+                                             int &tokens_prompt,
+                                             int &tokens_completion)
   {
     // Fail fast on missing API key — this is a configuration error,
     // not a transient failure. Retrying will not help (ADR-009 Enforce Layer).
@@ -367,6 +392,14 @@ namespace agentos::forge
       rapidjson::Writer<rapidjson::StringBuffer> sw (sbuf);
       doc.Accept (sw);
       job.writer_output_json = sbuf.GetString ();
+
+    // Extract token usage from code_writer output if present.
+    tokens_prompt = 0;
+    tokens_completion = 0;
+    if (doc.HasMember ("tokens_prompt") && doc["tokens_prompt"].IsInt ())
+      tokens_prompt = doc["tokens_prompt"].GetInt ();
+    if (doc.HasMember ("tokens_completion") && doc["tokens_completion"].IsInt ())
+      tokens_completion = doc["tokens_completion"].GetInt ();
     }
 
     // Write worker_impl.py and copy worker.py template to disk.
@@ -440,7 +473,9 @@ namespace agentos::forge
   // Code Reviewer
   // ---------------------------------------------------------------------------
 
-  bool ForgeCoordinator::call_code_reviewer (ForgePipelineJob &job)
+  bool ForgeCoordinator::call_code_reviewer (ForgePipelineJob &job,
+                                               int &tokens_prompt,
+                                               int &tokens_completion)
   {
     // Build input JSON per ADR-019 Code Reviewer contract.
     rapidjson::StringBuffer buf;
@@ -480,6 +515,14 @@ namespace agentos::forge
     }
 
     job.reviewer_verdict_json = output;
+
+    // Extract token usage from reviewer output if present.
+    tokens_prompt = 0;
+    tokens_completion = 0;
+    if (doc.HasMember ("tokens_prompt") && doc["tokens_prompt"].IsInt ())
+      tokens_prompt = doc["tokens_prompt"].GetInt ();
+    if (doc.HasMember ("tokens_completion") && doc["tokens_completion"].IsInt ())
+      tokens_completion = doc["tokens_completion"].GetInt ();
 
     const std::string status = doc["status"].GetString ();
     const std::string reason

@@ -84,18 +84,35 @@ namespace agentos
     while (!local.empty ())
     {
       auto &msg = local.front ();
-      if (!msg.identity.empty ())
+      try
       {
-        zmq::message_t id_frame (msg.identity.data (), msg.identity.size ());
-        auto r = agentos_sock_.send (id_frame, zmq::send_flags::sndmore);
+        if (!msg.identity.empty ())
+        {
+          zmq::message_t id_frame (msg.identity.data (), msg.identity.size ());
+          auto r = agentos_sock_.send (id_frame, zmq::send_flags::sndmore);
+          if (!r)
+          {
+            spdlog::warn ("[gateway] send identity frame failed, dropping message");
+            local.pop ();
+            continue;
+          }
+        }
+        zmq::message_t payload_frame (msg.payload.data (), msg.payload.size ());
+        auto r = agentos_sock_.send (payload_frame, zmq::send_flags::none);
         if (!r)
-          spdlog::warn ("[gateway] send identity frame failed");
+          spdlog::warn ("[gateway] send payload frame failed");
       }
-      zmq::message_t payload_frame (msg.payload.data (), msg.payload.size ());
-      auto r = agentos_sock_.send (payload_frame, zmq::send_flags::none);
-      if (!r)
-        spdlog::warn ("[gateway] send payload frame failed");
-
+      catch (const zmq::error_t &e)
+      {
+        // Client disconnected (EHOSTUNREACH) or other transient error.
+        // Drop the message and continue — never crash the daemon for a
+        // client that went away.
+        spdlog::warn ("[gateway] send error ({}), dropping message for "
+                      "identity '{}': {}",
+                      e.num (),
+                      msg.identity.empty () ? "(broadcast)" : msg.identity,
+                      e.what ());
+      }
       local.pop ();
     }
   }

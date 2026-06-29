@@ -75,9 +75,17 @@ The "command" field MUST use the format: namespace.verb
 - Invalid: write_code, WriteCode, content.listing.generate, code.write.python
 
 ## needs_forge Field (MANDATORY)
-Set "needs_forge": true when the required command is NOT in the Available capabilities list.
-Set "needs_forge": false when the command IS in the Available capabilities list.
-When "Available capabilities: none registered" is shown, all steps must have "needs_forge": true.
+
+Decision process (follow in order):
+1. Based on the goal, decide what the step must do and generate the most specific
+   command name for it (e.g. "code.implement_quicksort" for a quicksort task).
+2. Check if that EXACT command string exists in the Available capabilities list.
+3. If it exists exactly → set needs_forge: false and use that command.
+4. If it does not exist → set needs_forge: true and use the command you generated.
+
+NEVER search for a "similar" or "related" capability. The match must be exact.
+If the command you would generate is not in the list, use needs_forge: true.
+When "Available capabilities: none registered", all steps must have needs_forge: true.
 
 ## Step Count Guidelines
 - Pure text or reasoning tasks: 1 step
@@ -92,6 +100,8 @@ When "Available capabilities: none registered" is shown, all steps must have "ne
 - NEVER add steps whose purpose is to run, execute, or validate the output of another step. Each step must produce a direct output, not evaluate another step.
 - When selecting from Available capabilities, ONLY choose a capability whose description clearly matches the semantic intent of the step. If no capability is a clear semantic match, set needs_forge: true and choose a descriptive new command name — do NOT pick an unrelated capability just because it is registered.
 - The "description" field MUST include all concrete data from the goal that the worker needs to execute the step. If the goal contains a list, number, string, or any other literal value, copy it verbatim into the description. WRONG: goal "sort [3,1,4]" → description "Sort the list in ascending order". CORRECT: goal "sort [3,1,4]" → description "Sort the list [3,1,4] in ascending order".
+- NEVER use generic command names like "code.write_python", "code.write_code", "code.generate", or any command that only describes the language/format rather than the actual task. The command must name the specific capability: WRONG: "code.write_python" for implementing an occam channel. CORRECT: "code.implement_occam_channel". The description must include the full technical requirements so Code Writer can implement it directly.
+- When the goal asks to "write", "implement", "create", or "build" something, the command must be specific to what is being built, and the description must contain the complete technical specification of what to implement.
 )";
 
     const char *PLANNING_CONFIG = R"(# Adviser runtime configuration
@@ -201,6 +211,17 @@ Always try task["description"] first, then fall back to task["goal"].
 Never return empty results just because a structured key like task["data"]
 is absent — the data is either in $prev_result or in the text fields.
 
+## What "implement X" means
+When the requirement asks to "implement", "write", or "create" a data structure,
+algorithm, protocol, or language feature (e.g. "implement occam channel",
+"implement a red-black tree", "write a monad"), the worker must:
+1. Contain the full implementation of X as Python classes/functions
+2. Execute a demonstration of X in run()
+3. Return the demonstration results as the output dict
+
+NEVER return {"code": "..."} or any dict containing source code as a string.
+The implementation IS the worker code. run() executes it and returns results.
+
 ## Critical rules
 - Use standard library only unless the requirement explicitly demands packages.
 - network and exec must be false unless the requirement explicitly demands them.
@@ -290,9 +311,24 @@ Respond with a JSON object ONLY — no markdown fences, no prose:
 Use "needs_test_run" when you want to run tests before making a final decision.
 Use "accept" or "reject" when you have enough information to decide.
 
+## Architecture (CRITICAL — read before reviewing)
+AgentOS uses a two-file worker structure:
+- worker.py  — fixed runtime template, NOT written by Code Writer
+               handles stdin, result.json, AGENTOS_RUN_DIR automatically
+- worker_impl.py — written by Code Writer, reviewed by you
+               contains ONLY business logic
+
+worker_impl.py MUST define run(task: dict) -> dict and return a plain dict.
+It must NOT contain main(), sys.stdin.read(), open(), or os.environ access.
+worker.py imports worker_impl and calls run() — it handles all AgentOS plumbing.
+
+NEVER reject worker_impl.py for missing stdin reading or result.json writing.
+Those are handled by worker.py. Code without those is CORRECT.
+
 ## Constraints
 - Never accept code that does not implement the requirement, even if tests pass.
 - Never reject code solely because of style issues.
+- NEVER reject worker_impl.py for missing stdin/stdout/result.json — those live in worker.py.
 - network and exec must be false in the capability block.
 - The run() function must return a plain dict.
 )";

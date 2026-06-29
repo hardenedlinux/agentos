@@ -133,10 +133,12 @@ namespace agentos
         result       TEXT,
         description  TEXT,
         step_order   INTEGER,
-        queued_at    INTEGER,
-        started_at   INTEGER,
-        completed_at INTEGER,
-        error        TEXT
+        queued_at         INTEGER,
+        started_at        INTEGER,
+        completed_at      INTEGER,
+        error             TEXT,
+        tokens_prompt     INTEGER DEFAULT 0,
+        tokens_completion INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS worker_runs (
         run_id     TEXT PRIMARY KEY,
@@ -325,6 +327,8 @@ namespace agentos
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN started_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN completed_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN error TEXT");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN tokens_prompt INTEGER DEFAULT 0");
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN tokens_completion INTEGER DEFAULT 0");
     }
 
     // ADR‑025: extend the jobs table with new columns (idempotent)
@@ -638,6 +642,8 @@ namespace agentos
       s.error = column_text_or_empty (stmt, 8);
     if (sqlite3_column_type (stmt, 9) != SQLITE_NULL)
       s.result_json = column_text_or_empty (stmt, 9);
+    s.tokens_prompt     = sqlite3_column_int (stmt, 10);
+    s.tokens_completion = sqlite3_column_int (stmt, 11);
     return s;
   }
 
@@ -1075,7 +1081,8 @@ namespace agentos
       return std::nullopt;
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             queued_at, started_at, completed_at, error, result
+             queued_at, started_at, completed_at, error, result,
+             tokens_prompt, tokens_completion
       FROM tasks WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1096,7 +1103,8 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
-             queued_at, started_at, completed_at, error, result
+             queued_at, started_at, completed_at, error, result,
+             tokens_prompt, tokens_completion
       FROM tasks WHERE job_id = ? ORDER BY step_order ASC
     )"));
     if (!stmt.s)
@@ -1295,7 +1303,8 @@ namespace agentos
 
     std::string sql
       = std::string ("SELECT id, job_id, step_order, description, status, "
-                     "queued_at, started_at, completed_at, error, result "
+                     "queued_at, started_at, completed_at, error, result, "
+                     "tokens_prompt, tokens_completion "
                      "FROM tasks WHERE job_id IN (")
         + placeholders + ") AND status != ? ORDER BY step_order ASC";
 
@@ -1875,6 +1884,25 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_agent: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::update_step_tokens (const std::string &step_id,
+                                     int prompt_tokens,
+                                     int completion_tokens)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (
+      "UPDATE tasks SET "
+      "tokens_prompt = tokens_prompt + ?, "
+      "tokens_completion = tokens_completion + ? "
+      "WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int  (stmt, 1, prompt_tokens);
+    sqlite3_bind_int  (stmt, 2, completion_tokens);
+    sqlite3_bind_text (stmt, 3, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_step (stmt);
   }
 
   void Database::insert_capability (const std::string &agent_id,

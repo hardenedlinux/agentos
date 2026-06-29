@@ -641,6 +641,10 @@ namespace agentos
         w.Key ("error");
         w.String (s.error->c_str ());
       }
+      w.Key ("tokens_prompt");
+      w.Int (s.tokens_prompt);
+      w.Key ("tokens_completion");
+      w.Int (s.tokens_completion);
       w.EndObject ();
     }
     w.EndArray ();
@@ -1364,6 +1368,11 @@ namespace agentos
           w.String ("oneshot");
           w.Key ("steps");
           resp["steps"].Accept (w);
+          // Carry Planning Adviser token usage so it can be stored on step 0.
+          w.Key ("planning_tokens_prompt");
+          w.Int (result.value.prompt_tokens);
+          w.Key ("planning_tokens_completion");
+          w.Int (result.value.completion_tokens);
           w.EndObject ();
 
           ev.kind = OrchestratorEvent::Kind::MasterDecision;
@@ -1422,6 +1431,22 @@ namespace agentos
         }
       }
 
+      // Write Planning Adviser token usage to step 0 (additive).
+      {
+        int pt = (doc.HasMember ("planning_tokens_prompt")
+                  && doc["planning_tokens_prompt"].IsInt ())
+                   ? doc["planning_tokens_prompt"].GetInt () : 0;
+        int ct = (doc.HasMember ("planning_tokens_completion")
+                  && doc["planning_tokens_completion"].IsInt ())
+                   ? doc["planning_tokens_completion"].GetInt () : 0;
+        if ((pt > 0 || ct > 0) && !job.pending_steps.empty ())
+          db_.update_step_tokens (job.pending_steps.front ().step.id, pt, ct);
+      }
+
+      // Load goal from DB so it is available for task injection.
+      if (auto j = db_.load_job (job_id); j)
+        job.goal = j->goal;
+
       db_.update_job_phase (TaskId (job_id), "executing");
       active_jobs_[job_id] = std::move (job);
       dispatch_next_step (active_jobs_[job_id]);
@@ -1440,6 +1465,16 @@ namespace agentos
             ? doc["command"].GetString ()
             : "";
 
+      // Use step description for semantic context in requirement_json.
+      // This becomes the capability description in the worker manifest,
+      // so Planning Adviser can do proper semantic matching in future jobs.
+      std::string step_description;
+      if (doc.HasMember ("step_description")
+          && doc["step_description"].IsString ())
+        step_description = doc["step_description"].GetString ();
+      if (step_description.empty ())
+        step_description = "Implement capability: " + command;
+
       if (job_id.empty () || command.empty ())
       {
         spdlog::error (
@@ -1453,7 +1488,7 @@ namespace agentos
       rapidjson::Writer<rapidjson::StringBuffer> rw (req_buf);
       rw.StartObject ();
       rw.Key ("description");
-      rw.String (("Implement capability: " + command).c_str ());
+      rw.String (step_description.c_str ());
       rw.Key ("method");
       rw.String (command.c_str ());
       rw.Key ("input_schema");
@@ -1483,9 +1518,18 @@ namespace agentos
                     job_id, command, forge_job_id);
 
       // Post to ForgeCoordinator — returns immediately.
+      // task_id = job_id (resume on complete); step_id = step id (token usage).
+      std::string step_id_for_forge;
+      {
+        auto jit = active_jobs_.find (job_id);
+        if (jit != active_jobs_.end ()
+            && !jit->second.pending_steps.empty ())
+          step_id_for_forge = jit->second.pending_steps.front ().step.id;
+      }
       forge::ForgeRequest freq;
       freq.forge_job_id = forge_job_id;
       freq.task_id = job_id;
+      freq.step_id = step_id_for_forge;
       freq.requirement_json = requirement_json;
       freq.feedback = "";
       freq.attempt = 0;

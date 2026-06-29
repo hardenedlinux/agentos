@@ -463,24 +463,21 @@ namespace agentos::forge
 
     // ── 8. LLM review
     // ───────────────────────────────────────────────────────── Read skill.md
+    // Priority: AGENTOS_ADVISER_SKILL_PATH → ~/.agentos/advisers/code-reviewer/skill.md
     const char *skill_path_env = std::getenv ("AGENTOS_ADVISER_SKILL_PATH");
     std::string system_prompt;
-    if (skill_path_env)
+    if (skill_path_env && *skill_path_env)
       system_prompt = read_file (skill_path_env);
     if (system_prompt.empty ())
-      system_prompt
-        = "You are a code reviewer for AgentOS worker code. "
-          "Evaluate the code for functional correctness against the "
-          "requirement. "
-          "IMPORTANT: All workers MUST read input from stdin (sys.stdin.read()) "
-          "as part of the AgentOS worker contract — do NOT reject code for "
-          "reading stdin, even when the input schema is empty. "
-          "Workers MUST write their result to a file at "
-          "os.environ['AGENTOS_RUN_DIR']/result.json — this is mandatory. "
-          "Only reject if the code is functionally incorrect, unsafe, or "
-          "violates the capability declaration (network/exec). "
-          "Respond with JSON only: "
-          "{\"status\": \"accept\" or \"reject\", \"reason\": \"...\"}";
+    {
+      // Try default skill.md path
+      const char *home_env = std::getenv ("AGENTOS_HOME");
+      const char *home_dir = std::getenv ("HOME");
+      std::filesystem::path base = home_env ? home_env
+                                 : home_dir ? std::filesystem::path (home_dir) / ".agentos"
+                                 : std::filesystem::path ("/tmp/.agentos");
+      system_prompt = read_file (base / "advisers" / "code-reviewer" / "skill.md");
+    }
 
     // Read LLM config (ADR-018 AGENTOS_ADVISER_* prefix)
     const char *base_url_env = std::getenv ("AGENTOS_ADVISER_BASE_URL");
@@ -731,6 +728,12 @@ namespace agentos::forge
       "status", rapidjson::Value (status.c_str (), alloc).Move (), alloc);
     verdict.AddMember (
       "reason", rapidjson::Value (reason.c_str (), alloc).Move (), alloc);
+
+    // Include cumulative token usage from all LLM calls in this review.
+    int total_pt = llm_result.value.prompt_tokens;
+    int total_ct = llm_result.value.completion_tokens;
+    verdict.AddMember ("tokens_prompt", total_pt, alloc);
+    verdict.AddMember ("tokens_completion", total_ct, alloc);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> writer (buf);

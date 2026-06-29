@@ -221,6 +221,8 @@ void register_job_commands (CLI::App &app)
                                      && result["created_at"].IsInt64 ())
                                       ? result["created_at"].GetInt64 () : 0;
               int64_t job_total_s = 0;
+              int job_tokens_prompt = 0;
+              int job_tokens_completion = 0;
 
               const auto &steps_arr = result["steps"].GetArray ();
               for (rapidjson::SizeType si = 0; si < steps_arr.Size (); ++si)
@@ -267,28 +269,33 @@ void register_job_commands (CLI::App &app)
                 std::cout << "\n  " << order << "  "
                           << colStatus << "  " << desc << "\n";
 
-                // pending line: time between prev step done and this step queued
-                if (queued_at > 0 && prev_completed > 0
+                // analyzing (step 0): job.created_at → queued_at
+                //   = time Planning Adviser spent calling LLM
+                // queued (step N>0): prev_completed → started_at
+                //   = time waiting for previous step + dispatch overhead
+                // forge (any step): queued_at → started_at
+                //   = time Forge spent generating the worker
+                if (si == 0 && queued_at > 0 && prev_completed > 0
                     && queued_at > prev_completed)
                 {
                   int64_t s = queued_at - prev_completed;
-                  std::cout << "       " << grey ("pending   ")
+                  std::cout << "       " << grey ("analyzing ")
+                            << std::to_string (s) << "s\n";
+                }
+                else if (si > 0 && prev_completed > 0 && started_at > 0
+                         && started_at > prev_completed)
+                {
+                  int64_t s = started_at - prev_completed;
+                  std::cout << "       " << grey ("queued    ")
                             << std::to_string (s) << "s\n";
                 }
 
-                // planning line: queued → started (LLM planning + forge)
-                if (queued_at > 0 && started_at > 0 && started_at >= queued_at)
+                // forge: queued_at → started_at (only when Forge was involved)
+                if (queued_at > 0 && started_at > 0
+                    && started_at > queued_at + 1)  // +1 to skip sub-second noise
                 {
                   int64_t s = started_at - queued_at;
-                  std::cout << "       " << grey ("planning  ")
-                            << std::to_string (s) << "s\n";
-                }
-                else if (queued_at == 0 && prev_completed > 0
-                         && started_at > prev_completed)
-                {
-                  // queued_at not available — use prev_completed as proxy
-                  int64_t s = started_at - prev_completed;
-                  std::cout << "       " << grey ("planning  ")
+                  std::cout << "       " << grey ("forging   ")
                             << std::to_string (s) << "s\n";
                 }
 
@@ -303,7 +310,7 @@ void register_job_commands (CLI::App &app)
                             << std::to_string (s) << "s\n";
                 }
 
-                // step total
+                // step total + tokens
                 if (prev_completed > 0 && completed_at > 0
                     && completed_at >= prev_completed)
                 {
@@ -312,12 +319,40 @@ void register_job_commands (CLI::App &app)
                   std::cout << "       " << grey ("total     ")
                             << std::to_string (s) << "s\n";
                 }
+
+                // token usage for this step (always show)
+                {
+                  int tp = (step.HasMember ("tokens_prompt")
+                            && step["tokens_prompt"].IsInt ())
+                             ? step["tokens_prompt"].GetInt () : 0;
+                  int tc = (step.HasMember ("tokens_completion")
+                            && step["tokens_completion"].IsInt ())
+                             ? step["tokens_completion"].GetInt () : 0;
+                  job_tokens_prompt += tp;
+                  job_tokens_completion += tc;
+                  std::cout << "       " << grey ("tokens    ")
+                            << tp << "p + " << tc << "c = "
+                            << (tp + tc) << "\n";
+                }
               }
 
               // Job total
               if (job_total_s > 0)
-                std::cout << "\n" << grey ("Job total: "
-                            + std::to_string (job_total_s) + "s") << "\n";
+              {
+                std::string summary = "Job total:  ";
+                if (job_total_s > 0)
+                  summary += std::to_string (job_total_s) + "s";
+                if (job_tokens_prompt > 0 || job_tokens_completion > 0)
+                {
+                  if (job_total_s > 0) summary += "  |  ";
+                  summary += "tokens " + std::to_string (job_tokens_prompt)
+                             + "p + " + std::to_string (job_tokens_completion)
+                             + "c = "
+                             + std::to_string (job_tokens_prompt
+                                               + job_tokens_completion);
+                }
+                std::cout << "\n" << grey (summary) << "\n";
+              }
             
 
             // Show result for done jobs.

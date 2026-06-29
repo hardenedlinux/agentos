@@ -54,7 +54,8 @@ namespace agentos::forge
 struct ForgeRequest
 {
   std::string forge_job_id; // pre-created forge_pipeline_jobs row
-  std::string task_id;      // triggering task (used to resume job on complete)
+  std::string task_id;      // job_id — used to resume the job on complete
+  std::string step_id;      // pipeline step id — used to record token usage
   std::string requirement_json; // serialised capability requirement (ADR-019)
   std::string feedback;         // empty on first attempt; set on retry
   int         attempt     = 0;
@@ -139,12 +140,16 @@ private:
 
   // Call Code Writer Adviser and store result in job.writer_output_json.
   // Returns false on hard error (LLM failure, malformed JSON).
-  bool call_code_writer(ForgePipelineJob& job);
+  // Populates tokens_prompt/tokens_completion with LLM usage.
+  bool call_code_writer(ForgePipelineJob& job,
+                        int& tokens_prompt, int& tokens_completion);
 
   // Call Code Reviewer Adviser and store result in job.reviewer_verdict_json.
   // Returns the verdict: true = accept, false = reject.
   // Populates job.feedback with the Reviewer's reason on rejection.
-  bool call_code_reviewer(ForgePipelineJob& job);
+  // Populates tokens_prompt/tokens_completion with LLM usage.
+  bool call_code_reviewer(ForgePipelineJob& job,
+                          int& tokens_prompt, int& tokens_completion);
 
   // Enforce Layer pre-check (ADR-009 Layer B):
   // Validate capability declaration against ADR-006 policy before Reviewer runs.

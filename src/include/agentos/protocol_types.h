@@ -70,6 +70,8 @@ namespace agentos
     std::optional<int64_t> completed_at; // when worker finished
     std::optional<std::string> error; // failure summary, if failed
     std::string result_json;          // ADR-016 result payload, set on done
+    int tokens_prompt     = 0;        // LLM input tokens for this step
+    int tokens_completion = 0;        // LLM output tokens for this step
   };
 
   // --- Worker (Executor) ---

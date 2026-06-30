@@ -177,6 +177,86 @@ namespace agentos
       return false;
     }
 
+    // ADR-025: ForgeJob.phase is a string; forge_pipeline_jobs.status is the
+    // INTEGER ForgeStatus enum. Enum ordinal order matches the ADR-025 phase
+    // list exactly: drafting=0, reviewing=1, promoted=2, rejected=3,
+    // human_review=4 (see Database::load_in_flight_forge_pipeline_jobs'
+    // `WHERE status NOT IN (2,3,4)` — the three terminal phases).
+    std::string forge_status_to_phase (ForgeStatus status)
+    {
+      switch (status)
+      {
+      case ForgeStatus::drafting:
+        return "drafting";
+      case ForgeStatus::reviewing:
+        return "reviewing";
+      case ForgeStatus::promoted:
+        return "promoted";
+      case ForgeStatus::rejected:
+        return "rejected";
+      case ForgeStatus::human_review:
+        return "human_review";
+      }
+      return "unknown";
+    }
+
+    std::optional<ForgeStatus> phase_to_forge_status (const std::string &phase)
+    {
+      if (phase == "drafting")
+        return ForgeStatus::drafting;
+      if (phase == "reviewing")
+        return ForgeStatus::reviewing;
+      if (phase == "promoted")
+        return ForgeStatus::promoted;
+      if (phase == "rejected")
+        return ForgeStatus::rejected;
+      if (phase == "human_review")
+        return ForgeStatus::human_review;
+      return std::nullopt;
+    }
+
+    // requirement_json is stored as the full Forge task spec
+    // ({"description": ..., "input_schema": ..., "output_schema": ...},
+    // ADR-031 Section 6). ADR-025's ForgeJob.requirement is the
+    // human-readable description string, not the raw JSON blob.
+    std::string forge_requirement_summary (const std::string &requirement_json)
+    {
+      rapidjson::Document doc;
+      if (!doc.Parse (requirement_json.c_str ()).HasParseError ()
+          && doc.IsObject () && doc.HasMember ("description")
+          && doc["description"].IsString ())
+        return doc["description"].GetString ();
+      return requirement_json; // fallback if shape is unexpected
+    }
+
+    // Shared ForgeJob entity serializer (ADR-025) used by both forge.list
+    // and forge.status so the two methods stay structurally identical.
+    void write_forge_job (rapidjson::Writer<rapidjson::StringBuffer> &w,
+                          const ForgePipelineJob &fj)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (fj.id.c_str ());
+      w.Key ("requirement");
+      w.String (forge_requirement_summary (fj.requirement_json).c_str ());
+      w.Key ("phase");
+      w.String (forge_status_to_phase (fj.status).c_str ());
+      w.Key ("attempt");
+      w.Int (fj.attempt);
+      w.Key ("max_attempts");
+      w.Int (fj.max_attempts);
+      if (!fj.feedback.empty ())
+      {
+        w.Key ("last_feedback");
+        w.String (fj.feedback.c_str ());
+      }
+      w.Key ("created_at");
+      w.Int64 (fj.created_at);
+      w.Key ("updated_at");
+      w.Int64 (fj.updated_at);
+      w.EndObject ();
+    }
+
   } // anonymous namespace
 
   // ---------------------------------------------------------------------------
@@ -462,6 +542,10 @@ namespace agentos
       cmd_worker_revoke (params_json, identity, request_id);
     else if (method == "adviser.list")
       cmd_adviser_list (params_json, identity, request_id);
+    else if (method == "forge.list")
+      cmd_forge_list (params_json, identity, request_id);
+    else if (method == "forge.status")
+      cmd_forge_status (params_json, identity, request_id);
     // --- ADR-028: credential vault methods ---
     else if (method == "cred.submit")
       cmd_cred_submit (params_json, identity, request_id);
@@ -925,6 +1009,79 @@ namespace agentos
     }
     w.EndArray ();
     w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: forge.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_forge_list (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    params.Parse (params_json.c_str ());
+
+    std::optional<ForgeStatus> status_filter;
+    if (!params.HasParseError () && params.HasMember ("phase")
+        && params["phase"].IsString ())
+    {
+      status_filter = phase_to_forge_status (params["phase"].GetString ());
+      if (!status_filter)
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: unknown phase value");
+        return;
+      }
+    }
+
+    auto jobs = db_.load_forge_pipeline_jobs (status_filter);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("forge_jobs");
+    w.StartArray ();
+    for (const auto &fj : jobs)
+      write_forge_job (w, fj);
+    w.EndArray ();
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: forge.status
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_forge_status (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("forge_id") || !params["forge_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string forge_id = params["forge_id"].GetString ();
+
+    auto fj = db_.load_forge_pipeline_job (forge_id);
+    if (!fj)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("forge_job");
+    write_forge_job (w, *fj);
+    w.EndObject ();
+
     reply_ok (identity, request_id, buf.GetString ());
   }
 

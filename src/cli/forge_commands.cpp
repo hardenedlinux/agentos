@@ -36,13 +36,13 @@ void register_forge_commands(CLI::App& app) {
     // ---- forge list ----
     {
         auto* flist = forge->add_subcommand("list", "List forge jobs");
-        std::string phase;
-        flist->add_option("--phase", phase);
+        auto phase = std::make_shared<std::string>();
+        flist->add_option("--phase", *phase);
         flist->callback([timeout_ms, socket_path, json_flag, phase] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_forge_list_params(phase);
+                auto params = agentos::cli::build_forge_list_params(*phase);
                 auto result = client.send("forge.list", std::move(params));
                 if (*json_flag) {
                     print_json(result);
@@ -114,15 +114,49 @@ void register_forge_commands(CLI::App& app) {
     // ---- forge status ----
     {
         auto* fstatus = forge->add_subcommand("status", "Show forge job status");
-        std::string forge_id;
-        fstatus->add_option("forge_id", forge_id)->required();
-        fstatus->callback([timeout_ms, socket_path, forge_id] {
+        auto forge_id = std::make_shared<std::string>();
+        fstatus->add_option("forge_id", *forge_id)->required();
+        fstatus->callback([timeout_ms, socket_path, json_flag, forge_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_forge_status_params(forge_id);
+                auto params = agentos::cli::build_forge_status_params(*forge_id);
                 auto result = client.send("forge.status", std::move(params));
-                print_json(result);
+                if (*json_flag) {
+                    print_json(result);
+                } else {
+                    using namespace agentos::cli::color;
+                    namespace f = agentos::cli::fmt;
+                    if (!result.HasMember("forge_job") || !result["forge_job"].IsObject()) {
+                        std::cout << "Forge job not found.\n";
+                        return;
+                    }
+                    const auto& fj = result["forge_job"];
+
+                    int att = (fj.HasMember("attempt")      && fj["attempt"].IsInt())      ? fj["attempt"].GetInt()      : 0;
+                    int max = (fj.HasMember("max_attempts") && fj["max_attempts"].IsInt()) ? fj["max_attempts"].GetInt() : 0;
+                    std::string attempt_str;
+                    if (att > 0 && max > 0) attempt_str = std::to_string(att) + "/" + std::to_string(max);
+                    else if (att > 0)        attempt_str = std::to_string(att);
+                    else                     attempt_str = "-";
+
+                    std::string phase = f::str(fj, "phase");
+                    auto phase_color = [&](const std::string& p) -> std::string {
+                        if (p == "promoted")                          return green(p);
+                        if (p == "rejected" || p == "human_review")  return red(p);
+                        if (p == "drafting" || p == "reviewing")     return yellow(p);
+                        return p;
+                    };
+
+                    std::cout << bold("ID:           ") << f::str(fj, "id") << "\n";
+                    std::cout << bold("Phase:        ") << phase_color(phase) << "\n";
+                    std::cout << bold("Attempt:      ") << attempt_str << "\n";
+                    std::cout << bold("Requirement:  ") << f::str(fj, "requirement") << "\n";
+                    if (fj.HasMember("last_feedback") && fj["last_feedback"].IsString())
+                        std::cout << bold("Last feedback:") << " " << fj["last_feedback"].GetString() << "\n";
+                    std::cout << bold("Created:      ") << f::ts(fj, "created_at") << "\n";
+                    std::cout << bold("Updated:      ") << f::ts(fj, "updated_at") << "\n";
+                }
             } catch (const agentos::cli::CliError& e) {
                 agentos::cli::die(2, e.what());
             }

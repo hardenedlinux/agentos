@@ -1827,6 +1827,52 @@ namespace agentos
     return jobs;
   }
 
+  std::vector<ForgePipelineJob>
+  Database::load_forge_pipeline_jobs (std::optional<ForgeStatus> status_filter,
+                                      int limit)
+  {
+    std::vector<ForgePipelineJob> jobs;
+    if (!db_)
+      return jobs;
+
+    Stmt stmt (status_filter
+                 ? prepare (R"(
+      SELECT id, task_id, status, requirement_json,
+             writer_output_json, reviewer_verdict_json,
+             feedback, attempt, max_attempts,
+             last_code_path, created_at, updated_at
+      FROM forge_pipeline_jobs
+      WHERE status = ?
+      ORDER BY updated_at DESC
+      LIMIT ?
+  )")
+                 : prepare (R"(
+      SELECT id, task_id, status, requirement_json,
+             writer_output_json, reviewer_verdict_json,
+             feedback, attempt, max_attempts,
+             last_code_path, created_at, updated_at
+      FROM forge_pipeline_jobs
+      ORDER BY updated_at DESC
+      LIMIT ?
+  )"));
+    if (!stmt.s)
+      return jobs;
+
+    if (status_filter)
+    {
+      sqlite3_bind_int (stmt, 1, static_cast<int> (*status_filter));
+      sqlite3_bind_int (stmt, 2, limit);
+    }
+    else
+    {
+      sqlite3_bind_int (stmt, 1, limit);
+    }
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      jobs.push_back (row_to_forge_job (stmt));
+    return jobs;
+  }
+
   // ---------------------------------------------------------------------------
   // Agent / Capability tables
   // ---------------------------------------------------------------------------

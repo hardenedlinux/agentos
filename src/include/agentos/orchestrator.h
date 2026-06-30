@@ -174,6 +174,14 @@ namespace agentos
                            const std::string &identity,
                            const std::string &request_id);
 
+    void cmd_forge_list (const std::string &params_json,
+                         const std::string &identity,
+                         const std::string &request_id);
+
+    void cmd_forge_status (const std::string &params_json,
+                           const std::string &identity,
+                           const std::string &request_id);
+
     // --- ADR-028: cred.* methods ---
     void cmd_cred_submit (const std::string &params_json,
                           const std::string &identity,

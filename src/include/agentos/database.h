@@ -218,6 +218,10 @@ namespace agentos
     std::optional<ForgePipelineJob>
     load_forge_pipeline_job (const std::string &forge_id);
     std::vector<ForgePipelineJob> load_in_flight_forge_pipeline_jobs ();
+    std::vector<ForgePipelineJob>
+    load_forge_pipeline_jobs (std::optional<ForgeStatus> status_filter
+                              = std::nullopt,
+                              int limit = 100);
 
     // -- Agent / Capability tables --------------------------------------------
 

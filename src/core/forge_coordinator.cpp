@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -170,6 +171,17 @@ namespace agentos::forge
                         "output on attempt {}",
                         job.attempt);
           // job.feedback already set by enforce_capability_policy
+        }
+        else if (!syntax_precheck (job))
+        {
+          // Syntax pre-check failed — job.feedback already set.
+          // Accumulate writer tokens before retry.
+          forge_tokens_prompt += w_pt;
+          forge_tokens_completion += w_ct;
+          spdlog::info (
+            "[forge_coordinator] syntax pre-check failed on attempt {}, "
+            "skipping reviewer",
+            job.attempt);
         }
         else
         {
@@ -603,6 +615,54 @@ namespace agentos::forge
 
     job.last_code_path = impl_path.string ();
     spdlog::info ("[forge_coordinator] wrote impl to {}", impl_path.string ());
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Python syntax pre-check
+  // Runs ast.parse on the impl file to catch SyntaxError before invoking
+  // the Reviewer LLM.  Returns true if syntax is valid (or file is not .py).
+  // On failure, sets job.feedback with the error message.
+  // ---------------------------------------------------------------------------
+
+  bool ForgeCoordinator::syntax_precheck (ForgePipelineJob &job)
+  {
+    // Only check Python files.
+    if (job.last_code_path.empty ()
+        || !job.last_code_path.ends_with (".py"))
+      return true;
+
+    // Use ast.parse — it checks syntax without executing code.
+    const std::string cmd
+      = "python3 -c \"import ast; ast.parse(open('"
+        + job.last_code_path + "').read())\" 2>&1";
+
+    FILE *pipe = popen (cmd.c_str (), "r");
+    if (!pipe)
+    {
+      spdlog::warn ("[forge_coordinator] popen failed for syntax pre-check, "
+                    "proceeding to reviewer");
+      return true; // fail-open: let reviewer handle it
+    }
+
+    std::string output;
+    char buf[512];
+    while (fgets (buf, sizeof (buf), pipe))
+      output += buf;
+    int rc = pclose (pipe);
+
+    if (rc != 0)
+    {
+      // Trim trailing newline for cleaner feedback.
+      while (!output.empty () && output.back () == '\n')
+        output.pop_back ();
+      spdlog::warn ("[forge_coordinator] syntax pre-check failed: {}", output);
+      job.feedback = "SyntaxError (pre-check): " + output;
+      return false;
+    }
+
+    spdlog::info ("[forge_coordinator] syntax pre-check passed for {}",
+                  job.last_code_path);
     return true;
   }
 

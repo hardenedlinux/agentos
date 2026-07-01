@@ -1822,7 +1822,8 @@ namespace agentos
         // and goes straight to trigger_forge.
         me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
                           + step.step.command
-                          + R"(","needs_forge":true})";
+                          + R"(","needs_forge":true,"step_description":")"
+                          + step.step.description + R"("})";
         send_to_master_ (std::move (me));
       }
       else
@@ -1836,7 +1837,8 @@ namespace agentos
         me.job_id = job.job_id;
         me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
                           + step.step.command
-                          + R"(","needs_forge":false})";
+                          + R"(","needs_forge":false,"step_description":")"
+                          + step.step.description + R"("})";
         send_to_master_ (std::move (me));
       }
       return;
@@ -1985,6 +1987,9 @@ namespace agentos
     const bool needs_forge = (!job.pending_steps.empty ())
                                ? job.pending_steps.front ().step.needs_forge
                                : false;
+    const std::string step_desc = (!job.pending_steps.empty ())
+                                    ? job.pending_steps.front ().step.description
+                                    : "";
 
     // Escalate to Master with full context so trigger_forge has what it needs.
     MasterEvent me;
@@ -1992,7 +1997,7 @@ namespace agentos
     me.job_id = job_id;
     me.payload_json = R"({"job_id":")" + job_id + R"(","command":")" + command
                       + R"(","needs_forge":)" + (needs_forge ? "true" : "false")
-                      + "}";
+                      + R"(,"step_description":")" + step_desc + R"("})";
     send_to_master_ (std::move (me));
   }
 

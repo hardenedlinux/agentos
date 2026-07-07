@@ -8,10 +8,17 @@
  *     ROUTER receives: [identity][payload]    (2 frames)
  *     gateway.cpp strips identity, passes payload to ForwardFn.
  *
- *   Outbound (inproc PUSH → ROUTER → DEALER):
- *     Sender pushes:   [identity][payload]    (2 frames)
- *     ROUTER strips identity, routes remaining frame.
+ *   Outbound (enqueue_outbound() → poll thread → ROUTER → DEALER):
+ *     Caller calls gw->enqueue_outbound(identity, payload) from any thread.
+ *     The Gateway's own poll thread drains its internal queue and sends
+ *     [identity][payload] directly on the ROUTER socket.
  *     DEALER receives: [payload]              (1 frame)
+ *
+ *     An earlier design pushed frames through an inproc PUSH/PULL socket
+ *     pair instead of an in-process queue; it was removed (see gateway.h)
+ *     because ZMQ PUSH/PULL does not reliably propagate SNDMORE on the
+ *     inproc transport, causing multi-frame messages to be split across
+ *     poll cycles. enqueue_outbound() replaced it.
  *
  * Note: the empty delimiter frame is a REQ/REP convention, NOT used by
  * DEALER sockets. DEALER sends raw frames without any envelope.
@@ -98,7 +105,6 @@ protected:
     };
 
     auto gw = std::make_unique<agentos::Gateway> (ctx_, std::move (fn));
-    gw->bind_inproc ();
     gw->start ();
     return gw;
   }
@@ -160,12 +166,14 @@ TEST_F (GatewayTest,
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: outbound message pushed to inproc reaches the DEALER
+// Test 2: outbound message enqueued via enqueue_outbound() reaches the DEALER
 //
-// Sender pushes [identity][payload] (no empty delimiter).
-// DEALER receives [payload] (1 frame).
+// The earlier inproc PUSH/PULL design was removed (gateway.h) because ZMQ
+// PUSH/PULL does not reliably propagate SNDMORE on the inproc transport.
+// enqueue_outbound() is the replacement: a thread-safe queue drained by the
+// Gateway's own poll thread.
 // ---------------------------------------------------------------------------
-TEST_F (GatewayTest, OutboundMessage_PushedToInproc_ReachesCorrectClient)
+TEST_F (GatewayTest, OutboundMessage_Enqueued_ReachesCorrectClient)
 {
   std::promise<void> unused_promise;
   std::vector<agentos::GatewayInbound> unused_received;
@@ -177,16 +185,7 @@ TEST_F (GatewayTest, OutboundMessage_PushedToInproc_ReachesCorrectClient)
   const std::string out_payload
     = R"({"jsonrpc":"2.0","method":"system.heartbeat","params":{}})";
 
-  {
-    zmq::socket_t pusher (ctx_, zmq::socket_type::push);
-    pusher.connect ("inproc://gateway-out");
-
-    zmq::message_t id_frame (client_id, std::strlen (client_id));
-    pusher.send (std::move (id_frame), zmq::send_flags::sndmore);
-
-    zmq::message_t payload_frame (out_payload.data (), out_payload.size ());
-    pusher.send (std::move (payload_frame), zmq::send_flags::none);
-  }
+  gw->enqueue_outbound (client_id, out_payload);
 
   auto received = recv_frame (dealer);
   ASSERT_TRUE (received.has_value ()) << "Timed out waiting for payload frame";
@@ -219,23 +218,13 @@ TEST_F (GatewayTest, OutboundDrainedBeforeInbound)
   };
 
   auto gw = std::make_unique<agentos::Gateway> (ctx_, fn);
-  gw->bind_inproc ();
   gw->start ();
 
   const char *client_id = "client-C";
   zmq::socket_t dealer = make_dealer (client_id);
 
-  // Push outbound first: [identity][payload]
-  {
-    zmq::socket_t pusher (ctx_, zmq::socket_type::push);
-    pusher.connect ("inproc://gateway-out");
-
-    zmq::message_t id_frame (client_id, std::strlen (client_id));
-    pusher.send (std::move (id_frame), zmq::send_flags::sndmore);
-    const std::string out = "heartbeat";
-    zmq::message_t pf (out.data (), out.size ());
-    pusher.send (std::move (pf), zmq::send_flags::none);
-  }
+  // Enqueue outbound first via the Gateway's thread-safe queue.
+  gw->enqueue_outbound (client_id, std::string ("heartbeat"));
 
   // Dealer receives [payload]; record "outbound".
   {

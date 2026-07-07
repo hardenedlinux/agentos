@@ -284,6 +284,7 @@ namespace agentos
     if (!exec_ddl (schema_suites))
       return false;
 
+
     // ADR-029: users table & profile view
     static const char *schema_users = R"(
       CREATE TABLE IF NOT EXISTS users (
@@ -367,6 +368,7 @@ namespace agentos
       maybe_add_column (
         "ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
     }
+
 
     // ADR‑025: extend human_reviews with type / job_id
     {
@@ -3007,4 +3009,5 @@ namespace agentos
       jobs.push_back (row_to_job (stmt));
     return jobs;
   }
+
 } // namespace agentos

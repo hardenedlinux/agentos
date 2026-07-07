@@ -69,6 +69,12 @@ public:
   Master (const Master &)            = delete;
   Master &operator= (const Master &) = delete;
 
+  // Allow unit tests to invoke private select_adviser() and to inject a
+  // fake LLM response function (llm_fn_, ADR-033 Step 2 disambiguation)
+  // before any detached LLM thread is started. No public setter is
+  // exposed for llm_fn_; this friend struct is the sole access point.
+  friend struct MasterSelectInvoker;
+
 private:
   // ---------------------------------------------------------------------------
   // Actor interface — all return immediately
@@ -128,6 +134,23 @@ private:
 
   // Build adviser list context for LLM prompt.
   std::string build_adviser_context () const;
+
+  // ADR-033: disambiguate among multiple domain candidates (Step 2)
+  std::string llm_disambiguate_adviser (
+      const std::string &goal,
+      const std::vector<RegisteredAdviser> &candidates) const;
+
+  // Test seam – allow injection of a fake LLM response for disambiguation.
+  // If set, llm_disambiguate_adviser uses this instead of llm_.complete().
+  // Private, and reachable only through MasterSelectInvoker (see friend
+  // declaration above) — matches the existing access pattern used for
+  // invoking select_adviser() from tests. No public setter is exposed:
+  // a friend struct can assign llm_fn_ directly, so a setter would only
+  // widen access unnecessarily to any caller holding a Master&, including
+  // production code, and would be an unsynchronized write reachable
+  // while a detached LLM thread (see class comment above) may be
+  // reading it.
+  std::function<Result<LlmResponse>(const LlmRequest&)> llm_fn_;
 
   // ---------------------------------------------------------------------------
   // Members

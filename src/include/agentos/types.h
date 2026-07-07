@@ -114,6 +114,7 @@ namespace agentos
     // Advisers declare which domains they can plan for (e.g. "research",
     // "coding")
     std::vector<std::string> domains;
+    int priority = 0;
   };
 
   struct RegisteredExecutor

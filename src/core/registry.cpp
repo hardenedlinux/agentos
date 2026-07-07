@@ -2,6 +2,7 @@
 #include "agentos/database.h"
 #include "agentos/home_init.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -105,6 +106,11 @@ namespace agentos
           domains.push_back (d.GetString ());
     }
 
+    // ADR-033: optional priority (default 0)
+    int priority = 0;
+    if (doc.HasMember ("priority") && doc["priority"].IsInt ())
+      priority = doc["priority"].GetInt ();
+
     if (role == "adviser")
     {
       out_adviser.id = ClientId (agent_id);
@@ -112,6 +118,7 @@ namespace agentos
       out_adviser.version = version;
       out_adviser.skill_path = binary_path;
       out_adviser.domains = std::move (domains);
+      out_adviser.priority = priority;
       return true;
     }
 
@@ -168,6 +175,81 @@ namespace agentos
 
   Registry::Registry () : impl_ (std::make_unique<Impl> ()) {}
 
+  // case‑insensitive comparison helper
+  static bool iequals (const std::string &a, const std::string &b)
+  {
+    if (a.size () != b.size ())
+      return false;
+    for (std::size_t i = 0; i < a.size (); ++i)
+      if (std::tolower (static_cast<unsigned char> (a[i]))
+          != std::tolower (static_cast<unsigned char> (b[i])))
+        return false;
+    return true;
+  }
+
+  std::vector<RegisteredAdviser>
+  Registry::find_advisers_by_domain (const std::vector<std::string> &goal_tokens) const
+  {
+    std::vector<RegisteredAdviser> result;
+    if (!impl_)
+      return result;
+
+    for (const auto &[id, adv] : impl_->advisers)
+      {
+        bool match = false;
+        for (const auto &domain : adv.domains)
+          {
+            // Split the domain tag on hyphens and compare each sub‑token
+            // individually against the goal tokens (case‑insensitive).
+            std::string sub;
+            for (char c : domain)
+              {
+                if (c == '-')
+                  {
+                    if (!sub.empty ())
+                      {
+                        for (const auto &token : goal_tokens)
+                          if (iequals (sub, token))
+                            {
+                              match = true;
+                              break;
+                            }
+                        sub.clear ();
+                        if (match)
+                          break;
+                      }
+                  }
+                else
+                  sub += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+              }
+            if (match)
+              break;
+            if (!sub.empty ())
+              {
+                for (const auto &token : goal_tokens)
+                  if (iequals (sub, token))
+                    {
+                      match = true;
+                      break;
+                    }
+              }
+            if (match)
+              break;
+          }
+        if (match)
+          result.push_back (adv);
+      }
+
+    // Sort by priority desc, then id asc
+    std::sort (result.begin (), result.end (),
+               [] (const RegisteredAdviser &a, const RegisteredAdviser &b) {
+                 if (a.priority != b.priority)
+                   return a.priority > b.priority;
+                 return a.id.value () < b.id.value ();
+               });
+    return result;
+  }
+
   void Registry::init (Database &db)
   {
     impl_->advisers.clear ();
@@ -184,7 +266,9 @@ namespace agentos
         continue;
 
       if (row.role == "adviser")
-        impl_->advisers[row.id] = std::move (adviser);
+      {
+        impl_->advisers[row.id] = adviser;
+      }
       else if (row.role == "worker")
       {
         impl_->workers[row.id] = worker;
@@ -258,25 +342,6 @@ namespace agentos
     spdlog::warn ("[registry] remove is deprecated (static catalog)");
   }
 
-  std::optional<RegisteredAdviser>
-  Registry::find_adviser (const std::string &domain) const
-  {
-    if (!impl_)
-      return std::nullopt;
-    // Return the first adviser whose domains list contains the requested
-    // domain (or any adviser if domain is empty)
-    for (const auto &[id, adviser] : impl_->advisers)
-    {
-      if (domain.empty ())
-        return adviser;
-      for (const auto &d : adviser.domains)
-      {
-        if (d == domain)
-          return adviser;
-      }
-    }
-    return std::nullopt;
-  }
 
   std::optional<RegisteredExecutor>
   Registry::find_worker_for_command (const std::string &command) const

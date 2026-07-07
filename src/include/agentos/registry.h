@@ -30,8 +30,11 @@
 
 #include "agentos/forge_pipeline_job.h" // ADR-019
 #include "agentos/types.h"
+#include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace agentos
 {
@@ -62,9 +65,9 @@ namespace agentos
 
     // Lookup
 
-    // Find an adviser that handles the given domain (e.g. "research")
-    std::optional<RegisteredAdviser>
-    find_adviser (const std::string &domain) const;
+    // ADR-033: domain token‑based lookup returning all matching advisers
+    std::vector<RegisteredAdviser>
+    find_advisers_by_domain (const std::vector<std::string> &goal_tokens) const;
 
     // Find the worker that owns a given command (e.g. "web.search")
     std::optional<RegisteredExecutor>

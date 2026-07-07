@@ -38,8 +38,21 @@ static std::string resolve_socket_path()
 }
 
 // ZMQ requires a transport scheme; unix-domain sockets use ipc://<path>.
+// Production always passes a bare filesystem path here (from
+// resolve_socket_path()), which never contains "://". Tests, however,
+// construct CliClient directly with a full ZMQ endpoint URI (e.g.
+// "tcp://127.0.0.1:PORT" from a bound ROUTER's last_endpoint) via the
+// (socket_path, access_key, timeout_ms) constructor. Unconditionally
+// prepending "ipc://" here used to turn that into the nonsensical
+// "ipc://tcp://127.0.0.1:PORT" — parsed as an ipc:// connection to a
+// Unix-domain socket file literally named "tcp://127.0.0.1:PORT", which
+// never exists and never connects to the test's real TCP-bound socket.
+// If the input already carries a transport scheme, pass it through
+// unchanged; only bare paths get "ipc://" prepended.
 static std::string zmq_endpoint(const std::string& path)
 {
+    if (path.find("://") != std::string::npos)
+        return path;
     return "ipc://" + path;
 }
 

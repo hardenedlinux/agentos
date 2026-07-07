@@ -9,6 +9,7 @@
 #include "agentos/registry.h"
 
 #include <gtest/gtest.h>
+#include <memory>
 
 namespace agentos
 {
@@ -26,8 +27,13 @@ namespace agentos
 
       // Declare db before registry — members initialise in declaration order.
       MockDatabase db;
-      Registry registry{db};
-      EnforceLayer enforceLayer{registry, db};
+      Registry registry;
+      std::unique_ptr<EnforceLayer> enforceLayer;
+
+      void SetUp() override {
+          registry.init(db);
+          enforceLayer = std::make_unique<EnforceLayer>(registry, db);
+      }
 
       // Helper: build a minimal safe declaration (auto-approve baseline).
       static CapabilityDeclaration safe_decl ()
@@ -44,21 +50,21 @@ namespace agentos
 
     TEST_F (EnforceLayerTest, CapabilityAllowed_SafeDecl_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.capability_allowed (safe_decl (), "/tmp/job"));
+      EXPECT_TRUE (enforceLayer->capability_allowed (safe_decl (), "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, CapabilityAllowed_NetworkTrue_ReturnsFalse)
     {
       auto decl = safe_decl ();
       decl.network = true;
-      EXPECT_FALSE (enforceLayer.capability_allowed (decl, "/tmp/job"));
+      EXPECT_FALSE (enforceLayer->capability_allowed (decl, "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, CapabilityAllowed_ExecTrue_ReturnsFalse)
     {
       auto decl = safe_decl ();
       decl.exec = true;
-      EXPECT_FALSE (enforceLayer.capability_allowed (decl, "/tmp/job"));
+      EXPECT_FALSE (enforceLayer->capability_allowed (decl, "/tmp/job"));
     }
 
     // tcp_connect_ports + network:false is mutually exclusive (ADR-015)
@@ -67,7 +73,7 @@ namespace agentos
     {
       auto decl = safe_decl ();
       decl.tcp_connect_ports.push_back (443);
-      EXPECT_FALSE (enforceLayer.capability_allowed (decl, "/tmp/job"));
+      EXPECT_FALSE (enforceLayer->capability_allowed (decl, "/tmp/job"));
     }
 
     // tcp_connect_ports with network:true should still be rejected
@@ -78,7 +84,7 @@ namespace agentos
       auto decl = safe_decl ();
       decl.network = true;
       decl.tcp_connect_ports.push_back (443);
-      EXPECT_FALSE (enforceLayer.capability_allowed (decl, "/tmp/job"));
+      EXPECT_FALSE (enforceLayer->capability_allowed (decl, "/tmp/job"));
     }
 
     // ── requires_path_escalation
@@ -88,14 +94,14 @@ namespace agentos
     {
       auto decl = safe_decl ();
       decl.fs_read.push_back ("/tmp/job/input.txt");
-      EXPECT_FALSE (enforceLayer.requires_path_escalation (decl, "/tmp/job"));
+      EXPECT_FALSE (enforceLayer->requires_path_escalation (decl, "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, PathEscalation_PathOutsideJobDir_ReturnsTrue)
     {
       auto decl = safe_decl ();
       decl.fs_read.push_back ("/home/user/secret.txt");
-      EXPECT_TRUE (enforceLayer.requires_path_escalation (decl, "/tmp/job"));
+      EXPECT_TRUE (enforceLayer->requires_path_escalation (decl, "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, PathEscalation_TemplatePlaceholder_ReturnsTrue)
@@ -104,20 +110,20 @@ namespace agentos
       // time and must trigger escalation (ADR-015).
       auto decl = safe_decl ();
       decl.fs_read.push_back ("{{input_path}}");
-      EXPECT_TRUE (enforceLayer.requires_path_escalation (decl, "/tmp/job"));
+      EXPECT_TRUE (enforceLayer->requires_path_escalation (decl, "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, PathEscalation_NoPathsDeclared_ReturnsFalse)
     {
       EXPECT_FALSE (
-        enforceLayer.requires_path_escalation (safe_decl (), "/tmp/job"));
+        enforceLayer->requires_path_escalation (safe_decl (), "/tmp/job"));
     }
 
     TEST_F (EnforceLayerTest, PathEscalation_FsWriteOutsideDir_ReturnsTrue)
     {
       auto decl = safe_decl ();
       decl.fs_write.push_back ("/etc/passwd");
-      EXPECT_TRUE (enforceLayer.requires_path_escalation (decl, "/tmp/job"));
+      EXPECT_TRUE (enforceLayer->requires_path_escalation (decl, "/tmp/job"));
     }
 
     // ── evaluate_resources
@@ -125,19 +131,19 @@ namespace agentos
 
     TEST_F (EnforceLayerTest, EvaluateResources_MemTotalNonZero)
     {
-      auto usage = enforceLayer.evaluate_resources ();
+      auto usage = enforceLayer->evaluate_resources ();
       EXPECT_GT (usage.mem_total_kb, 0u);
     }
 
     TEST_F (EnforceLayerTest, EvaluateResources_MemAvailableNonZero)
     {
-      auto usage = enforceLayer.evaluate_resources ();
+      auto usage = enforceLayer->evaluate_resources ();
       EXPECT_GT (usage.mem_available_kb, 0u);
     }
 
     TEST_F (EnforceLayerTest, EvaluateResources_AvailableLeTotal)
     {
-      auto usage = enforceLayer.evaluate_resources ();
+      auto usage = enforceLayer->evaluate_resources ();
       EXPECT_LE (usage.mem_available_kb, usage.mem_total_kb);
     }
 
@@ -145,7 +151,7 @@ namespace agentos
     // tested for non-zero, only for internal consistency.
     TEST_F (EnforceLayerTest, EvaluateResources_CgroupLimitGeUsage)
     {
-      auto usage = enforceLayer.evaluate_resources ();
+      auto usage = enforceLayer->evaluate_resources ();
       if (usage.cgroup_mem_limit_kb > 0)
         EXPECT_GE (usage.cgroup_mem_limit_kb, usage.cgroup_mem_usage_kb);
     }
@@ -155,60 +161,60 @@ namespace agentos
 
     TEST_F (EnforceLayerTest, CanTransition_DraftingToReviewing_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("drafting", "reviewing"));
+      EXPECT_TRUE (enforceLayer->can_transition ("drafting", "reviewing"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_ReviewingToDrafting_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("reviewing", "drafting"));
+      EXPECT_TRUE (enforceLayer->can_transition ("reviewing", "drafting"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_ReviewingToHumanReview_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("reviewing", "human_review"));
+      EXPECT_TRUE (enforceLayer->can_transition ("reviewing", "human_review"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_ReviewingToPromoted_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("reviewing", "promoted"));
+      EXPECT_TRUE (enforceLayer->can_transition ("reviewing", "promoted"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_HumanReviewToDrafting_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("human_review", "drafting"));
+      EXPECT_TRUE (enforceLayer->can_transition ("human_review", "drafting"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_HumanReviewToRejected_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.can_transition ("human_review", "rejected"));
+      EXPECT_TRUE (enforceLayer->can_transition ("human_review", "rejected"));
     }
 
     // Invalid transitions
     TEST_F (EnforceLayerTest, CanTransition_DraftingToPromoted_ReturnsFalse)
     {
-      EXPECT_FALSE (enforceLayer.can_transition ("drafting", "promoted"));
+      EXPECT_FALSE (enforceLayer->can_transition ("drafting", "promoted"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_PromotedToAnything_ReturnsFalse)
     {
       // promoted is a terminal state
-      EXPECT_FALSE (enforceLayer.can_transition ("promoted", "drafting"));
-      EXPECT_FALSE (enforceLayer.can_transition ("promoted", "reviewing"));
-      EXPECT_FALSE (enforceLayer.can_transition ("promoted", "rejected"));
+      EXPECT_FALSE (enforceLayer->can_transition ("promoted", "drafting"));
+      EXPECT_FALSE (enforceLayer->can_transition ("promoted", "reviewing"));
+      EXPECT_FALSE (enforceLayer->can_transition ("promoted", "rejected"));
     }
 
     TEST_F (EnforceLayerTest, CanTransition_RejectedToAnything_ReturnsFalse)
     {
       // rejected is a terminal state
-      EXPECT_FALSE (enforceLayer.can_transition ("rejected", "drafting"));
-      EXPECT_FALSE (enforceLayer.can_transition ("rejected", "reviewing"));
+      EXPECT_FALSE (enforceLayer->can_transition ("rejected", "drafting"));
+      EXPECT_FALSE (enforceLayer->can_transition ("rejected", "reviewing"));
     }
 
     // Old uppercase states must not be accepted (ADR-019 uses lowercase)
     TEST_F (EnforceLayerTest, CanTransition_UppercaseStates_ReturnsFalse)
     {
-      EXPECT_FALSE (enforceLayer.can_transition ("Drafting", "Reviewing"));
-      EXPECT_FALSE (enforceLayer.can_transition ("Reviewing", "Promoted"));
+      EXPECT_FALSE (enforceLayer->can_transition ("Drafting", "Reviewing"));
+      EXPECT_FALSE (enforceLayer->can_transition ("Reviewing", "Promoted"));
     }
 
     // ── validate_sandbox_probe
@@ -217,7 +223,7 @@ namespace agentos
     TEST_F (EnforceLayerTest, ValidateSandboxProbe_SafeDecl_ReturnsEmpty)
     {
       EXPECT_TRUE (
-        enforceLayer.validate_sandbox_probe ("job1", safe_decl ()).empty ());
+        enforceLayer->validate_sandbox_probe ("job1", safe_decl ()).empty ());
     }
 
     TEST_F (EnforceLayerTest, ValidateSandboxProbe_NetworkTrue_ReturnsReason)
@@ -225,7 +231,7 @@ namespace agentos
       auto decl = safe_decl ();
       decl.network = true;
       EXPECT_FALSE (
-        enforceLayer.validate_sandbox_probe ("job1", decl).empty ());
+        enforceLayer->validate_sandbox_probe ("job1", decl).empty ());
     }
 
     TEST_F (EnforceLayerTest, ValidateSandboxProbe_ExecTrue_ReturnsReason)
@@ -233,7 +239,7 @@ namespace agentos
       auto decl = safe_decl ();
       decl.exec = true;
       EXPECT_FALSE (
-        enforceLayer.validate_sandbox_probe ("job1", decl).empty ());
+        enforceLayer->validate_sandbox_probe ("job1", decl).empty ());
     }
 
     // Reviewer acceptance does NOT bypass Enforce Layer (ADR-009)
@@ -244,7 +250,7 @@ namespace agentos
       decl.network = true;
       // Even if a Reviewer "accepted" this, Enforce Layer must still reject.
       const std::string reason
-        = enforceLayer.validate_sandbox_probe ("job-reviewer-bypass", decl);
+        = enforceLayer->validate_sandbox_probe ("job-reviewer-bypass", decl);
       EXPECT_FALSE (reason.empty ());
     }
 
@@ -253,23 +259,23 @@ namespace agentos
 
     TEST_F (EnforceLayerTest, HumanEscalation_AttemptExceedsMax_ReturnsTrue)
     {
-      EXPECT_TRUE (enforceLayer.human_escalation_required ("job1", 4, 3));
+      EXPECT_TRUE (enforceLayer->human_escalation_required ("job1", 4, 3));
     }
 
     TEST_F (EnforceLayerTest, HumanEscalation_AttemptEqualsMax_ReturnsFalse)
     {
       // attempt == max_attempts: still within budget, not yet escalated
-      EXPECT_FALSE (enforceLayer.human_escalation_required ("job1", 3, 3));
+      EXPECT_FALSE (enforceLayer->human_escalation_required ("job1", 3, 3));
     }
 
     TEST_F (EnforceLayerTest, HumanEscalation_AttemptBelowMax_ReturnsFalse)
     {
-      EXPECT_FALSE (enforceLayer.human_escalation_required ("job1", 1, 3));
+      EXPECT_FALSE (enforceLayer->human_escalation_required ("job1", 1, 3));
     }
 
     TEST_F (EnforceLayerTest, HumanEscalation_ZeroAttempt_ReturnsFalse)
     {
-      EXPECT_FALSE (enforceLayer.human_escalation_required ("job1", 0, 3));
+      EXPECT_FALSE (enforceLayer->human_escalation_required ("job1", 0, 3));
     }
 
   } // namespace

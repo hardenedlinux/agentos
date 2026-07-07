@@ -89,7 +89,8 @@ protected:
   // Construct registry/llm/master after any DB seeding is done by the test.
   void start_master ()
   {
-    registry_ = std::make_unique<Registry> (*db_);
+    registry_ = std::make_unique<Registry> ();
+    registry_->init (*db_);
     llm_proxy_ = std::make_unique<LlmProxy> (1, 5);
     llm_client_ = std::make_unique<LlmClient> (*llm_proxy_, config_.llm);
 
@@ -191,7 +192,11 @@ TEST_F (MasterTest, JobSubmit_SingleAdviser_SkipsLlmAndSpawns)
   MasterEvent ev;
   ev.kind = MasterEvent::Kind::JobSubmit;
   ev.job_id = "job-3";
-  ev.payload_json = R"({"goal":"plan something"})";
+  // Goal must contain a token that exactly matches the adviser's "planning"
+  // domain tag (ADR-033 §1: token-overlap match, no stemming). "plan
+  // something" tokenizes to ["plan","something"] and would never match
+  // "planning" — it must be the exact word, not a prefix/stem of it.
+  ev.payload_json = R"({"goal":"outline a planning workflow"})";
   master_->enqueue (std::move (ev));
 
   ASSERT_TRUE (wait_orch (1));
@@ -279,12 +284,16 @@ protected:
 // Two advisers registered → LLM must pick one of the two valid ids.
 TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
 {
+  // Both advisers share the "code" domain tag so the goal below produces
+  // exactly two candidates (ADR-033 §1 Step 1), forcing selection into
+  // Step 2's bounded LLM disambiguation rather than short-circuiting on a
+  // single candidate or falling back to zero-candidate 'planning'.
   db_->insert_agent ("planning-adviser", "adviser", "", R"({
     "id": "planning-adviser",
     "name": "Planning Adviser",
     "version": "1.0.0",
     "skill_path": "advisers/planning/skill.md",
-    "domains": ["planning", "general"]
+    "domains": ["planning", "general", "code"]
   })");
   db_->insert_agent ("code-writer", "adviser", "", R"({
     "id": "code-writer",
@@ -300,7 +309,12 @@ TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
   MasterEvent ev;
   ev.kind = MasterEvent::Kind::JobSubmit;
   ev.job_id = "job-llm-1";
-  ev.payload_json = R"({"goal":"write a python function to sort a list"})";
+  // Goal must contain the exact word "code" (both advisers' shared domain
+  // tag) to actually reach 2 candidates — "python function to sort a list"
+  // alone tokenizes with no token matching "code", "planning", or
+  // "general", and would silently fall through to the zero-candidate path.
+  ev.payload_json
+    = R"({"goal":"write code to sort a list in python"})";
   master_->enqueue (std::move (ev));
 
   ASSERT_TRUE (wait_orch (1, 60000));

@@ -137,7 +137,8 @@ protected:
     db_ = std::make_unique<Database> ((home_ / "agentos.db").string ());
     ASSERT_TRUE (db_->open ());
 
-    registry_ = std::make_unique<Registry> (*db_);
+    registry_ = std::make_unique<Registry> ();
+    registry_->init (*db_);
   }
 
   void TearDown () override

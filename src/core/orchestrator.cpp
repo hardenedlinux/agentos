@@ -37,8 +37,10 @@
 
 #include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <thread>
@@ -1383,10 +1385,9 @@ namespace agentos
                     job_id);
 
       // Read skill.md as system prompt (ADR-018).
-      const char *home_env = std::getenv ("HOME");
-      const std::string skill_path = std::string (home_env ? home_env : "")
-                                     + "/.agentos/advisers/" + adviser_id
-                                     + "/skill.md";
+      auto home = agentos_home ();
+      const std::string skill_path =
+          (home / "advisers" / adviser_id / "skill.md").string ();
       std::string system_prompt;
       {
         std::ifstream f (skill_path);
@@ -1430,24 +1431,53 @@ namespace agentos
       std::thread (
         [this, job_id, goal,
          system_prompt = std::move (system_prompt),
-         capability_list_str = std::move (capability_list_str)] () mutable
+         capability_list_str = std::move (capability_list_str),
+         adviser_id] () mutable
         {
+          // ADR-033: inject domain‑knowledge from the selected Adviser’s package
+          std::string domain_knowledge;
+          {
+            auto home = agentos_home ();
+            auto knowledge_path
+              = home / "advisers" / adviser_id / "knowledge" / "pipeline.md";
+            if (std::filesystem::exists (knowledge_path))
+              {
+                std::ifstream f (knowledge_path);
+                if (f)
+                  {
+                    domain_knowledge
+                      += "--- " + adviser_id + "/knowledge/pipeline.md ---\n";
+                    domain_knowledge
+                      += std::string (std::istreambuf_iterator<char> (f),
+                                      std::istreambuf_iterator<char> ())
+                      + "\n---\n";
+                  }
+                else
+                  spdlog::warn ("[orchestrator] cannot read {}",
+                                knowledge_path.string ());
+              }
+          }
+
           // LlmProxy has no complete(); LlmClient wraps it (ADR-017).
           LlmClient client (llm_, config_.llm);
 
           LlmRequest req;
           req.system_prompt = std::move (system_prompt);
-          req.user_prompt
-            = "Decompose the following goal into an ordered list of steps.\n"
-              "Respond ONLY with a JSON object — no markdown, no prose — in "
-              "this exact shape:\n"
-              "{\"steps\":[{\"id\":\"<uuid>\",\"command\":\"<capability>\","
-              "\"needs_forge\":<bool>,"
-              "\"description\":\"<what this step does>\"},...]}.\n"
-              "Set needs_forge:true for any step whose required capability is "
-              "not in the Available capabilities list.\n\n"
-              + capability_list_str
-              + "\nGoal: " + goal;
+
+          std::string user = "Goal: " + goal + "\n\n";
+          user += capability_list_str + "\n";
+          if (!domain_knowledge.empty ())
+            user += "Domain knowledge:\n" + domain_knowledge;
+          user += "\nDecompose the following goal into an ordered list of steps.\n"
+                  "Respond ONLY with a JSON object — no markdown, no prose — in "
+                  "this exact shape:\n"
+                  "{\"steps\":[{\"id\":\"<uuid>\",\"command\":\"<capability>\","
+                  "\"needs_forge\":<bool>,"
+                  "\"description\":\"<what this step does>\"},...]}.\n"
+                  "Set needs_forge:true for any step whose required capability is "
+                  "not in the Available capabilities list.\n";
+
+          req.user_prompt = user;
           req.max_tokens = 4096;
 
           auto result = client.complete (req);

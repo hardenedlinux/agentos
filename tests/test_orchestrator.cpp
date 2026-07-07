@@ -51,6 +51,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -115,7 +116,8 @@ protected:
     db_ = std::make_unique<Database> ((home_ / "agentos.db").string ());
     ASSERT_TRUE (db_->open ());
 
-    registry_ = std::make_unique<Registry> (*db_);
+    registry_ = std::make_unique<Registry> ();
+    registry_->init (*db_);
     llm_ = std::make_unique<LlmProxy> (1, 5);
 
     forge_ = std::make_unique<forge::ForgeCoordinator> (
@@ -159,11 +161,25 @@ protected:
 
   // Insert an access key directly into DB (bypassing CLI key generation).
   // Returns the plaintext key value.
+  //
+  // Orchestrator::authenticate() rejects any key that isn't exactly 64
+  // lowercase-hex characters (production keys are hex-encoded 32-byte
+  // random values) *before* it ever looks the key up in active_keys_ or
+  // compares hashes. A prior version of this helper generated
+  // "plain-<role>-key", which fails that format check outright — every
+  // job.submit-related test using it got -32010 "Failed to authorize"
+  // regardless of role or params, never reaching the code paths those
+  // tests actually intended to exercise. This version deterministically
+  // maps the role name into a valid 64-char hex string so different roles
+  // still get distinguishable keys.
   std::string insert_key (const std::string &role)
   {
     Database::AccessKey ak;
     ak.id = "key-" + role;
-    ak.key = "plain-" + role + "-key";
+    std::string hex_from_role;
+    for (unsigned char c : role)
+      hex_from_role += "0123456789abcdef"[c % 16];
+    ak.key = hex_from_role + std::string (64 - hex_from_role.size (), '0');
     ak.key_salt = "salt-" + role;
     ak.key_hash = sha256_hex (ak.key, ak.key_salt);
     ak.description = role + " key";
@@ -247,12 +263,9 @@ TEST_F (OrchestratorTest, ReadonlyKey_JobSubmit_Forbidden)
   ASSERT_TRUE (wait_gateway (1));
   std::lock_guard<std::mutex> lk (mtx_);
   EXPECT_NE (gateway_events_[0].outbound.message.find ("-32011"),
-             std::string::npos);
+             std::string::npos)
+    << "actual message: " << gateway_events_[0].outbound.message;
 }
-
-// ---------------------------------------------------------------------------
-// Authentication: readonly key calling job.status → permitted
-// ---------------------------------------------------------------------------
 
 TEST_F (OrchestratorTest, ReadonlyKey_JobStatus_Permitted)
 {
@@ -289,7 +302,18 @@ TEST_F (OrchestratorTest, JobSubmit_ValidKey_RepliesAndForwardsToMaster)
                 + key + R"(","params":{"goal":"summarise a document"}})");
 
   ASSERT_TRUE (wait_gateway (1));
-  ASSERT_TRUE (wait_master (1));
+
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    std::cerr << "[diag] gateway reply after job.submit: "
+              << gateway_events_[0].outbound.message << std::endl;
+    std::cerr << "[diag] master_events_.size() at this point: "
+              << master_events_.size () << std::endl;
+  }
+
+  ASSERT_TRUE (wait_master (1))
+    << "Master never received JobSubmit — see [diag] gateway reply above "
+       "for what job.submit actually replied with.";
 
   {
     std::lock_guard<std::mutex> lk (mtx_);
@@ -326,7 +350,8 @@ TEST_F (OrchestratorTest, JobSubmit_MissingGoal_InvalidParams)
   ASSERT_TRUE (wait_gateway (1));
   std::lock_guard<std::mutex> lk (mtx_);
   EXPECT_NE (gateway_events_[0].outbound.message.find ("-32602"),
-             std::string::npos);
+             std::string::npos)
+    << "actual message: " << gateway_events_[0].outbound.message;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +421,8 @@ TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
 
   // Rebuild registry and orchestrator so the new agent is loaded.
   orch_->stop ();
-  registry_ = std::make_unique<Registry> (*db_);
+  registry_ = std::make_unique<Registry> ();
+  registry_->init (*db_);
   orch_ = std::make_unique<Orchestrator> (
     *db_, *llm_, *registry_, dispatcher_, *forge_, config_, *cred_vault_,
     [this] (MasterEvent ev)
@@ -447,3 +473,4 @@ TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
 
   EXPECT_TRUE (done) << "job did not reach 'done' phase";
 }
+

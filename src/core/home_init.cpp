@@ -39,6 +39,8 @@ description = "General-purpose task planning adviser"
 author      = "agentos-core"
 source_url  = ""
 sha256      = ""
+domains     = []
+priority    = 0
 
 [llm]
 required_context_length = 16000

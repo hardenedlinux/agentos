@@ -30,6 +30,8 @@
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
 #include <thread>
 
 namespace agentos
@@ -443,79 +445,71 @@ namespace agentos
   std::string Master::select_adviser (const std::string &job_id,
                                       const std::string &goal)
   {
-    const auto advisers = registry_.all_advisers ();
-    if (advisers.empty ())
+    // Step 1: tokenize goal (lowercase alpha‑numeric tokens)
+    std::vector<std::string> tokens;
     {
-      spdlog::error ("[master] no advisers registered");
-      return "";
+      std::string word;
+      for (char c : goal)
+        {
+          if (std::isalnum (static_cast<unsigned char> (c)))
+            word += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+          else if (!word.empty ())
+            {
+              tokens.push_back (word);
+              word.clear ();
+            }
+        }
+      if (!word.empty ())
+        tokens.push_back (word);
     }
 
-    // For ordinary job planning, always use the 'planning' adviser (ADR-002).
-    // code-writer and code-reviewer are Forge-internal and must never be
-    // selected here. Fall back to LLM selection only when no 'planning'
-    // adviser is registered (custom deployments).
-    for (const auto &a : advisers)
-    {
-      if (a.id.value () == "planning")
+    std::vector<RegisteredAdviser> candidates
+      = registry_.find_advisers_by_domain (tokens);
+
+    spdlog::info ("[master] job {} domain candidates: {}", job_id,
+                  candidates.size ());
+
+    if (candidates.empty ())
       {
-        spdlog::info ("[master] job {} → planning adviser (direct)", job_id);
+        // Fallback to built-in planning — but only if it actually exists in
+        // the Registry. ADR-033 assumes 'planning' is always seeded
+        // (ADR-018 seed_if_absent), but that assumption doesn't hold in a
+        // deployment/test with an empty Registry. Blindly returning the
+        // literal "planning" here would make handle_adviser_selected treat
+        // selection as successful (it only checks for an empty string) even
+        // though no such adviser is registered, silently skipping the
+        // job_failed path this exact scenario is supposed to take.
+        const auto all = registry_.all_advisers ();
+        const bool planning_exists
+          = std::any_of (all.begin (), all.end (),
+                          [] (const RegisteredAdviser &a)
+                          { return a.id.value () == "planning"; });
+
+        if (!planning_exists)
+          {
+            spdlog::error ("[master] job {} no domain match and no "
+                           "'planning' adviser registered",
+                           job_id);
+            return "";
+          }
+
+        spdlog::info ("[master] job {} no domain match, selecting 'planning'", job_id);
         return "planning";
       }
-    }
 
-    spdlog::warn ("[master] no 'planning' adviser found, falling back to LLM "
-                  "selection for job {}",
-                  job_id);
+    if (candidates.size () == 1)
+      return candidates[0].id.value ();
 
-    if (advisers.size () == 1)
-      return advisers.front ().id.value ();
+    // Step 2 — bounded LLM disambiguation
+    std::string llm_choice = llm_disambiguate_adviser (goal, candidates);
+    if (!llm_choice.empty ())
+      return llm_choice;
 
-    LlmRequest req;
-    req.system_prompt
-      = "You are the Master of an agent orchestration system. "
-        "Given a task goal and a list of available advisers, select the most "
-        "appropriate adviser for planning. "
-        "Respond with a JSON object containing only 'adviser_id'. "
-        "Available advisers: "
-        + build_adviser_context ();
-    req.user_prompt = goal;
-    req.max_tokens = 256;
-
-    auto result = llm_.complete (req);
-    if (!result.ok)
-    {
-      spdlog::error ("[master] LLM adviser selection failed for job {}: {}",
-                     job_id, result.error);
-      return advisers.front ().id.value ();
-    }
-
-    // Strip markdown fence if LLM wrapped response in ```json...```
-    std::string llm_content = result.value.content;
-    if (llm_content.size () >= 3 && llm_content.substr (0, 3) == "```")
-    {
-      auto first_nl = llm_content.find ('\n');
-      if (first_nl != std::string::npos)
-        llm_content = llm_content.substr (first_nl + 1);
-      if (llm_content.size () >= 3
-          && llm_content.substr (llm_content.size () - 3) == "```")
-        llm_content.erase (llm_content.size () - 3);
-      while (!llm_content.empty ()
-             && (llm_content.back () == '\n' || llm_content.back () == '\r'
-                 || llm_content.back () == ' '))
-        llm_content.pop_back ();
-    }
-
-    rapidjson::Document doc;
-    if (doc.Parse (llm_content.c_str ()).HasParseError ()
-        || !doc.IsObject () || !doc.HasMember ("adviser_id")
-        || !doc["adviser_id"].IsString ())
-    {
-      spdlog::warn (
-        "[master] unexpected adviser selection response, using first");
-      return advisers.front ().id.value ();
-    }
-
-    return doc["adviser_id"].GetString ();
+    // Step 3 — deterministic fallback (candidates already sorted)
+    spdlog::warn ("[master] job {} LLM disambiguation failed, "
+                   "fallback to {} (priority desc, id asc)",
+                   job_id, candidates[0].id.value ());
+    return candidates[0].id.value ();
   }
 
   std::string Master::review_plan (const std::string &job_id,
@@ -643,6 +637,78 @@ namespace agentos
     }
     w.EndArray ();
     return buf.GetString ();
+  }
+
+  // ADR-033: bounded LLM disambiguation (Step 2) — returns empty on failure
+  std::string Master::llm_disambiguate_adviser (
+      const std::string &goal, const std::vector<RegisteredAdviser> &candidates) const
+  {
+    // Build user message as per ADR‑033
+    std::string user_msg = "Goal: " + goal + "\n\nCandidates:\n";
+    for (const auto &c : candidates)
+    {
+      user_msg += "- " + c.id.value () + ": ";
+      if (!c.name.empty ())
+        user_msg += c.name;
+      if (!c.domains.empty ())
+        {
+          user_msg += " (domains: ";
+          for (size_t i = 0; i < c.domains.size (); ++i)
+            {
+              if (i)
+                user_msg += ", ";
+              user_msg += c.domains[i];
+            }
+          user_msg += ")";
+        }
+      user_msg += "\n";
+    }
+
+    LlmRequest req;
+    req.system_prompt
+      = "You select exactly one adviser id from a candidate list.\n"
+        "Respond with only a JSON object: {\"selected\": \"<adviser_id>\"}.\n"
+        "No explanation, no markdown, no other text.";
+    req.user_prompt = user_msg;
+    req.max_tokens = 30;
+
+    auto result = llm_fn_ ? llm_fn_(req) : llm_.complete (req);
+    if (!result.ok)
+      return {};
+
+    // Strip markdown fence if present
+    std::string content = result.value.content;
+    if (content.size () >= 3 && content.substr (0, 3) == "```")
+      {
+        auto first_nl = content.find ('\n');
+        if (first_nl != std::string::npos)
+          content = content.substr (first_nl + 1);
+        if (content.size () >= 3
+            && content.substr (content.size () - 3) == "```")
+          content.erase (content.size () - 3);
+        while (!content.empty ()
+               && (content.back () == '\n' || content.back () == '\r'
+                   || content.back () == ' '))
+          content.pop_back ();
+      }
+
+    rapidjson::Document doc;
+    if (doc.Parse (content.c_str ()).HasParseError ()
+        || !doc.IsObject ()
+        || !doc.HasMember ("selected")
+        || !doc["selected"].IsString ())
+      return {};
+
+    const std::string sel = doc["selected"].GetString ();
+    for (const auto &c : candidates)
+      if (c.id.value () == sel)
+        return sel;
+
+    // LLM returned an adviser_id not in the candidate set → fallback
+    spdlog::warn ("[master] LLM disambiguation returned '{}' which is not "
+                  "in the candidate set — ignoring",
+                  sel);
+    return {};
   }
 
 } // namespace agentos

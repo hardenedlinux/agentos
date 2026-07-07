@@ -129,7 +129,8 @@ TEST_F (RegistryTest, RegisterAndFindExecutor)
   create_test_db (db_path_, inserts);
   Database &db = open_db ();
 
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
 
   auto ex = reg.find_worker_for_command ("web.search");
   ASSERT_TRUE (ex.has_value ());
@@ -140,7 +141,8 @@ TEST_F (RegistryTest, UnknownCommandReturnsNullopt)
 {
   create_test_db (db_path_, {});
   Database &db = open_db ();
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
   EXPECT_FALSE (reg.find_worker_for_command ("nonexistent.cmd").has_value ());
 }
 
@@ -157,19 +159,23 @@ TEST_F (RegistryTest, RegisterAndFindAgent)
   create_test_db (db_path_, inserts);
   Database &db = open_db ();
 
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
 
-  auto ag = reg.find_adviser ("research");
-  ASSERT_TRUE (ag.has_value ());
-  EXPECT_EQ (ag->id, "ag-1");
+  auto ag_vec = reg.find_advisers_by_domain ({"research"});
+  ASSERT_FALSE (ag_vec.empty ());
+  const auto& ag = ag_vec[0];
+  EXPECT_EQ (ag.id, "ag-1");
 }
 
 TEST_F (RegistryTest, UnknownDomainReturnsNullopt)
 {
   create_test_db (db_path_, {});
   Database &db = open_db ();
-  Registry reg (db);
-  EXPECT_FALSE (reg.find_adviser ("coding").has_value ());
+  Registry reg;
+  reg.init (db);
+  auto ag_vec = reg.find_advisers_by_domain ({"coding"});
+  EXPECT_TRUE (ag_vec.empty ());
 }
 
 TEST_F (RegistryTest, RemoveExecutorUnregistersCommands)
@@ -185,7 +191,8 @@ TEST_F (RegistryTest, RemoveExecutorUnregistersCommands)
   create_test_db (db_path_, inserts);
   Database &db = open_db ();
 
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
 
   ASSERT_TRUE (reg.find_worker_for_command ("web.search").has_value ());
 
@@ -214,7 +221,8 @@ TEST_F (RegistryTest, AllCommandSchemas)
   create_test_db (db_path_, inserts);
   Database &db = open_db ();
 
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
 
   auto schemas = reg.all_command_schemas ();
   EXPECT_EQ (schemas.size (), 4u);
@@ -239,7 +247,8 @@ TEST_F (RegistryTest, Counts)
   create_test_db (db_path_, inserts);
   Database &db = open_db ();
 
-  Registry reg (db);
+  Registry reg;
+  reg.init (db);
   EXPECT_EQ (reg.adviser_count (), 1u);
   EXPECT_EQ (reg.worker_count (), 1u);
 }

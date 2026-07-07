@@ -104,6 +104,8 @@ protected:
   void SetUp () override
   {
     ASSERT_TRUE (db.open ());
+    registry.init(db);
+
     auto r = cred_vault.start ();
     ASSERT_TRUE (r.has_value ()) << r.error ();
   }
@@ -118,7 +120,7 @@ protected:
   Config config{};
   Config::Vault vault_cfg{};
   LlmProxy llm{1, 1};
-  Registry registry{db};
+  Registry registry;
   Dispatcher dispatcher{};
   forge::ForgeCoordinator forge{db, llm, registry, [] (forge::ForgeResult) {}};
   CredVault cred_vault{db, vault_cfg};

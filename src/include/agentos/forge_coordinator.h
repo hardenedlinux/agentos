@@ -181,6 +181,11 @@ namespace agentos::forge
     // ---------------------------------------------------------------------------
     void persist (const ForgePipelineJob &job);
 
+    /// Write verbose content to ~/.agentos/forge/<job_id>/forge.log (append).
+    /// Main daemon log only prints the file path at warn level.
+    void write_forge_log (const ForgePipelineJob &job, const std::string &label,
+                          const std::string &content);
+
     // ---------------------------------------------------------------------------
     // Members
     // ---------------------------------------------------------------------------

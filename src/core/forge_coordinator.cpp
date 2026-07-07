@@ -290,9 +290,11 @@ namespace agentos::forge
         return;
       }
 
-      // Retry: feedback is already in job.feedback from the failed step.
-      spdlog::info ("[forge_coordinator] job {} retrying with feedback: {}",
-                    job.id, job.feedback);
+      // Retry: verbose feedback written to forge.log.
+      write_forge_log (job, "retry_feedback", job.feedback);
+      spdlog::warn ("[forge_coordinator] job {} retrying (attempt {}/{}), "
+                    "details: ~/.agentos/forge/{}/forge.log",
+                    job.id, job.attempt, job.max_attempts, job.id);
     }
   }
 
@@ -341,9 +343,11 @@ namespace agentos::forge
     rapidjson::Document doc;
     if (doc.Parse (output.c_str ()).HasParseError ())
     {
-      spdlog::error ("[forge_coordinator] code_writer returned invalid JSON: {}",
-                     output.substr (0, 200));
-      job.feedback = "code_writer returned invalid JSON";
+      write_forge_log (job, "code_writer_invalid_json", output);
+      spdlog::warn ("[forge_coordinator] job {} code_writer returned invalid "
+                    "JSON, details: ~/.agentos/forge/{}/forge.log",
+                    job.id, job.id);
+      job.feedback = "code_writer returned invalid JSON, see forge.log";
       return false;
     }
 
@@ -511,8 +515,11 @@ namespace agentos::forge
     rapidjson::Document doc;
     if (doc.Parse (output.c_str ()).HasParseError ())
     {
-      spdlog::error ("[forge_coordinator] code_reviewer returned invalid JSON");
-      job.feedback = "code_reviewer returned invalid JSON";
+      write_forge_log (job, "code_reviewer_invalid_json", output);
+      spdlog::warn ("[forge_coordinator] job {} code_reviewer returned invalid "
+                    "JSON, details: ~/.agentos/forge/{}/forge.log",
+                    job.id, job.id);
+      job.feedback = "code_reviewer returned invalid JSON, see forge.log";
       job.reviewer_verdict_json = output;
       return false;
     }
@@ -544,16 +551,26 @@ namespace agentos::forge
 
     if (status == "accept")
     {
-      spdlog::info ("[forge_coordinator] reviewer accepted job {}: {}", job.id,
-                    reason);
-      job.feedback = ""; // clear on accept
+      spdlog::info ("[forge_coordinator] reviewer accepted job {}", job.id);
+      job.feedback = "";
       return true;
     }
     else
     {
-      spdlog::info ("[forge_coordinator] reviewer rejected job {}: {}", job.id,
-                    reason);
-      job.feedback = reason;
+      if (status != "reject")
+      {
+        write_forge_log (job, "reviewer_unknown_status", output);
+        spdlog::warn ("[forge_coordinator] job {} reviewer returned unknown "
+                      "status '{}', treating as reject. "
+                      "Details: ~/.agentos/forge/{}/forge.log",
+                      job.id, status, job.id);
+      }
+      else
+      {
+        spdlog::info ("[forge_coordinator] reviewer rejected job {}", job.id);
+      }
+      write_forge_log (job, "reviewer_rejected", output);
+      job.feedback = reason.empty () ? ("reviewer status: " + status) : reason;
       return false;
     }
   }
@@ -619,6 +636,35 @@ namespace agentos::forge
   }
 
   // ---------------------------------------------------------------------------
+  // Forge log — verbose content goes to ~/.agentos/forge/<job_id>/forge.log.
+  // Main daemon log only prints the file path at warn level so the user
+  // sees the yellow line and can inspect details on their own.
+  // ---------------------------------------------------------------------------
+
+  void ForgeCoordinator::write_forge_log (const ForgePipelineJob &job,
+                                          const std::string &label,
+                                          const std::string &content)
+  {
+    fs::path forge_dir = agentos_home () / "forge" / job.id;
+    std::error_code ec;
+    fs::create_directories (forge_dir, ec);
+    if (ec)
+      return;
+
+    fs::path log_path = forge_dir / "forge.log";
+    std::ofstream out (log_path, std::ios::app);
+    if (!out)
+      return;
+
+    auto epoch = std::chrono::duration_cast<std::chrono::seconds> (
+                   std::chrono::system_clock::now ().time_since_epoch ())
+                   .count ();
+    out << "[" << epoch << "] attempt=" << job.attempt << " " << label
+        << ":\n"
+        << content << "\n\n";
+  }
+
+  // ---------------------------------------------------------------------------
   // Python syntax pre-check
   // Runs ast.parse on the impl file to catch SyntaxError before invoking
   // the Reviewer LLM.  Returns true if syntax is valid (or file is not .py).
@@ -653,11 +699,13 @@ namespace agentos::forge
 
     if (rc != 0)
     {
-      // Trim trailing newline for cleaner feedback.
       while (!output.empty () && output.back () == '\n')
         output.pop_back ();
-      spdlog::warn ("[forge_coordinator] syntax pre-check failed: {}", output);
-      job.feedback = "SyntaxError (pre-check): " + output;
+      write_forge_log (job, "syntax_precheck_failed", output);
+      job.feedback = "SyntaxError (pre-check), see forge.log";
+      spdlog::warn ("[forge_coordinator] job {} syntax pre-check failed, "
+                    "details: ~/.agentos/forge/{}/forge.log",
+                    job.id, job.id);
       return false;
     }
 

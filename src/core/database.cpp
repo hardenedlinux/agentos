@@ -388,6 +388,50 @@ namespace agentos
                         "INTEGER NOT NULL DEFAULT 0");
     }
 
+    // ADR-031 §3 (worker/adviser registration): add description column to
+    // the agents table. Required and populated for Advisers at
+    // adviser.register time (ADR-031 §2 addition); optional for Workers
+    // (per-capability capabilities.description already serves that role,
+    // ADR-031 §3 original — this column stays empty for worker rows unless
+    // a future need arises).
+    {
+      auto maybe_add_column = [this] (const char *ddl)
+      {
+        char *err = nullptr;
+        sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
+        if (err)
+        {
+          spdlog::debug ("[database] agents migration '{}': {}", ddl, err);
+          sqlite3_free (err);
+        }
+      };
+      maybe_add_column ("ALTER TABLE agents ADD COLUMN description TEXT");
+    }
+
+    // Suite installation tracking (ADR-030, worker.register/adviser.register/
+    // suite install/show/remove — this round's implementation). Tracks which
+    // agent ids a given installed suite owns, so `suite show`/`suite remove`
+    // can enumerate and act on exactly that suite's components without
+    // guessing from naming conventions.
+    static const char *schema_installed_suites = R"(
+      CREATE TABLE IF NOT EXISTS installed_suites (
+          suite_id     TEXT NOT NULL,
+          version      TEXT NOT NULL,
+          install_path TEXT NOT NULL,
+          enabled      INTEGER NOT NULL DEFAULT 1,
+          installed_at INTEGER NOT NULL,
+          PRIMARY KEY (suite_id)
+      );
+      CREATE TABLE IF NOT EXISTS suite_components (
+          suite_id      TEXT NOT NULL REFERENCES installed_suites(suite_id),
+          component_type TEXT NOT NULL,   -- 'worker' | 'adviser'
+          component_id   TEXT NOT NULL,   -- agents.id
+          PRIMARY KEY (suite_id, component_id)
+      );
+    )";
+    if (!exec_ddl (schema_installed_suites))
+      return false;
+
     spdlog::info ("[database] opened {}", db_path_);
     return true;
   }
@@ -1891,7 +1935,7 @@ namespace agentos
       return rows;
 
     Stmt stmt (prepare (R"(
-      SELECT id, role, binary_path, manifest, approved_at
+      SELECT id, role, binary_path, manifest, approved_at, description
       FROM agents WHERE enabled = 1
   )"));
     if (!stmt.s)
@@ -1905,6 +1949,7 @@ namespace agentos
         row.binary_path = column_text_or_empty (stmt, 2);
         row.manifest = column_text_or_empty (stmt, 3);
         row.approved_at = sqlite3_column_int64 (stmt, 4);
+        row.description = column_text_or_empty (stmt, 5);
         rows.push_back (std::move (row));
       }
     return rows;
@@ -1912,14 +1957,17 @@ namespace agentos
 
   void Database::insert_agent (const std::string &id, const std::string &role,
                                const std::string &binary_path,
-                               const std::string &manifest)
+                               const std::string &manifest,
+                               const std::string &description,
+                               const std::string &approved_by)
   {
     if (!db_)
       return;
     Stmt stmt (prepare (R"(
       INSERT OR REPLACE INTO agents
-          (id, role, binary_path, manifest, approved_by, approved_at, enabled)
-      VALUES (?, ?, ?, ?, 'forge', ?, 1)
+          (id, role, binary_path, manifest, description, approved_by,
+           approved_at, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
   )"));
     if (!stmt.s)
       return;
@@ -1928,10 +1976,168 @@ namespace agentos
     sqlite3_bind_text (stmt, 2, role.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, binary_path.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 4, manifest.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 5, now_unix ());
+    sqlite3_bind_text (stmt, 5, description.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 6, approved_by.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 7, now_unix ());
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_agent: {}", sqlite3_errmsg (db_));
+  }
+
+  std::optional<Database::AgentRow>
+  Database::load_agent (const std::string &id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT id, role, binary_path, manifest, approved_at, description
+      FROM agents WHERE id = ?
+  )"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+
+    AgentRow row;
+    row.id = column_text_or_empty (stmt, 0);
+    row.role = column_text_or_empty (stmt, 1);
+    row.binary_path = column_text_or_empty (stmt, 2);
+    row.manifest = column_text_or_empty (stmt, 3);
+    row.approved_at = sqlite3_column_int64 (stmt, 4);
+    row.description = column_text_or_empty (stmt, 5);
+    return row;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Suite installation tracking (ADR-030)
+  // ---------------------------------------------------------------------------
+
+  void Database::insert_installed_suite (const std::string &suite_id,
+                                         const std::string &version,
+                                         const std::string &install_path)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO installed_suites
+          (suite_id, version, install_path, enabled, installed_at)
+      VALUES (?, ?, ?, 1, ?)
+  )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, version.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, install_path.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 4, now_unix ());
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_installed_suite: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::insert_suite_component (const std::string &suite_id,
+                                         const std::string &component_type,
+                                         const std::string &component_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO suite_components
+          (suite_id, component_type, component_id)
+      VALUES (?, ?, ?)
+  )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, component_type.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, component_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_suite_component: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::vector<Database::InstalledSuiteRow> Database::load_installed_suites ()
+  {
+    std::vector<InstalledSuiteRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, version, install_path, enabled, installed_at
+      FROM installed_suites
+  )"));
+    if (!stmt.s)
+      return rows;
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      InstalledSuiteRow row;
+      row.suite_id = column_text_or_empty (stmt, 0);
+      row.version = column_text_or_empty (stmt, 1);
+      row.install_path = column_text_or_empty (stmt, 2);
+      row.enabled = sqlite3_column_int (stmt, 3) != 0;
+      row.installed_at = sqlite3_column_int64 (stmt, 4);
+      rows.push_back (std::move (row));
+    }
+    return rows;
+  }
+
+  std::optional<Database::InstalledSuiteRow>
+  Database::load_installed_suite (const std::string &suite_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, version, install_path, enabled, installed_at
+      FROM installed_suites WHERE suite_id = ?
+  )"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+    InstalledSuiteRow row;
+    row.suite_id = column_text_or_empty (stmt, 0);
+    row.version = column_text_or_empty (stmt, 1);
+    row.install_path = column_text_or_empty (stmt, 2);
+    row.enabled = sqlite3_column_int (stmt, 3) != 0;
+    row.installed_at = sqlite3_column_int64 (stmt, 4);
+    return row;
+  }
+
+  std::vector<Database::SuiteComponentRow>
+  Database::load_suite_components (const std::string &suite_id)
+  {
+    std::vector<SuiteComponentRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, component_type, component_id
+      FROM suite_components WHERE suite_id = ?
+  )"));
+    if (!stmt.s)
+      return rows;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      SuiteComponentRow row;
+      row.suite_id = column_text_or_empty (stmt, 0);
+      row.component_type = column_text_or_empty (stmt, 1);
+      row.component_id = column_text_or_empty (stmt, 2);
+      rows.push_back (std::move (row));
+    }
+    return rows;
+  }
+
+  void Database::set_suite_enabled (const std::string &suite_id, bool enabled)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE installed_suites SET enabled = ? WHERE suite_id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, enabled ? 1 : 0);
+    sqlite3_bind_text (stmt, 2, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_suite_enabled: {}", sqlite3_errmsg (db_));
   }
 
   void Database::update_step_tokens (const std::string &step_id,

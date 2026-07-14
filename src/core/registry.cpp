@@ -11,6 +11,7 @@
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
+#include <toml.hpp>
 #include <unordered_map>
 #include <vector>
 
@@ -72,25 +73,68 @@ namespace agentos
   }
 
   // -----------------------------------------------------------------------
-  // Helper: parse a manifest JSON string into a RegisteredAdviser or
-  // RegisteredExecutor
+  // Helper: parse an Adviser's manifest.toml (ADR-018) into a
+  // RegisteredAdviser. Advisers ship TOML on disk — this is a distinct
+  // parser from parse_worker_manifest_json below, not a shared JSON path.
   // -----------------------------------------------------------------------
-  static bool parse_manifest (const std::string &manifest_json,
-                              const std::string &agent_id,
-                              const std::string &role,
-                              const std::string &binary_path,
-                              RegisteredAdviser &out_adviser,
-                              RegisteredExecutor &out_worker)
+  static bool parse_adviser_manifest_toml (const std::string &manifest_toml,
+                                           const std::string &agent_id,
+                                           const std::string &binary_path,
+                                           RegisteredAdviser &out_adviser)
+  {
+    toml::table tbl;
+    try
+    {
+      tbl = toml::parse (manifest_toml);
+    }
+    catch (const toml::parse_error &e)
+    {
+      spdlog::error ("[registry] invalid manifest.toml for adviser '{}': {}",
+                     agent_id, e.what ());
+      return false;
+    }
+
+    auto meta = tbl["meta"];
+    std::string name = meta["id"].value_or (agent_id);
+    std::string version = meta["version"].value_or (std::string ("1.0"));
+
+    std::vector<std::string> domains;
+    if (auto domains_arr = meta["domains"].as_array ())
+    {
+      for (auto &&d : *domains_arr)
+        if (auto s = d.value<std::string> ())
+          domains.push_back (*s);
+    }
+
+    const int priority = meta["priority"].value_or (0);
+
+    out_adviser.id = ClientId (agent_id);
+    out_adviser.name = std::move (name);
+    out_adviser.version = std::move (version);
+    out_adviser.skill_path = binary_path;
+    out_adviser.domains = std::move (domains);
+    out_adviser.priority = priority;
+    return true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: parse a Worker's manifest.json (ADR-031) into a
+  // RegisteredExecutor. Workers ship JSON on disk — unchanged from before.
+  // -----------------------------------------------------------------------
+  static bool parse_worker_manifest_json (const std::string &manifest_json,
+                                          const std::string &agent_id,
+                                          const std::string &binary_path,
+                                          RegisteredExecutor &out_worker)
   {
     rapidjson::Document doc;
     doc.Parse (manifest_json.c_str ());
     if (doc.HasParseError () || !doc.IsObject ())
     {
-      spdlog::error ("[registry] invalid manifest for agent '{}'", agent_id);
+      spdlog::error ("[registry] invalid manifest.json for worker '{}'",
+                     agent_id);
       return false;
     }
 
-    // Common fields
     std::string name = agent_id;
     std::string version = "1.0";
     if (doc.HasMember ("name") && doc["name"].IsString ())
@@ -98,31 +142,6 @@ namespace agentos
     if (doc.HasMember ("version") && doc["version"].IsString ())
       version = doc["version"].GetString ();
 
-    std::vector<std::string> domains;
-    if (doc.HasMember ("domains") && doc["domains"].IsArray ())
-    {
-      for (const auto &d : doc["domains"].GetArray ())
-        if (d.IsString ())
-          domains.push_back (d.GetString ());
-    }
-
-    // ADR-033: optional priority (default 0)
-    int priority = 0;
-    if (doc.HasMember ("priority") && doc["priority"].IsInt ())
-      priority = doc["priority"].GetInt ();
-
-    if (role == "adviser")
-    {
-      out_adviser.id = ClientId (agent_id);
-      out_adviser.name = name;
-      out_adviser.version = version;
-      out_adviser.skill_path = binary_path;
-      out_adviser.domains = std::move (domains);
-      out_adviser.priority = priority;
-      return true;
-    }
-
-    // role == "worker"
     out_worker.id = ClientId (agent_id);
     out_worker.name = name;
     out_worker.version = version;
@@ -170,6 +189,25 @@ namespace agentos
   }
 
   // -----------------------------------------------------------------------
+  // Dispatches to the correct format-specific parser by role. Kept as the
+  // single call site Registry::init() uses, so callers don't need to know
+  // that Advisers and Workers are stored in two different manifest formats.
+  // -----------------------------------------------------------------------
+  static bool parse_manifest (const std::string &manifest_text,
+                              const std::string &agent_id,
+                              const std::string &role,
+                              const std::string &binary_path,
+                              RegisteredAdviser &out_adviser,
+                              RegisteredExecutor &out_worker)
+  {
+    if (role == "adviser")
+      return parse_adviser_manifest_toml (manifest_text, agent_id, binary_path,
+                                          out_adviser);
+    return parse_worker_manifest_json (manifest_text, agent_id, binary_path,
+                                       out_worker);
+  }
+
+  // -----------------------------------------------------------------------
   // Registry implementation
   // -----------------------------------------------------------------------
 
@@ -187,62 +225,64 @@ namespace agentos
     return true;
   }
 
-  std::vector<RegisteredAdviser>
-  Registry::find_advisers_by_domain (const std::vector<std::string> &goal_tokens) const
+  std::vector<RegisteredAdviser> Registry::find_advisers_by_domain (
+    const std::vector<std::string> &goal_tokens) const
   {
     std::vector<RegisteredAdviser> result;
     if (!impl_)
       return result;
 
     for (const auto &[id, adv] : impl_->advisers)
+    {
+      bool match = false;
+      for (const auto &domain : adv.domains)
       {
-        bool match = false;
-        for (const auto &domain : adv.domains)
+        // Split the domain tag on hyphens and compare each sub‑token
+        // individually against the goal tokens (case‑insensitive).
+        std::string sub;
+        for (char c : domain)
+        {
+          if (c == '-')
           {
-            // Split the domain tag on hyphens and compare each sub‑token
-            // individually against the goal tokens (case‑insensitive).
-            std::string sub;
-            for (char c : domain)
-              {
-                if (c == '-')
-                  {
-                    if (!sub.empty ())
-                      {
-                        for (const auto &token : goal_tokens)
-                          if (iequals (sub, token))
-                            {
-                              match = true;
-                              break;
-                            }
-                        sub.clear ();
-                        if (match)
-                          break;
-                      }
-                  }
-                else
-                  sub += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
-              }
-            if (match)
-              break;
             if (!sub.empty ())
-              {
-                for (const auto &token : goal_tokens)
-                  if (iequals (sub, token))
-                    {
-                      match = true;
-                      break;
-                    }
-              }
-            if (match)
-              break;
+            {
+              for (const auto &token : goal_tokens)
+                if (iequals (sub, token))
+                {
+                  match = true;
+                  break;
+                }
+              sub.clear ();
+              if (match)
+                break;
+            }
           }
+          else
+            sub += static_cast<char> (
+              std::tolower (static_cast<unsigned char> (c)));
+        }
         if (match)
-          result.push_back (adv);
+          break;
+        if (!sub.empty ())
+        {
+          for (const auto &token : goal_tokens)
+            if (iequals (sub, token))
+            {
+              match = true;
+              break;
+            }
+        }
+        if (match)
+          break;
       }
+      if (match)
+        result.push_back (adv);
+    }
 
     // Sort by priority desc, then id asc
     std::sort (result.begin (), result.end (),
-               [] (const RegisteredAdviser &a, const RegisteredAdviser &b) {
+               [] (const RegisteredAdviser &a, const RegisteredAdviser &b)
+               {
                  if (a.priority != b.priority)
                    return a.priority > b.priority;
                  return a.id.value () < b.id.value ();
@@ -284,8 +324,8 @@ namespace agentos
     // table. This covers agents whose manifest does not embed a
     // "capabilities" array (e.g. registered directly via insert_capability).
     // Entries here take precedence over manifest-derived ones for the same
-    // method, but in practice the two are kept in sync (finalize_worker_promotion
-    // writes both).
+    // method, but in practice the two are kept in sync
+    // (finalize_worker_promotion writes both).
     for (const auto &cap : db.load_capabilities ())
     {
       CommandSchema schema;
@@ -341,7 +381,6 @@ namespace agentos
   {
     spdlog::warn ("[registry] remove is deprecated (static catalog)");
   }
-
 
   std::optional<RegisteredExecutor>
   Registry::find_worker_for_command (const std::string &command) const
@@ -402,11 +441,11 @@ namespace agentos
     if (method.empty () || method.size () > 64)
       return false;
     const auto dot = method.find ('.');
-    if (dot == std::string::npos || dot != method.rfind ('.')
-        || dot == 0 || dot + 1 == method.size ())
+    if (dot == std::string::npos || dot != method.rfind ('.') || dot == 0
+        || dot + 1 == method.size ())
       return false;
-    auto valid_segment = [] (const std::string &s, size_t start,
-                              size_t len) -> bool
+    auto valid_segment
+      = [] (const std::string &s, size_t start, size_t len) -> bool
     {
       if (len == 0 || !(s[start] >= 'a' && s[start] <= 'z'))
         return false;
@@ -539,27 +578,27 @@ namespace agentos
           continue;
         cmd.description
           = cap.HasMember ("description") && cap["description"].IsString ()
-          ? cap["description"].GetString ()
-          : "";
+              ? cap["description"].GetString ()
+              : "";
         executor.commands.push_back (std::move (cmd));
       }
     }
 
     for (const auto &cmd : executor.commands)
+    {
+      // ADR-031: only register methods that passed format validation above.
+      // This prevents non-conforming names from entering the in-memory
+      // Registry even when DB insert was already rejected.
+      if (!is_valid_method (cmd.name))
       {
-        // ADR-031: only register methods that passed format validation above.
-        // This prevents non-conforming names from entering the in-memory
-        // Registry even when DB insert was already rejected.
-        if (!is_valid_method (cmd.name))
-        {
-          spdlog::warn ("[registry] skipping in-memory registration of "
-                        "invalid method '{}' for worker '{}'",
-                        cmd.name, job.id);
-          continue;
-        }
-        impl_->command_to_worker[cmd.name] = job.id;
-        impl_->command_schemas[cmd.name] = cmd;
+        spdlog::warn ("[registry] skipping in-memory registration of "
+                      "invalid method '{}' for worker '{}'",
+                      cmd.name, job.id);
+        continue;
       }
+      impl_->command_to_worker[cmd.name] = job.id;
+      impl_->command_schemas[cmd.name] = cmd;
+    }
 
     impl_->workers[job.id] = std::move (executor);
 

@@ -145,6 +145,8 @@ namespace agentos
       std::string binary_path;
       std::string manifest;
       int64_t approved_at = 0;
+      std::string description; // ADR-031 §3 addition: required for Advisers,
+                               // optional/empty for Workers
     };
 
     struct CapabilityRow
@@ -227,9 +229,12 @@ namespace agentos
 
     void ensure_agent_tables ();
     std::vector<AgentRow> load_enabled_agents ();
+    std::optional<AgentRow> load_agent (const std::string &id);
     void insert_agent (const std::string &id, const std::string &role,
                        const std::string &binary_path,
-                       const std::string &manifest);
+                       const std::string &manifest,
+                       const std::string &description = "",
+                       const std::string &approved_by = "forge");
     // Accumulate LLM token usage for a step (additive — safe to call
     // multiple times for Planning + Forge contributions).
     void update_step_tokens (const std::string &step_id,
@@ -395,6 +400,42 @@ namespace agentos
                                     int64_t checked_at);
     void remove_suite_status (const std::string &suite_id);
     std::vector<SuiteStatus> load_all_suite_status ();
+
+    // -- Suite installation tracking (this round: worker.register/
+    //    adviser.register/suite list|show|install|remove) --------------------
+    // Distinct from insert_suite_purchase/upsert_suite_status above (those
+    // are ADR-030's Marketplace entitlement/availability tracking, unrelated
+    // to "is this suite's package actually installed on this daemon and
+    // which agent ids does it own").
+
+    struct InstalledSuiteRow
+    {
+      std::string suite_id;
+      std::string version;
+      std::string install_path;
+      bool enabled = true;
+      int64_t installed_at = 0;
+    };
+
+    struct SuiteComponentRow
+    {
+      std::string suite_id;
+      std::string component_type; // "worker" | "adviser"
+      std::string component_id;   // agents.id
+    };
+
+    void insert_installed_suite (const std::string &suite_id,
+                                 const std::string &version,
+                                 const std::string &install_path);
+    void insert_suite_component (const std::string &suite_id,
+                                 const std::string &component_type,
+                                 const std::string &component_id);
+    std::vector<InstalledSuiteRow> load_installed_suites ();
+    std::optional<InstalledSuiteRow>
+    load_installed_suite (const std::string &suite_id);
+    std::vector<SuiteComponentRow>
+    load_suite_components (const std::string &suite_id);
+    void set_suite_enabled (const std::string &suite_id, bool enabled);
 
     std::optional<std::string> resolve_agent_binary (const std::string &ref,
                                                      const std::string &version

@@ -1,0 +1,35 @@
+[meta]
+id          = "content-marketing"
+version     = "1.0.0"
+description = "Cross-border e-commerce content marketing pipeline: keyword extraction, listing copy generation, and SEO optimization"
+author      = "hardenedvault"
+source_url  = ""     # populated by installer; empty for hand-crafted packages
+sha256      = ""     # populated by installer; empty for hand-crafted packages
+
+# ADR-033 §2 — free-text domain tags this Adviser declares itself competent
+# for. No enum, no daemon-side validation; Master's Step 1 keyword filter
+# does sub-token matching against these (hyphenated tags are split on '-'
+# and matched against goal tokens — see registry.cpp find_advisers_by_domain).
+domains = ["content-marketing", "ecommerce", "product-listing", "seo"]
+
+# ADR-033 §2 — tie-break priority used only in Step 3's deterministic
+# fallback (when Step 2's LLM disambiguation call fails or returns an
+# out-of-set id). Default 0; raise only if you deliberately want this
+# Adviser preferred over another domain Adviser sharing the same tag.
+priority = 0
+
+[llm]
+# Capability requirements — informational, used by the daemon to warn if unmet
+required_context_length = 32000
+preferred_capability    = "balanced"   # code | reasoning | balanced
+
+# Recommended model — the author's suggestion; user may override in config.toml
+recommended_model    = "deepseek-chat"
+recommended_base_url = "https://api.deepseek.com"
+
+# ADR-033 §3 — optional domain-knowledge files injected into the user
+# message alongside the capability list, using the same injection format
+# ADR-030/031 already established for Suite pipeline.md. Paths are relative
+# to this package's directory.
+[skill]
+extra_files = ["knowledge/pipeline.md"]

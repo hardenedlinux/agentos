@@ -174,6 +174,10 @@ namespace agentos
                            const std::string &identity,
                            const std::string &request_id);
 
+    void cmd_adviser_register (const std::string &params_json,
+                               const std::string &identity,
+                               const std::string &request_id);
+
     void cmd_forge_list (const std::string &params_json,
                          const std::string &identity,
                          const std::string &request_id);
@@ -231,6 +235,36 @@ namespace agentos
     void cmd_worker_revoke (const std::string &params_json,
                             const std::string &identity,
                             const std::string &request_id);
+
+    // --- ADR-030: suite.* methods (local package install, no Marketplace
+    //     download this round — "install" registers a locally-unpacked
+    //     Suite directory's bundled Workers/Advisers) ---
+    void cmd_suite_list (const std::string &params_json,
+                         const std::string &identity,
+                         const std::string &request_id);
+    void cmd_suite_show (const std::string &params_json,
+                         const std::string &identity,
+                         const std::string &request_id);
+    void cmd_suite_install (const std::string &params_json,
+                            const std::string &identity,
+                            const std::string &request_id);
+    void cmd_suite_remove (const std::string &params_json,
+                           const std::string &identity,
+                           const std::string &request_id);
+
+    // ---------------------------------------------------------------------------
+    // Shared registration helpers (ADR-031 §1/§2, ADR-018 Skill Package
+    // Format) — used by cmd_worker_register/cmd_adviser_register directly,
+    // and by cmd_suite_install for each bundled component. Returns true and
+    // sets out_id on success; returns false and sets out_error otherwise.
+    // Neither replies to the client — callers own that.
+    // ---------------------------------------------------------------------------
+    bool register_worker_package (const std::filesystem::path &src_dir,
+                                  std::string &out_worker_id,
+                                  std::string &out_error);
+    bool register_adviser_package (const std::filesystem::path &src_dir,
+                                   std::string &out_adviser_id,
+                                   std::string &out_error);
 
     // ---------------------------------------------------------------------------
     // Pipeline execution

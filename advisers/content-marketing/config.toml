@@ -1,0 +1,11 @@
+[llm]
+# Leave blank to inherit from the daemon's global [llm] config
+# (~/.agentos/config.toml). Override here only if this Adviser should use
+# a different provider/model than the daemon default.
+model       = ""                # e.g. "deepseek-chat" to override
+base_url    = ""                # e.g. "https://api.deepseek.com" to override
+api_key_env = ""                # name of the env var holding the API key
+                                 # leave blank to use AGENTOS_LLM_API_KEY
+
+max_tokens  = 4096               # per-request token cap for this Adviser
+timeout_s   = 180                # HTTP timeout

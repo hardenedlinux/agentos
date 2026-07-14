@@ -39,6 +39,10 @@
 #include <csignal>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <toml.hpp>
+
+namespace fs = std::filesystem;
 #include <iostream>
 #include <iterator>
 #include <openssl/evp.h>
@@ -542,8 +546,18 @@ namespace agentos
       cmd_worker_disable (params_json, identity, request_id);
     else if (method == "worker.revoke")
       cmd_worker_revoke (params_json, identity, request_id);
+    else if (method == "suite.list")
+      cmd_suite_list (params_json, identity, request_id);
+    else if (method == "suite.show")
+      cmd_suite_show (params_json, identity, request_id);
+    else if (method == "suite.install")
+      cmd_suite_install (params_json, identity, request_id);
+    else if (method == "suite.remove")
+      cmd_suite_remove (params_json, identity, request_id);
     else if (method == "adviser.list")
       cmd_adviser_list (params_json, identity, request_id);
+    else if (method == "adviser.register")
+      cmd_adviser_register (params_json, identity, request_id);
     else if (method == "forge.list")
       cmd_forge_list (params_json, identity, request_id);
     else if (method == "forge.status")
@@ -1000,7 +1014,7 @@ namespace agentos
       w.Key ("id");
       w.String (a.id.c_str ());
       w.Key ("description");
-      w.String ("");
+      w.String (a.description.c_str ());
       w.Key ("skill_path");
       w.String (a.binary_path.c_str ());
       w.Key ("model");
@@ -1091,6 +1105,149 @@ namespace agentos
   // Command: worker.register
   // ---------------------------------------------------------------------------
 
+  namespace
+  {
+    // ADR-031 §1: namespace.verb, all lowercase, one dot, max 64 chars.
+    bool is_valid_capability_method (const std::string &method)
+    {
+      static const std::regex re ("^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$");
+      return method.size () <= 64 && std::regex_match (method, re);
+    }
+  } // namespace
+
+  bool Orchestrator::register_worker_package (const fs::path &src_dir,
+                                              std::string &out_worker_id,
+                                              std::string &out_error)
+  {
+    const fs::path manifest_path = src_dir / "manifest.json";
+
+    if (!fs::exists (manifest_path))
+    {
+      out_error = "manifest.json not found at " + manifest_path.string ();
+      return false;
+    }
+
+    std::string manifest_raw;
+    {
+      std::ifstream f (manifest_path);
+      if (!f)
+      {
+        out_error = "cannot open " + manifest_path.string ();
+        return false;
+      }
+      manifest_raw.assign (std::istreambuf_iterator<char> (f),
+                           std::istreambuf_iterator<char> ());
+    }
+
+    rapidjson::Document manifest;
+    if (manifest.Parse (manifest_raw.c_str ()).HasParseError ()
+        || !manifest.IsObject () || !manifest.HasMember ("id")
+        || !manifest["id"].IsString () || !manifest.HasMember ("capabilities")
+        || !manifest["capabilities"].IsArray ())
+    {
+      out_error = "manifest.json is not a valid Worker manifest (ADR-031 "
+                  "§2): missing or malformed 'id'/'capabilities'";
+      return false;
+    }
+
+    const std::string worker_id = manifest["id"].GetString ();
+    if (worker_id.empty ())
+    {
+      out_error = "manifest 'id' is empty";
+      return false;
+    }
+
+    for (auto &cap : manifest["capabilities"].GetArray ())
+    {
+      if (!cap.IsObject () || !cap.HasMember ("method")
+          || !cap["method"].IsString ())
+      {
+        out_error = "capability entry missing 'method'";
+        return false;
+      }
+      const std::string method = cap["method"].GetString ();
+      if (!is_valid_capability_method (method))
+      {
+        out_error = "Invalid capability method name: '" + method
+                    + "' does not match required format namespace.verb";
+        return false;
+      }
+      if (!cap.HasMember ("description") || !cap["description"].IsString ()
+          || std::string (cap["description"].GetString ()).empty ())
+      {
+        out_error = "capability '" + method + "' has no description";
+        return false;
+      }
+    }
+
+    // Two-file (worker.py + worker_impl.py, the Code Writer/Reviewer
+    // convention) and single-file (worker.py alone — hand-authored/
+    // third-party) packages are both accepted; the daemon does not require
+    // either shape, only that *something* runnable exists.
+    fs::path entrypoint;
+    for (const char *candidate :
+         {"worker.py", "worker.scm", worker_id.c_str ()})
+    {
+      if (fs::exists (src_dir / candidate))
+      {
+        entrypoint = src_dir / candidate;
+        break;
+      }
+    }
+    if (entrypoint.empty ())
+    {
+      out_error = "no entrypoint found in " + src_dir.string ()
+                  + " (expected worker.py, worker.scm, or a native binary "
+                    "named after the manifest id)";
+      return false;
+    }
+
+    const fs::path dest_dir = agentos_home () / "workers" / worker_id;
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+    fs::copy (
+      src_dir, dest_dir,
+      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+      out_error = "cannot copy " + src_dir.string () + " to "
+                  + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+
+    const fs::path installed_entrypoint = dest_dir / entrypoint.filename ();
+
+    db_.insert_agent (worker_id, "worker", installed_entrypoint.string (),
+                      manifest_raw, /*description=*/"", "operator");
+
+    for (auto &cap : manifest["capabilities"].GetArray ())
+    {
+      const std::string method = cap["method"].GetString ();
+      const std::string description = cap["description"].GetString ();
+      std::string input_schema = "{}";
+      if (cap.HasMember ("input_schema"))
+      {
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        cap["input_schema"].Accept (w);
+        input_schema = buf.GetString ();
+      }
+      db_.insert_capability (worker_id, method, description, input_schema);
+    }
+
+    spdlog::info ("[orchestrator] registered worker {} ({} capabilities) "
+                  "from {}",
+                  worker_id, manifest["capabilities"].Size (),
+                  src_dir.string ());
+    out_worker_id = worker_id;
+    return true;
+  }
+
   void Orchestrator::cmd_worker_register (const std::string &params_json,
                                           const std::string &identity,
                                           const std::string &request_id)
@@ -1102,8 +1259,432 @@ namespace agentos
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    // TODO: validate manifest and register worker via Registry.
-    reply_ok (identity, request_id, R"({"ok":true})");
+
+    std::string worker_id, error;
+    if (!register_worker_package (params["path"].GetString (), worker_id,
+                                  error))
+    {
+      reply_error (identity, request_id, -32602, error);
+      return;
+    }
+
+    // Registry is an in-memory snapshot built once at startup; refresh it
+    // now so this Worker is immediately dispatchable without a daemon
+    // restart (Registry::init() clears-and-rebuilds, safe to call again).
+    registry_.init (db_);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("worker_id");
+    w.String (worker_id.c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: adviser.register
+  // ---------------------------------------------------------------------------
+  //
+  // ADR-018 Skill Package Format: manifest.toml + skill.md + config.toml.
+  // ADR-031 §2 addition: manifest.toml [meta].description is required and
+  // non-empty (an undescribed Adviser cannot be meaningfully injected into
+  // another Adviser's "Available advisers" list, ADR-031 §3).
+  // ---------------------------------------------------------------------------
+
+  bool Orchestrator::register_adviser_package (const fs::path &src_dir,
+                                               std::string &out_adviser_id,
+                                               std::string &out_error)
+  {
+    const fs::path manifest_path = src_dir / "manifest.toml";
+    const fs::path skill_path = src_dir / "skill.md";
+
+    if (!fs::exists (manifest_path))
+    {
+      out_error = "manifest.toml not found at " + manifest_path.string ();
+      return false;
+    }
+    if (!fs::exists (skill_path))
+    {
+      out_error = "skill.md not found at " + skill_path.string ();
+      return false;
+    }
+
+    toml::table manifest;
+    try
+    {
+      manifest = toml::parse_file (manifest_path.string ());
+    }
+    catch (const toml::parse_error &e)
+    {
+      out_error = std::string ("manifest.toml parse error: ") + e.what ();
+      return false;
+    }
+
+    auto meta = manifest["meta"];
+    const std::string adviser_id = meta["id"].value_or (std::string ());
+    const std::string description
+      = meta["description"].value_or (std::string ());
+
+    if (adviser_id.empty ())
+    {
+      out_error = "manifest.toml [meta] id is required";
+      return false;
+    }
+    if (description.empty ())
+    {
+      out_error = "Adviser registration rejected: manifest.toml "
+                  "[meta].description is required and must be non-empty";
+      return false;
+    }
+
+    const fs::path dest_dir = agentos_home () / "advisers" / adviser_id;
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+    fs::copy (
+      src_dir, dest_dir,
+      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+      out_error = "cannot copy " + src_dir.string () + " to "
+                  + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+
+    const std::string installed_skill_path = (dest_dir / "skill.md").string ();
+    // agents.manifest stores the manifest.toml text verbatim (ADR-018's
+    // actual on-disk format). Registry::init()'s parse_adviser_manifest_toml
+    // (registry.cpp) parses TOML directly for role=='adviser' rows — no
+    // JSON projection needed here.
+    std::string manifest_raw;
+    {
+      std::ifstream f (manifest_path);
+      manifest_raw.assign (std::istreambuf_iterator<char> (f),
+                           std::istreambuf_iterator<char> ());
+    }
+    db_.insert_agent (adviser_id, "adviser", installed_skill_path, manifest_raw,
+                      description, "operator");
+
+    spdlog::info ("[orchestrator] registered adviser {} from {}", adviser_id,
+                  src_dir.string ());
+    out_adviser_id = adviser_id;
+    return true;
+  }
+
+  void Orchestrator::cmd_adviser_register (const std::string &params_json,
+                                           const std::string &identity,
+                                           const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    std::string adviser_id, error;
+    if (!register_adviser_package (params["path"].GetString (), adviser_id,
+                                   error))
+    {
+      reply_error (identity, request_id, -32602, error);
+      return;
+    }
+
+    registry_.init (db_);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("adviser_id");
+    w.String (adviser_id.c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: suite.list / suite.show / suite.install / suite.remove
+  //
+  // ADR-030 Capability Suite package format. This round: local install only
+  // (params.path points at an already-unpacked Suite directory on disk —
+  // no Marketplace download, that's Gap 1a/1b, deferred). "install" reads
+  // suite.toml, registers every bundled advisers/*/ and workers/*/ package
+  // via the same register_*_package helpers worker.register/adviser.register
+  // use, and records suite ownership in installed_suites/suite_components so
+  // `suite show`/`suite remove` can act on exactly this suite's components.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_suite_list (const std::string & /*params_json*/,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    auto suites = db_.load_installed_suites ();
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suites");
+    w.StartArray ();
+    for (const auto &s : suites)
+    {
+      w.StartObject ();
+      w.Key ("suite_id");
+      w.String (s.suite_id.c_str ());
+      w.Key ("version");
+      w.String (s.version.c_str ());
+      w.Key ("enabled");
+      w.Bool (s.enabled);
+      w.Key ("installed_at");
+      w.Int64 (s.installed_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_show (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("suite_id") || !params["suite_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string suite_id = params["suite_id"].GetString ();
+
+    auto suite = db_.load_installed_suite (suite_id);
+    if (!suite)
+    {
+      reply_error (identity, request_id, -32004,
+                   "suite not installed: " + suite_id);
+      return;
+    }
+    auto components = db_.load_suite_components (suite_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite->suite_id.c_str ());
+    w.Key ("version");
+    w.String (suite->version.c_str ());
+    w.Key ("enabled");
+    w.Bool (suite->enabled);
+    w.Key ("install_path");
+    w.String (suite->install_path.c_str ());
+    w.Key ("installed_at");
+    w.Int64 (suite->installed_at);
+    w.Key ("components");
+    w.StartArray ();
+    for (const auto &c : components)
+    {
+      w.StartObject ();
+      w.Key ("type");
+      w.String (c.component_type.c_str ());
+      w.Key ("id");
+      w.String (c.component_id.c_str ());
+      auto agent = db_.load_agent (c.component_id);
+      w.Key ("registered");
+      w.Bool (agent.has_value ());
+      if (agent && c.component_type == "adviser")
+      {
+        w.Key ("description");
+        w.String (agent->description.c_str ());
+      }
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_install (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const fs::path suite_dir = params["path"].GetString ();
+    const fs::path suite_toml_path = suite_dir / "suite.toml";
+    if (!fs::exists (suite_toml_path))
+    {
+      reply_error (identity, request_id, -32602,
+                   "suite.toml not found at " + suite_toml_path.string ());
+      return;
+    }
+
+    toml::table suite_toml;
+    try
+    {
+      suite_toml = toml::parse_file (suite_toml_path.string ());
+    }
+    catch (const toml::parse_error &e)
+    {
+      reply_error (identity, request_id, -32602,
+                   std::string ("suite.toml parse error: ") + e.what ());
+      return;
+    }
+
+    auto meta = suite_toml["meta"];
+    const std::string suite_id = meta["id"].value_or (std::string ());
+    const std::string version
+      = meta["version"].value_or (std::string ("0.0.0"));
+    if (suite_id.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "suite.toml [meta] id is required");
+      return;
+    }
+
+    std::vector<std::pair<std::string, std::string>>
+      registered; // (type, id) — for rollback bookkeeping / suite_components
+
+    // Register every bundled Adviser (advisers/<name>/).
+    const fs::path advisers_dir = suite_dir / "advisers";
+    if (fs::exists (advisers_dir))
+    {
+      for (const auto &entry : fs::directory_iterator (advisers_dir))
+      {
+        if (!entry.is_directory ())
+          continue;
+        std::string adviser_id, error;
+        if (!register_adviser_package (entry.path (), adviser_id, error))
+        {
+          reply_error (identity, request_id, -32602,
+                       "suite install failed registering adviser at "
+                         + entry.path ().string () + ": " + error);
+          return;
+        }
+        registered.emplace_back ("adviser", adviser_id);
+      }
+    }
+
+    // Register every bundled Worker (workers/<name>/).
+    const fs::path workers_dir = suite_dir / "workers";
+    if (fs::exists (workers_dir))
+    {
+      for (const auto &entry : fs::directory_iterator (workers_dir))
+      {
+        if (!entry.is_directory ())
+          continue;
+        std::string worker_id, error;
+        if (!register_worker_package (entry.path (), worker_id, error))
+        {
+          reply_error (identity, request_id, -32602,
+                       "suite install failed registering worker at "
+                         + entry.path ().string () + ": " + error);
+          return;
+        }
+        registered.emplace_back ("worker", worker_id);
+      }
+    }
+
+    // [pipeline] doc — copy into the Plan-authoring Adviser's knowledge/
+    // directory. Convention observed in this Suite's actual layout: the
+    // Plan-authoring Adviser's id matches the Suite's own [meta] id
+    // (translation-pipeline/translation-pipeline). This is inferred from
+    // example, not a documented suite.toml field — if a future Suite names
+    // its planning Adviser differently from the Suite id, this copy step
+    // will silently miss; worth promoting to an explicit suite.toml
+    // '[pipeline] adviser = "..."' field later rather than relying on the
+    // naming convention.
+    auto pipeline = suite_toml["pipeline"];
+    const std::string pipeline_doc = pipeline["doc"].value_or (std::string ());
+    if (!pipeline_doc.empty () && fs::exists (suite_dir / pipeline_doc))
+    {
+      const fs::path knowledge_dir
+        = agentos_home () / "advisers" / suite_id / "knowledge";
+      std::error_code ec;
+      fs::create_directories (knowledge_dir, ec);
+      if (!ec)
+        fs::copy_file (suite_dir / pipeline_doc, knowledge_dir / "pipeline.md",
+                       fs::copy_options::overwrite_existing, ec);
+      if (ec)
+        spdlog::warn ("[orchestrator] suite {} install: could not copy "
+                      "pipeline doc: {}",
+                      suite_id, ec.message ());
+    }
+
+    db_.insert_installed_suite (suite_id, version, suite_dir.string ());
+    for (const auto &[type, id] : registered)
+      db_.insert_suite_component (suite_id, type, id);
+
+    // Single refresh after all components are registered, not per-component
+    // — avoids N redundant full rebuilds during one suite.install call.
+    registry_.init (db_);
+
+    spdlog::info ("[orchestrator] installed suite {} ({} components) from {}",
+                  suite_id, registered.size (), suite_dir.string ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite_id.c_str ());
+    w.Key ("components_registered");
+    w.Int (static_cast<int> (registered.size ()));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_remove (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("suite_id") || !params["suite_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string suite_id = params["suite_id"].GetString ();
+
+    if (!db_.load_installed_suite (suite_id))
+    {
+      reply_error (identity, request_id, -32004,
+                   "suite not installed: " + suite_id);
+      return;
+    }
+
+    // Soft-revoke every component this suite owns (same semantics as
+    // worker.revoke — enabled=-1, row retained for audit; set_worker_enabled/
+    // revoke_worker are role-agnostic despite the name, ADR-031). Does not
+    // touch the filesystem, matching worker.revoke's existing contract.
+    auto components = db_.load_suite_components (suite_id);
+    for (const auto &c : components)
+      db_.revoke_worker (c.component_id);
+
+    db_.set_suite_enabled (suite_id, false);
+    registry_.init (db_);
+
+    spdlog::info ("[orchestrator] removed suite {} ({} components revoked)",
+                  suite_id, components.size ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite_id.c_str ());
+    w.Key ("components_revoked");
+    w.Int (static_cast<int> (components.size ()));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
   }
 
   // ---------------------------------------------------------------------------
@@ -1123,6 +1704,7 @@ namespace agentos
     }
     const std::string worker_id = params["worker_id"].GetString ();
     db_.set_worker_enabled (worker_id, true);
+    registry_.init (db_);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
 
@@ -1143,6 +1725,7 @@ namespace agentos
     }
     const std::string worker_id = params["worker_id"].GetString ();
     db_.set_worker_enabled (worker_id, false);
+    registry_.init (db_);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
 
@@ -1237,6 +1820,7 @@ namespace agentos
     // Step 4: commit to DB — mark runs failed + set enabled=-1.
     // For soft revoke (no active runs) this is equivalent to revoke_worker().
     db_.force_revoke_worker (worker_id);
+    registry_.init (db_);
     spdlog::warn ("[orchestrator] worker {} revoked (force={})", worker_id,
                   force);
     reply_ok (identity, request_id, R"({"ok":true})");
@@ -1386,8 +1970,8 @@ namespace agentos
 
       // Read skill.md as system prompt (ADR-018).
       auto home = agentos_home ();
-      const std::string skill_path =
-          (home / "advisers" / adviser_id / "skill.md").string ();
+      const std::string skill_path
+        = (home / "advisers" / adviser_id / "skill.md").string ();
       std::string system_prompt;
       {
         std::ifstream f (skill_path);
@@ -1409,13 +1993,16 @@ namespace agentos
         auto caps = db_.load_capabilities ();
         if (caps.empty ())
         {
-          capability_list_str = "Available capabilities: none registered\n";
+          capability_list_str = "Available capabilities (use ONLY these "
+                                "exact strings as command values for "
+                                "target_type: \"worker\" steps): none "
+                                "registered\n";
         }
         else
         {
           capability_list_str
-            = "Available capabilities (use ONLY these exact strings as command "
-              "values):\n";
+            = "Available capabilities (use ONLY these exact strings as "
+              "command values for target_type: \"worker\" steps):\n";
           for (const auto &c : caps)
           {
             capability_list_str += "  " + c.method;
@@ -1426,36 +2013,71 @@ namespace agentos
         }
       }
 
+      // ADR-031 §3 addition: inject the other registered, enabled Advisers
+      // (excluding this one) so a Plan-authoring Adviser can target
+      // target_type: "adviser" steps for judgment-requiring work. Fresh at
+      // every spawn, same no-caching policy as the capability list above.
+      std::string adviser_list_str;
+      {
+        auto agents = db_.load_enabled_agents ();
+        std::vector<Database::AgentRow> other_advisers;
+        for (const auto &a : agents)
+          if (a.role == "adviser" && a.id != adviser_id)
+            other_advisers.push_back (a);
+
+        if (other_advisers.empty ())
+        {
+          adviser_list_str = "Available advisers (use ONLY these exact "
+                             "strings as command values for target_type: "
+                             "\"adviser\" steps): none registered\n";
+        }
+        else
+        {
+          adviser_list_str
+            = "Available advisers (you MAY target these for steps "
+              "requiring judgment formed at execution time, using "
+              "target_type: \"adviser\" and this exact string as "
+              "command):\n";
+          for (const auto &a : other_advisers)
+          {
+            adviser_list_str += "  " + a.id;
+            if (!a.description.empty ())
+              adviser_list_str += "  — " + a.description;
+            adviser_list_str += "\n";
+          }
+        }
+      }
+
       // Detach LLM thread — never blocks Orchestrator event loop.
       // Captures by value; `this` is safe (Orchestrator outlives all threads).
       std::thread (
-        [this, job_id, goal,
-         system_prompt = std::move (system_prompt),
+        [this, job_id, goal, system_prompt = std::move (system_prompt),
          capability_list_str = std::move (capability_list_str),
-         adviser_id] () mutable
+         adviser_list_str = std::move (adviser_list_str), adviser_id] () mutable
         {
-          // ADR-033: inject domain‑knowledge from the selected Adviser’s package
+          // ADR-033: inject domain‑knowledge from the selected Adviser’s
+          // package
           std::string domain_knowledge;
           {
             auto home = agentos_home ();
             auto knowledge_path
               = home / "advisers" / adviser_id / "knowledge" / "pipeline.md";
             if (std::filesystem::exists (knowledge_path))
+            {
+              std::ifstream f (knowledge_path);
+              if (f)
               {
-                std::ifstream f (knowledge_path);
-                if (f)
-                  {
-                    domain_knowledge
-                      += "--- " + adviser_id + "/knowledge/pipeline.md ---\n";
-                    domain_knowledge
-                      += std::string (std::istreambuf_iterator<char> (f),
-                                      std::istreambuf_iterator<char> ())
-                      + "\n---\n";
-                  }
-                else
-                  spdlog::warn ("[orchestrator] cannot read {}",
-                                knowledge_path.string ());
+                domain_knowledge
+                  += "--- " + adviser_id + "/knowledge/pipeline.md ---\n";
+                domain_knowledge
+                  += std::string (std::istreambuf_iterator<char> (f),
+                                  std::istreambuf_iterator<char> ())
+                     + "\n---\n";
               }
+              else
+                spdlog::warn ("[orchestrator] cannot read {}",
+                              knowledge_path.string ());
+            }
           }
 
           // LlmProxy has no complete(); LlmClient wraps it (ADR-017).
@@ -1466,16 +2088,30 @@ namespace agentos
 
           std::string user = "Goal: " + goal + "\n\n";
           user += capability_list_str + "\n";
+          user += adviser_list_str + "\n";
           if (!domain_knowledge.empty ())
             user += "Domain knowledge:\n" + domain_knowledge;
-          user += "\nDecompose the following goal into an ordered list of steps.\n"
-                  "Respond ONLY with a JSON object — no markdown, no prose — in "
-                  "this exact shape:\n"
-                  "{\"steps\":[{\"id\":\"<uuid>\",\"command\":\"<capability>\","
-                  "\"needs_forge\":<bool>,"
-                  "\"description\":\"<what this step does>\"},...]}.\n"
-                  "Set needs_forge:true for any step whose required capability is "
-                  "not in the Available capabilities list.\n";
+          user
+            += "\nDecompose the following goal into an ordered list of steps.\n"
+               "Respond ONLY with a JSON object — no markdown, no prose — in "
+               "this exact shape:\n"
+               "{\"steps\":[{\"id\":\"<uuid>\",\"target_type\":\"worker\"|"
+               "\"adviser\",\"command\":\"<capability method (worker) or "
+               "adviser ref (adviser)>\",\"needs_forge\":<bool, required "
+               "for target_type:\\\"worker\\\", omit or false for "
+               "target_type:\\\"adviser\\\">,"
+               "\"description\":\"<what this step does>\","
+               "\"input\":{\"...\":\"step-specific input; reference an "
+               "earlier step's result with \\\"$step:<step id>.<field>\\\", "
+               "or the immediately preceding step's whole result with "
+               "\\\"$prev_result\\\"\"}},...]}.\n"
+               "Every step MUST include target_type — there is no default. "
+               "Set needs_forge:true for any target_type:\"worker\" step "
+               "whose required capability is not in the Available "
+               "capabilities list. target_type:\"adviser\" steps must use "
+               "an exact string from the Available advisers list and must "
+               "not set needs_forge:true (Forge generates Workers, never "
+               "Advisers).\n";
 
           req.user_prompt = user;
           req.max_tokens = 4096;
@@ -1608,8 +2244,7 @@ namespace agentos
           {
             spdlog::warn ("[orchestrator] plan step missing needs_forge field "
                           "for job {} step {} — treating as false",
-                          job_id,
-                          as.step.id);
+                          job_id, as.step.id);
             as.step.needs_forge = false;
           }
           // Persist step to DB so job.status can display it (ADR-022).
@@ -1622,10 +2257,12 @@ namespace agentos
       {
         int pt = (doc.HasMember ("planning_tokens_prompt")
                   && doc["planning_tokens_prompt"].IsInt ())
-                   ? doc["planning_tokens_prompt"].GetInt () : 0;
+                   ? doc["planning_tokens_prompt"].GetInt ()
+                   : 0;
         int ct = (doc.HasMember ("planning_tokens_completion")
                   && doc["planning_tokens_completion"].IsInt ())
-                   ? doc["planning_tokens_completion"].GetInt () : 0;
+                   ? doc["planning_tokens_completion"].GetInt ()
+                   : 0;
         if ((pt > 0 || ct > 0) && !job.pending_steps.empty ())
           db_.update_step_tokens (job.pending_steps.front ().step.id, pt, ct);
       }
@@ -1709,8 +2346,7 @@ namespace agentos
       std::string step_id_for_forge;
       {
         auto jit = active_jobs_.find (job_id);
-        if (jit != active_jobs_.end ()
-            && !jit->second.pending_steps.empty ())
+        if (jit != active_jobs_.end () && !jit->second.pending_steps.empty ())
           step_id_for_forge = jit->second.pending_steps.front ().step.id;
       }
       forge::ForgeRequest freq;
@@ -2017,9 +2653,10 @@ namespace agentos
     const bool needs_forge = (!job.pending_steps.empty ())
                                ? job.pending_steps.front ().step.needs_forge
                                : false;
-    const std::string step_desc = (!job.pending_steps.empty ())
-                                    ? job.pending_steps.front ().step.description
-                                    : "";
+    const std::string step_desc
+      = (!job.pending_steps.empty ())
+          ? job.pending_steps.front ().step.description
+          : "";
 
     // Escalate to Master with full context so trigger_forge has what it needs.
     MasterEvent me;

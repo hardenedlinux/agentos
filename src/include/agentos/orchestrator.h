@@ -252,6 +252,20 @@ namespace agentos
                            const std::string &identity,
                            const std::string &request_id);
 
+    // --- asset.register: local-path content-addressed registration ---
+    void cmd_asset_register (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+    void cmd_asset_show (const std::string &params_json,
+                         const std::string &identity,
+                         const std::string &request_id);
+    void cmd_asset_revoke (const std::string &params_json,
+                           const std::string &identity,
+                           const std::string &request_id);
+    void cmd_asset_extract (const std::string &params_json,
+                            const std::string &identity,
+                            const std::string &request_id);
+
     // ---------------------------------------------------------------------------
     // Shared registration helpers (ADR-031 §1/§2, ADR-018 Skill Package
     // Format) — used by cmd_worker_register/cmd_adviser_register directly,
@@ -275,11 +289,34 @@ namespace agentos
     // dispatcher_.fork_exec(), records worker_runs in DB.
     void dispatch_next_step (ActiveJob &job);
 
+    // ADR-031 §9: dispatch a target_type:"adviser" step — spawns a detached
+    // single-shot LLM thread (same shape as the Planning/domain-Adviser
+    // spawn, ADR-018) but treats the response as a step result, not a Plan.
+    // Enqueues AdviserDone/AdviserFailed on completion, same as
+    // dispatch_next_step's Worker path enqueues WorkerDone/WorkerFailed via
+    // Dispatcher's reap callback.
+    void dispatch_adviser_step (ActiveJob &job);
+
+    // ADR-031 §10 (+ asset attachment): resolve $prev_result,
+    // $step:<id>.<field>, and $asset:<id> reference tokens in a step's
+    // params/input map against persisted step results (db_.load_step_result)
+    // and this job's attached assets (db_.load_job_assets). Returns a new
+    // map with references replaced by the referenced content; non-reference
+    // values pass through unchanged.
+    std::unordered_map<std::string, std::string>
+    resolve_step_references (const std::unordered_map<std::string, std::string> &params,
+                             const std::string &prev_result,
+                             const std::string &job_id);
+
     // Called on WorkerDone: read result, store in DB, advance pipeline.
     void on_step_complete (const std::string &job_id, const std::string &run_id,
                            int exit_code, const std::string &job_dir);
 
-    // Called on WorkerFailed: try next Worker or escalate to Master.
+    // Called on WorkerFailed, or on an Adviser-target step's AdviserFailed:
+    // ADR-031 §11 — retry the same step up to max_step_retries (local to
+    // Orchestrator, never escalates to Master/Forge — Forge is only ever
+    // triggered from dispatch_next_step's genuine Registry-miss path).
+    // Exhausting retries fails the whole job.
     void on_step_failed (const std::string &job_id, const std::string &run_id,
                          int exit_code);
 

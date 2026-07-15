@@ -1,210 +1,303 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "agentos/cli_client.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
 #include "agentos/cli_format.h"
 #include "agentos/worker_params.h"
 #include <CLI/CLI.hpp>
+#include <algorithm>
+#include <filesystem>
+#include <iostream>
 #include <memory>
 #include <rapidjson/document.h>
-#include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
-#include <algorithm>
-#include <iostream>
+#include <rapidjson/writer.h>
 #include <string>
 #include <vector>
 
-namespace {
-void print_json(const rapidjson::Document& doc) {
+namespace
+{
+  void print_json (const rapidjson::Document &doc)
+  {
     rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    doc.Accept(w);
-    std::cout << buf.GetString() << "\n";
-}
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    doc.Accept (w);
+    std::cout << buf.GetString () << "\n";
+  }
 } // unnamed namespace
 
-void register_worker_commands(CLI::App& app) {
-    auto* worker = app.add_subcommand("worker", "Manage workers");
-    worker->require_subcommand(1);
+void register_worker_commands (CLI::App &app)
+{
+  auto *worker = app.add_subcommand ("worker", "Manage workers");
+  worker->require_subcommand (1);
 
-    auto timeout_ms  = std::make_shared<int>(5000);
-    auto socket_path = std::make_shared<std::string>();
-    auto json_flag   = std::make_shared<bool>(false);
-    worker->add_option("--timeout", *timeout_ms)->default_val(5000);
-    worker->add_option("--socket",  *socket_path);
-    worker->add_flag("--json",      *json_flag);
+  auto timeout_ms = std::make_shared<int> (5000);
+  auto socket_path = std::make_shared<std::string> ();
+  auto json_flag = std::make_shared<bool> (false);
+  worker->add_option ("--timeout", *timeout_ms)->default_val (5000);
+  worker->add_option ("--socket", *socket_path);
+  worker->add_flag ("--json", *json_flag);
 
-    // ---- worker register ----
-    {
-        auto* reg = worker->add_subcommand("register", "Register a worker");
-        auto path = std::make_shared<std::string>();
-        reg->add_option("--path", *path)->required();
-        reg->callback([timeout_ms, socket_path, json_flag, path] {
-            try {
-                agentos::cli::CliClient client(*timeout_ms);
-                if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_register_params(*path);
-                auto result = client.send("worker.register", std::move(params));
-                if (*json_flag) { print_json(result); }
-                else { std::cout << "worker_id: " << result["worker_id"].GetString() << "\n"; }
-            } catch (const agentos::cli::CliError& e) {
-                agentos::cli::die(2, e.what());
+  // ---- worker register ----
+  {
+    auto *reg = worker->add_subcommand ("register", "Register a worker");
+    auto path = std::make_shared<std::string> ();
+    reg->add_option ("--path", *path)->required ();
+    reg->callback (
+      [timeout_ms, socket_path, json_flag, path]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          // Resolved here (CLI's own cwd = user's shell directory) — the
+          // daemon is a separate long-running process and would resolve a
+          // relative path against its own working directory instead.
+          std::string abs_path = std::filesystem::absolute (*path).string ();
+          auto params = agentos::cli::build_worker_register_params (abs_path);
+          auto result = client.send ("worker.register", std::move (params));
+          if (*json_flag)
+          {
+            print_json (result);
+          }
+          else
+          {
+            std::cout << "worker_id: " << result["worker_id"].GetString ()
+                      << "\n";
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (reg);
+  }
+
+  // ---- worker list ----
+  {
+    auto *list = worker->add_subcommand ("list", "List workers");
+    auto enabled_str = std::make_shared<std::string> ();
+    list->add_option ("--enabled", *enabled_str);
+    list->callback (
+      [timeout_ms, socket_path, json_flag, enabled_str]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          auto params = agentos::cli::build_worker_list_params (*enabled_str);
+          auto result = client.send ("worker.list", std::move (params));
+          if (*json_flag)
+          {
+            print_json (result);
+          }
+          else
+          {
+            using namespace agentos::cli::color;
+            namespace f = agentos::cli::fmt;
+            if (!result.HasMember ("workers") || !result["workers"].IsArray ())
+            {
+              std::cout << "No workers.\n";
+              return;
             }
-        });
-        agentos::cli::add_completion(reg);
-    }
-
-    // ---- worker list ----
-    {
-        auto* list = worker->add_subcommand("list", "List workers");
-        auto enabled_str = std::make_shared<std::string>();
-        list->add_option("--enabled", *enabled_str);
-        list->callback([timeout_ms, socket_path, json_flag, enabled_str] {
-            try {
-                agentos::cli::CliClient client(*timeout_ms);
-                if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_list_params(*enabled_str);
-                auto result = client.send("worker.list", std::move(params));
-                if (*json_flag) {
-                    print_json(result);
-                } else {
-                    using namespace agentos::cli::color;
-                    namespace f = agentos::cli::fmt;
-                    if (!result.HasMember("workers") || !result["workers"].IsArray()) {
-                        std::cout << "No workers.\n";
-                        return;
-                    }
-                    const auto& workers = result["workers"];
-                    struct Row { std::string id, tier, prov, enabled, caps, registered; };
-                    std::vector<Row> rows;
-                    for (const auto& w : workers.GetArray()) {
-                        std::string id   = f::str(w, "id");
-                        std::string tier = f::str(w, "tier");
-                        std::string prov = f::str(w, "provenance");
-                        bool en = (w.HasMember("enabled") && w["enabled"].IsBool())
-                                      ? w["enabled"].GetBool() : false;
-                        std::string enabled = en ? "true" : "false";
-                        std::string caps;
-                        if (w.HasMember("capabilities") && w["capabilities"].IsArray()) {
-                            for (const auto& c : w["capabilities"].GetArray()) {
-                                if (!caps.empty()) caps += ",";
-                                caps += c.GetString();
-                            }
-                        }
-                        std::string registered = f::ts(w, "registered_at");
-                        rows.push_back({id, tier, prov, enabled, caps, registered});
-                    }
-
-                    size_t w_id = 2, w_tier = 4, w_prov = 10, w_en = 7, w_caps = 13, w_reg = 10;
-                    for (const auto& r : rows) {
-                        w_id   = std::max(w_id,   r.id.size());
-                        w_tier = std::max(w_tier, r.tier.size());
-                        w_prov = std::max(w_prov, r.prov.size());
-                        w_en   = std::max(w_en,   r.enabled.size());
-                        w_caps = std::max(w_caps, r.caps.size());
-                        w_reg  = std::max(w_reg,  r.registered.size());
-                    }
-
-                    size_t total_w = w_id + w_tier + w_prov + w_en + w_caps + w_reg + 10;
-
-                    std::cout << bold(f::col("ID",           w_id))
-                              << bold(f::col("TIER",         w_tier))
-                              << bold(f::col("PROVENANCE",   w_prov))
-                              << bold(f::col("ENABLED",      w_en))
-                              << bold(f::col("CAPABILITIES", w_caps))
-                              << bold(f::col("REGISTERED",   w_reg)) << "\n";
-                    std::cout << f::separator(total_w) << "\n";
-
-                    for (const auto& r : rows) {
-                        std::string enColored = (r.enabled == "true") ? green("true") : red("false");
-                        std::cout << f::col(r.id,   w_id)
-                                  << f::col(r.tier, w_tier)
-                                  << f::col(r.prov, w_prov)
-                                  << f::col_colored(enColored, r.enabled, w_en)
-                                  << f::col(r.caps, w_caps)
-                                  << f::col(r.registered, w_reg) << "\n";
-                    }
+            const auto &workers = result["workers"];
+            struct Row
+            {
+              std::string id, tier, prov, enabled, caps, registered;
+            };
+            std::vector<Row> rows;
+            for (const auto &w : workers.GetArray ())
+            {
+              std::string id = f::str (w, "id");
+              std::string tier = f::str (w, "tier");
+              std::string prov = f::str (w, "provenance");
+              bool en = (w.HasMember ("enabled") && w["enabled"].IsBool ())
+                          ? w["enabled"].GetBool ()
+                          : false;
+              std::string enabled = en ? "true" : "false";
+              std::string caps;
+              if (w.HasMember ("capabilities") && w["capabilities"].IsArray ())
+              {
+                for (const auto &c : w["capabilities"].GetArray ())
+                {
+                  if (!caps.empty ())
+                    caps += ",";
+                  caps += c.GetString ();
                 }
-            } catch (const agentos::cli::CliError& e) {
-                agentos::cli::die(2, e.what());
+              }
+              std::string registered = f::ts (w, "registered_at");
+              rows.push_back ({id, tier, prov, enabled, caps, registered});
             }
-        });
-        agentos::cli::add_completion(list);
-    }
 
-    // ---- worker enable ----
-    {
-        auto* enable = worker->add_subcommand("enable", "Enable a worker");
-        auto worker_id = std::make_shared<std::string>();
-        enable->add_option("worker_id", *worker_id)->required();
-        enable->callback([timeout_ms, socket_path, json_flag, worker_id] {
-            try {
-                agentos::cli::CliClient client(*timeout_ms);
-                if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
-                auto result = client.send("worker.enable", std::move(params));
-                if (*json_flag) { print_json(result); }
-                else { std::cout << "enabled: " << *worker_id << "\n"; }
-            } catch (const agentos::cli::CliError& e) {
-                agentos::cli::die(2, e.what());
+            size_t w_id = 2, w_tier = 4, w_prov = 10, w_en = 7, w_caps = 13,
+                   w_reg = 10;
+            for (const auto &r : rows)
+            {
+              w_id = std::max (w_id, r.id.size ());
+              w_tier = std::max (w_tier, r.tier.size ());
+              w_prov = std::max (w_prov, r.prov.size ());
+              w_en = std::max (w_en, r.enabled.size ());
+              w_caps = std::max (w_caps, r.caps.size ());
+              w_reg = std::max (w_reg, r.registered.size ());
             }
-        });
-        agentos::cli::add_completion(enable);
-    }
 
-    // ---- worker disable ----
-    {
-        auto* disable = worker->add_subcommand("disable", "Disable a worker");
-        auto worker_id = std::make_shared<std::string>();
-        disable->add_option("worker_id", *worker_id)->required();
-        disable->callback([timeout_ms, socket_path, json_flag, worker_id] {
-            try {
-                agentos::cli::CliClient client(*timeout_ms);
-                if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                auto params = agentos::cli::build_worker_toggle_params(*worker_id);
-                auto result = client.send("worker.disable", std::move(params));
-                if (*json_flag) { print_json(result); }
-                else { std::cout << "disabled: " << *worker_id << "\n"; }
-            } catch (const agentos::cli::CliError& e) {
-                agentos::cli::die(2, e.what());
+            size_t total_w
+              = w_id + w_tier + w_prov + w_en + w_caps + w_reg + 10;
+
+            std::cout << bold (f::col ("ID", w_id))
+                      << bold (f::col ("TIER", w_tier))
+                      << bold (f::col ("PROVENANCE", w_prov))
+                      << bold (f::col ("ENABLED", w_en))
+                      << bold (f::col ("CAPABILITIES", w_caps))
+                      << bold (f::col ("REGISTERED", w_reg)) << "\n";
+            std::cout << f::separator (total_w) << "\n";
+
+            for (const auto &r : rows)
+            {
+              std::string enColored
+                = (r.enabled == "true") ? green ("true") : red ("false");
+              std::cout << f::col (r.id, w_id) << f::col (r.tier, w_tier)
+                        << f::col (r.prov, w_prov)
+                        << f::col_colored (enColored, r.enabled, w_en)
+                        << f::col (r.caps, w_caps)
+                        << f::col (r.registered, w_reg) << "\n";
             }
-        });
-        agentos::cli::add_completion(disable);
-    }
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (list);
+  }
 
-    // ---- worker revoke ----
-    {
-        auto* rev = worker->add_subcommand("revoke", "Revoke a worker (soft-delete from registry)");
-        auto worker_id = std::make_shared<std::string>();
-        auto force     = std::make_shared<bool>(false);
-        rev->add_option("worker_id", *worker_id)->required();
-        rev->add_flag("--force", *force,
-                      "Kill active runs and revoke immediately "
-                      "(use when worker is stuck in a dead loop)");
-        rev->callback([timeout_ms, socket_path, json_flag, worker_id, force] {
-            try {
-                agentos::cli::CliClient client(*timeout_ms);
-                if (!socket_path->empty()) client.set_socket_path(*socket_path);
-                rapidjson::Document params(rapidjson::kObjectType);
-                auto& alloc = params.GetAllocator();
-                params.AddMember("worker_id",
-                                 rapidjson::Value(worker_id->c_str(), alloc),
-                                 alloc);
-                params.AddMember("force",
-                                 rapidjson::Value(*force),
-                                 alloc);
-                auto result = client.send("worker.revoke", std::move(params));
-                if (*json_flag) { print_json(result); }
-                else {
-                    std::cout << "revoked: " << *worker_id;
-                    if (*force) std::cout << " (forced)";
-                    std::cout << "\n";
-                }
-            } catch (const agentos::cli::CliError& e) {
-                agentos::cli::die(2, e.what());
-            }
-        });
-        agentos::cli::add_completion(rev);
-    }
+  // ---- worker enable ----
+  {
+    auto *enable = worker->add_subcommand ("enable", "Enable a worker");
+    auto worker_id = std::make_shared<std::string> ();
+    enable->add_option ("worker_id", *worker_id)->required ();
+    enable->callback (
+      [timeout_ms, socket_path, json_flag, worker_id]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          auto params = agentos::cli::build_worker_toggle_params (*worker_id);
+          auto result = client.send ("worker.enable", std::move (params));
+          if (*json_flag)
+          {
+            print_json (result);
+          }
+          else
+          {
+            std::cout << "enabled: " << *worker_id << "\n";
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (enable);
+  }
 
-    agentos::cli::add_completion(worker);
+  // ---- worker disable ----
+  {
+    auto *disable = worker->add_subcommand ("disable", "Disable a worker");
+    auto worker_id = std::make_shared<std::string> ();
+    disable->add_option ("worker_id", *worker_id)->required ();
+    disable->callback (
+      [timeout_ms, socket_path, json_flag, worker_id]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          auto params = agentos::cli::build_worker_toggle_params (*worker_id);
+          auto result = client.send ("worker.disable", std::move (params));
+          if (*json_flag)
+          {
+            print_json (result);
+          }
+          else
+          {
+            std::cout << "disabled: " << *worker_id << "\n";
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (disable);
+  }
+
+  // ---- worker revoke ----
+  {
+    auto *rev = worker->add_subcommand (
+      "revoke", "Revoke a worker (soft-delete from registry)");
+    auto worker_id = std::make_shared<std::string> ();
+    auto force = std::make_shared<bool> (false);
+    rev->add_option ("worker_id", *worker_id)->required ();
+    rev->add_flag ("--force", *force,
+                   "Kill active runs and revoke immediately "
+                   "(use when worker is stuck in a dead loop)");
+    rev->callback (
+      [timeout_ms, socket_path, json_flag, worker_id, force]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          rapidjson::Document params (rapidjson::kObjectType);
+          auto &alloc = params.GetAllocator ();
+          params.AddMember (
+            "worker_id", rapidjson::Value (worker_id->c_str (), alloc), alloc);
+          params.AddMember ("force", rapidjson::Value (*force), alloc);
+          auto result = client.send ("worker.revoke", std::move (params));
+          if (*json_flag)
+          {
+            print_json (result);
+          }
+          else
+          {
+            std::cout << "revoked: " << *worker_id;
+            if (*force)
+              std::cout << " (forced)";
+            std::cout << "\n";
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (rev);
+  }
+
+  agentos::cli::add_completion (worker);
 }

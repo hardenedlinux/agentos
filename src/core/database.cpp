@@ -23,15 +23,18 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
+#include <toml.hpp>
 
 namespace agentos
 {
+  namespace fs = std::filesystem;
 
   // ---------------------------------------------------------------------------
   // Stmt — RAII wrapper for sqlite3_stmt
@@ -284,7 +287,6 @@ namespace agentos
     if (!exec_ddl (schema_suites))
       return false;
 
-
     // ADR-029: users table & profile view
     static const char *schema_users = R"(
       CREATE TABLE IF NOT EXISTS users (
@@ -328,8 +330,10 @@ namespace agentos
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN started_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN completed_at INTEGER");
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN error TEXT");
-      maybe_add_column ("ALTER TABLE tasks ADD COLUMN tokens_prompt INTEGER DEFAULT 0");
-      maybe_add_column ("ALTER TABLE tasks ADD COLUMN tokens_completion INTEGER DEFAULT 0");
+      maybe_add_column (
+        "ALTER TABLE tasks ADD COLUMN tokens_prompt INTEGER DEFAULT 0");
+      maybe_add_column (
+        "ALTER TABLE tasks ADD COLUMN tokens_completion INTEGER DEFAULT 0");
     }
 
     // ADR‑025: extend the jobs table with new columns (idempotent)
@@ -368,7 +372,6 @@ namespace agentos
       maybe_add_column (
         "ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
     }
-
 
     // ADR‑025: extend human_reviews with type / job_id
     {
@@ -431,6 +434,38 @@ namespace agentos
     )";
     if (!exec_ddl (schema_installed_suites))
       return false;
+
+    // Asset registration (content-addressed blob storage index). See
+    // database.h AssetRow/JobAssetRow for the design rationale.
+    static const char *schema_assets = R"(
+      CREATE TABLE IF NOT EXISTS assets (
+          asset_id          TEXT PRIMARY KEY,
+          user_id           TEXT NOT NULL,
+          original_filename TEXT NOT NULL,
+          sha256            TEXT NOT NULL,
+          size_bytes        INTEGER NOT NULL,
+          source_path       TEXT,
+          status            TEXT NOT NULL DEFAULT 'active',
+          registered_at     INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_assets_user_filename
+          ON assets(user_id, original_filename);
+      CREATE TABLE IF NOT EXISTS job_assets (
+          job_id   TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+          filename TEXT NOT NULL,
+          PRIMARY KEY (job_id, asset_id)
+      );
+    )";
+    if (!exec_ddl (schema_assets))
+      return false;
+
+    // Must run after all migrations above (needs agents.description) and
+    // before returning — Registry::init(db) and anything else that reads
+    // the agents table happens after Database::open() returns, so builtin
+    // advisers must already exist by this point regardless of main.cpp's
+    // exact startup ordering.
+    seed_builtin_advisers ();
 
     spdlog::info ("[database] opened {}", db_path_);
     return true;
@@ -681,14 +716,14 @@ namespace agentos
     s.step_order = sqlite3_column_int (stmt, 2);
     s.description = column_text_or_empty (stmt, 3);
     s.status = column_text_or_empty (stmt, 4);
-    s.queued_at = column_int64_opt (stmt, 5);   // ADR-031: plan time
+    s.queued_at = column_int64_opt (stmt, 5); // ADR-031: plan time
     s.started_at = column_int64_opt (stmt, 6);
     s.completed_at = column_int64_opt (stmt, 7);
     if (sqlite3_column_type (stmt, 8) != SQLITE_NULL)
       s.error = column_text_or_empty (stmt, 8);
     if (sqlite3_column_type (stmt, 9) != SQLITE_NULL)
       s.result_json = column_text_or_empty (stmt, 9);
-    s.tokens_prompt     = sqlite3_column_int (stmt, 10);
+    s.tokens_prompt = sqlite3_column_int (stmt, 10);
     s.tokens_completion = sqlite3_column_int (stmt, 11);
     return s;
   }
@@ -1529,8 +1564,8 @@ namespace agentos
     sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
                        SQLITE_TRANSIENT);
-    sqlite3_bind_int  (stmt, 6, step_order);
-    sqlite3_bind_int64 (stmt, 7, now_unix ());  // queued_at = plan time
+    sqlite3_bind_int (stmt, 6, step_order);
+    sqlite3_bind_int64 (stmt, 7, now_unix ()); // queued_at = plan time
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_pipeline_task: {}",
@@ -1881,8 +1916,7 @@ namespace agentos
     if (!db_)
       return jobs;
 
-    Stmt stmt (status_filter
-                 ? prepare (R"(
+    Stmt stmt (status_filter ? prepare (R"(
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
@@ -1892,7 +1926,7 @@ namespace agentos
       ORDER BY updated_at DESC
       LIMIT ?
   )")
-                 : prepare (R"(
+                             : prepare (R"(
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
@@ -1942,16 +1976,16 @@ namespace agentos
       return rows;
 
     while (sqlite3_step (stmt) == SQLITE_ROW)
-      {
-        AgentRow row;
-        row.id = column_text_or_empty (stmt, 0);
-        row.role = column_text_or_empty (stmt, 1);
-        row.binary_path = column_text_or_empty (stmt, 2);
-        row.manifest = column_text_or_empty (stmt, 3);
-        row.approved_at = sqlite3_column_int64 (stmt, 4);
-        row.description = column_text_or_empty (stmt, 5);
-        rows.push_back (std::move (row));
-      }
+    {
+      AgentRow row;
+      row.id = column_text_or_empty (stmt, 0);
+      row.role = column_text_or_empty (stmt, 1);
+      row.binary_path = column_text_or_empty (stmt, 2);
+      row.manifest = column_text_or_empty (stmt, 3);
+      row.approved_at = sqlite3_column_int64 (stmt, 4);
+      row.description = column_text_or_empty (stmt, 5);
+      rows.push_back (std::move (row));
+    }
     return rows;
   }
 
@@ -1984,8 +2018,7 @@ namespace agentos
       spdlog::error ("[database] insert_agent: {}", sqlite3_errmsg (db_));
   }
 
-  std::optional<Database::AgentRow>
-  Database::load_agent (const std::string &id)
+  std::optional<Database::AgentRow> Database::load_agent (const std::string &id)
   {
     if (!db_)
       return std::nullopt;
@@ -2010,8 +2043,69 @@ namespace agentos
   }
 
   // ---------------------------------------------------------------------------
-  // Suite installation tracking (ADR-030)
+  // seed_builtin_advisers — was declared in database.h but never implemented
+  // anywhere in the codebase; the three builtin adviser rows previously in
+  // the DB were inserted by hand at some point, outside of source control,
+  // storing JSON where an adviser row's manifest must be TOML (registry.cpp's
+  // parse_adviser_manifest_toml). This is the real implementation: read the
+  // manifest.toml files home_init.cpp's initialise_home() already writes to
+  // ~/.agentos/advisers/<id>/manifest.toml — do not duplicate that content a
+  // second time here, that duplication is exactly what drifted out of sync
+  // before. Idempotent: skips any id already present so repeated daemon
+  // restarts don't re-insert or reset approved_by/enabled state.
   // ---------------------------------------------------------------------------
+  void Database::seed_builtin_advisers ()
+  {
+    if (!db_)
+      return;
+
+    static const char *builtin_ids[]
+      = {"planning", "code-writer", "code-reviewer"};
+
+    for (const char *id : builtin_ids)
+    {
+      if (load_agent (id))
+        continue; // already seeded (or registered) — never overwrite
+
+      const fs::path adviser_dir = agentos_home () / "advisers" / id;
+      const fs::path manifest_path = adviser_dir / "manifest.toml";
+      const fs::path skill_path = adviser_dir / "skill.md";
+
+      if (!fs::exists (manifest_path) || !fs::exists (skill_path))
+      {
+        spdlog::error ("[database] seed_builtin_advisers: {} missing "
+                       "manifest.toml/skill.md under {} — was "
+                       "initialise_home() run before Database::open()?",
+                       id, adviser_dir.string ());
+        continue;
+      }
+
+      std::string manifest_raw;
+      {
+        std::ifstream f (manifest_path);
+        manifest_raw.assign (std::istreambuf_iterator<char> (f),
+                             std::istreambuf_iterator<char> ());
+      }
+
+      std::string description;
+      try
+      {
+        auto tbl = toml::parse (manifest_raw);
+        description = tbl["meta"]["description"].value_or (std::string ());
+      }
+      catch (const toml::parse_error &e)
+      {
+        spdlog::error ("[database] seed_builtin_advisers: {} manifest.toml "
+                       "parse error: {}",
+                       id, e.what ());
+        continue;
+      }
+
+      insert_agent (id, "adviser", skill_path.string (), manifest_raw,
+                    description, "core");
+      spdlog::info ("[database] seeded builtin adviser {}", id);
+    }
+  }
 
   void Database::insert_installed_suite (const std::string &suite_id,
                                          const std::string &version,
@@ -2131,7 +2225,8 @@ namespace agentos
   {
     if (!db_)
       return;
-    Stmt stmt (prepare ("UPDATE installed_suites SET enabled = ? WHERE suite_id = ?"));
+    Stmt stmt (
+      prepare ("UPDATE installed_suites SET enabled = ? WHERE suite_id = ?"));
     if (!stmt.s)
       return;
     sqlite3_bind_int (stmt, 1, enabled ? 1 : 0);
@@ -2140,21 +2235,134 @@ namespace agentos
       spdlog::error ("[database] set_suite_enabled: {}", sqlite3_errmsg (db_));
   }
 
-  void Database::update_step_tokens (const std::string &step_id,
-                                     int prompt_tokens,
-                                     int completion_tokens)
+  // ---------------------------------------------------------------------------
+  // Asset registration
+  // ---------------------------------------------------------------------------
+
+  void Database::insert_asset (const std::string &asset_id,
+                               const std::string &user_id,
+                               const std::string &original_filename,
+                               const std::string &sha256, int64_t size_bytes,
+                               const std::string &source_path)
   {
     if (!db_)
       return;
-    Stmt stmt (prepare (
-      "UPDATE tasks SET "
-      "tokens_prompt = tokens_prompt + ?, "
-      "tokens_completion = tokens_completion + ? "
-      "WHERE id = ?"));
+    Stmt stmt (prepare (R"(
+      INSERT INTO assets
+          (asset_id, user_id, original_filename, sha256, size_bytes,
+           source_path, status, registered_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+  )"));
     if (!stmt.s)
       return;
-    sqlite3_bind_int  (stmt, 1, prompt_tokens);
-    sqlite3_bind_int  (stmt, 2, completion_tokens);
+    sqlite3_bind_text (stmt, 1, asset_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, original_filename.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, sha256.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 5, size_bytes);
+    sqlite3_bind_text (stmt, 6, source_path.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 7, now_unix ());
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_asset: {}", sqlite3_errmsg (db_));
+  }
+
+  std::optional<Database::AssetRow>
+  Database::load_asset (const std::string &asset_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT asset_id, user_id, original_filename, sha256, size_bytes,
+             source_path, status, registered_at
+      FROM assets WHERE asset_id = ?
+  )"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, asset_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+
+    AssetRow row;
+    row.asset_id = column_text_or_empty (stmt, 0);
+    row.user_id = column_text_or_empty (stmt, 1);
+    row.original_filename = column_text_or_empty (stmt, 2);
+    row.sha256 = column_text_or_empty (stmt, 3);
+    row.size_bytes = sqlite3_column_int64 (stmt, 4);
+    row.source_path = column_text_or_empty (stmt, 5);
+    row.status = column_text_or_empty (stmt, 6);
+    row.registered_at = sqlite3_column_int64 (stmt, 7);
+    return row;
+  }
+
+  void Database::set_asset_status (const std::string &asset_id,
+                                   const std::string &status)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE assets SET status = ? WHERE asset_id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, status.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, asset_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_asset_status: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::insert_job_asset (const std::string &job_id,
+                                   const std::string &asset_id,
+                                   const std::string &filename)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO job_assets (job_id, asset_id, filename)
+      VALUES (?, ?, ?)
+  )"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, asset_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, filename.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_job_asset: {}", sqlite3_errmsg (db_));
+  }
+
+  std::vector<Database::JobAssetRow>
+  Database::load_job_assets (const std::string &job_id)
+  {
+    std::vector<JobAssetRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (
+      "SELECT job_id, asset_id, filename FROM job_assets WHERE job_id = ?"));
+    if (!stmt.s)
+      return rows;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      JobAssetRow row;
+      row.job_id = column_text_or_empty (stmt, 0);
+      row.asset_id = column_text_or_empty (stmt, 1);
+      row.filename = column_text_or_empty (stmt, 2);
+      rows.push_back (std::move (row));
+    }
+    return rows;
+  }
+
+  void Database::update_step_tokens (const std::string &step_id,
+                                     int prompt_tokens, int completion_tokens)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE tasks SET "
+                        "tokens_prompt = tokens_prompt + ?, "
+                        "tokens_completion = tokens_completion + ? "
+                        "WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, prompt_tokens);
+    sqlite3_bind_int (stmt, 2, completion_tokens);
     sqlite3_bind_text (stmt, 3, step_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_step (stmt);
   }

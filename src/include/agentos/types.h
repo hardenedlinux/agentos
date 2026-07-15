@@ -238,7 +238,12 @@ namespace agentos
   struct PipelinePlanStep
   {
     std::string id;
-    std::string command;     // capability method name
+    std::string target_type; // ADR-031 §9: "worker" | "adviser" — required,
+                             // no default (missing is logged as a warning
+                             // and treated as "worker" for backward
+                             // compatibility with pre-§9 plans, mirroring
+                             // the existing needs_forge leniency below)
+    std::string command;     // capability method name (worker) or adviser id
     std::string description; // natural language (Master‑generated)
     std::unordered_map<std::string, std::string> params;
     bool needs_forge = false; // ADR-031: true = Forge should be triggered if Registry misses

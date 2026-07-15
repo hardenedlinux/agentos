@@ -37,10 +37,13 @@
 
 #include <chrono>
 #include <csignal>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <openssl/evp.h>
 #include <regex>
 #include <toml.hpp>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 #include <iostream>
@@ -554,6 +557,14 @@ namespace agentos
       cmd_suite_install (params_json, identity, request_id);
     else if (method == "suite.remove")
       cmd_suite_remove (params_json, identity, request_id);
+    else if (method == "asset.register")
+      cmd_asset_register (params_json, identity, request_id);
+    else if (method == "asset.show")
+      cmd_asset_show (params_json, identity, request_id);
+    else if (method == "asset.revoke")
+      cmd_asset_revoke (params_json, identity, request_id);
+    else if (method == "asset.extract")
+      cmd_asset_extract (params_json, identity, request_id);
     else if (method == "adviser.list")
       cmd_adviser_list (params_json, identity, request_id);
     else if (method == "adviser.register")
@@ -635,6 +646,72 @@ namespace agentos
           : "oneshot";
     const std::string job_id = new_uuid ();
 
+    // Optional `assets` array of asset_id strings. Validated and
+    // materialized BEFORE the job itself is persisted — if any asset_id is
+    // unknown or doesn't belong to this user_id, the whole job.submit is
+    // rejected atomically rather than creating a job that will fail later
+    // at dispatch time. This is the one and only place asset_id ->
+    // materialized-path binding happens for this job — static for the rest
+    // of the job's life (ADR-031 discussion: no re-resolution at dispatch
+    // time, no TOCTOU window).
+    std::vector<std::pair<std::string, std::string>>
+      job_assets; // (asset_id, sanitized filename)
+    if (params.HasMember ("assets") && params["assets"].IsArray ())
+    {
+      for (const auto &a : params["assets"].GetArray ())
+      {
+        if (!a.IsString ())
+        {
+          reply_error (identity, request_id, -32602,
+                       "'assets' entries must be asset_id strings");
+          return;
+        }
+        const std::string asset_id = a.GetString ();
+        auto asset = db_.load_asset (asset_id);
+        if (!asset || asset->user_id != user_id || asset->status != "active")
+        {
+          reply_error (identity, request_id, -32011,
+                       "asset not found or not owned by this user: "
+                         + asset_id);
+          return;
+        }
+
+        // Sanitize to a bare filename — basename only, no directory
+        // components — before it ever touches a real filesystem path.
+        // original_filename is user-authored text; a crafted "../../x" or
+        // similar must never reach the actual materialize path below.
+        std::string safe_name
+          = fs::path (asset->original_filename).filename ().string ();
+        if (safe_name.empty () || safe_name == "." || safe_name == "..")
+          safe_name = asset_id; // fallback — never let a hostile filename
+                                // pick the materialized path's name
+
+        job_assets.emplace_back (asset_id, safe_name);
+      }
+    }
+
+    // Materialize each validated asset into this job's own directory —
+    // hardlink from the content-addressed blob store (falls back to a real
+    // copy across filesystems), matching cmd_asset_register's own
+    // link_or_copy strategy.
+    for (const auto &[asset_id, filename] : job_assets)
+    {
+      auto asset = db_.load_asset (asset_id); // already validated above
+      const fs::path blob_path
+        = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+      const fs::path dest
+        = agentos_home () / "jobs" / job_id / "assets" / filename;
+      std::error_code ec;
+      fs::create_directories (dest.parent_path (), ec);
+      if (!ec && !fs::exists (dest))
+      {
+        if (::link (blob_path.c_str (), dest.c_str ()) != 0)
+          fs::copy_file (blob_path, dest,
+                         fs::copy_options::overwrite_existing, ec);
+      }
+      db_.insert_job_asset (job_id, asset_id, filename);
+    }
+
     // Persist job (phase = planning).
     Task task;
     task.id = TaskId (job_id);
@@ -645,18 +722,36 @@ namespace agentos
     db_.update_job_phase (TaskId (job_id), "planning");
     db_.update_job_type (job_id, type);
 
-    spdlog::info ("[orchestrator] job.submit job_id={} user_id={} goal='{}'",
-                  job_id, user_id, goal);
+    spdlog::info ("[orchestrator] job.submit job_id={} user_id={} assets={} "
+                 "goal='{}'",
+                 job_id, user_id, job_assets.size (), goal);
 
     // Reply immediately — job runs asynchronously.
     reply_ok (identity, request_id, R"({"job_id":")" + job_id + R"("})");
 
-    // Forward to Master for planning.
+    // Forward to Master for planning. Built via rapidjson::Writer, not raw
+    // string concatenation — `goal` is arbitrary user-submitted text (may
+    // contain quotes, backslashes, control characters) and concatenating it
+    // into a hand-built JSON string is a real structural-injection risk: a
+    // goal containing `","malicious_key":"x` would inject an extra field
+    // into what Master parses on the other end. job.status/job.list already
+    // do this correctly (w.Key/w.String below); this call site didn't.
     MasterEvent me;
     me.kind = MasterEvent::Kind::JobSubmit;
     me.job_id = job_id;
-    me.payload_json = R"({"job_id":")" + job_id + R"(","goal":")" + goal
-                      + R"(","type":")" + type + R"("})";
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("job_id");
+      w.String (job_id.c_str ());
+      w.Key ("goal");
+      w.String (goal.c_str ());
+      w.Key ("type");
+      w.String (type.c_str ());
+      w.EndObject ();
+      me.payload_json = buf.GetString ();
+    }
     send_to_master_ (std::move (me));
   }
 
@@ -1017,6 +1112,12 @@ namespace agentos
       w.String (a.description.c_str ());
       w.Key ("skill_path");
       w.String (a.binary_path.c_str ());
+      w.Key ("domains");
+      w.StartArray ();
+      if (auto reg_adviser = registry_.find_adviser_by_id (a.id))
+        for (const auto &d : reg_adviser->domains)
+          w.String (d.c_str ());
+      w.EndArray ();
       w.Key ("model");
       w.String ("");
       w.Key ("active");
@@ -1107,6 +1208,11 @@ namespace agentos
 
   namespace
   {
+    // ADR-031 §11: per-step retry limit, independent of Forge's
+    // max_repairs — retrying a step means re-invoking the same
+    // Worker/Adviser from scratch, not rewriting code.
+    constexpr int kMaxStepRetries = 3;
+
     // ADR-031 §1: namespace.verb, all lowercase, one dot, max 64 chars.
     bool is_valid_capability_method (const std::string &method)
     {
@@ -1119,6 +1225,19 @@ namespace agentos
                                               std::string &out_worker_id,
                                               std::string &out_error)
   {
+    // The daemon is a separate, long-running process — a relative path
+    // resolves against ITS working directory, not the caller's. Silently
+    // operating on the wrong directory (and reporting success) is worse
+    // than refusing outright.
+    if (!src_dir.is_absolute ())
+    {
+      out_error = "'path' must be an absolute path (relative paths resolve "
+                 "against the daemon's own working directory, not the "
+                 "caller's): "
+                 + src_dir.string ();
+      return false;
+    }
+
     const fs::path manifest_path = src_dir / "manifest.json";
 
     if (!fs::exists (manifest_path))
@@ -1296,6 +1415,15 @@ namespace agentos
                                                std::string &out_adviser_id,
                                                std::string &out_error)
   {
+    if (!src_dir.is_absolute ())
+    {
+      out_error = "'path' must be an absolute path (relative paths resolve "
+                 "against the daemon's own working directory, not the "
+                 "caller's): "
+                 + src_dir.string ();
+      return false;
+    }
+
     const fs::path manifest_path = src_dir / "manifest.toml";
     const fs::path skill_path = src_dir / "skill.md";
 
@@ -1520,6 +1648,15 @@ namespace agentos
     }
 
     const fs::path suite_dir = params["path"].GetString ();
+    if (!suite_dir.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'path' must be an absolute path (relative paths resolve "
+                     "against the daemon's own working directory, not the "
+                     "caller's): "
+                     + suite_dir.string ());
+      return;
+    }
     const fs::path suite_toml_path = suite_dir / "suite.toml";
     if (!fs::exists (suite_toml_path))
     {
@@ -1683,6 +1820,363 @@ namespace agentos
     w.String (suite_id.c_str ());
     w.Key ("components_revoked");
     w.Int (static_cast<int> (components.size ()));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.register
+  // ---------------------------------------------------------------------------
+  //
+  // Local-path-only this round (source must be a local absolute path, no
+  // scheme:// — remote/R2 sources are a downloader concern layered on top
+  // later without changing this contract, per the earlier design
+  // discussion). Content-addressed: identical bytes registered twice by
+  // anyone share one blob on disk; the assets table row is what's
+  // per-registration (ownership, display name, status).
+  // ---------------------------------------------------------------------------
+
+  namespace
+  {
+    // Streams the file in chunks rather than loading it whole into memory —
+    // asset files may be large (documents, eventually PDFs).
+    bool sha256_file (const std::filesystem::path &path, std::string &out_hex,
+                      int64_t &out_size)
+    {
+      std::ifstream f (path, std::ios::binary);
+      if (!f)
+        return false;
+
+      EVP_MD_CTX *ctx = EVP_MD_CTX_new ();
+      if (!ctx)
+        return false;
+      if (EVP_DigestInit_ex (ctx, EVP_sha256 (), nullptr) != 1)
+      {
+        EVP_MD_CTX_free (ctx);
+        return false;
+      }
+
+      char buf[65536];
+      int64_t total = 0;
+      while (f.read (buf, sizeof (buf)) || f.gcount () > 0)
+      {
+        const auto n = f.gcount ();
+        if (EVP_DigestUpdate (ctx, buf, static_cast<size_t> (n)) != 1)
+        {
+          EVP_MD_CTX_free (ctx);
+          return false;
+        }
+        total += n;
+      }
+
+      unsigned char digest[EVP_MAX_MD_SIZE];
+      unsigned int digest_len = 0;
+      const bool ok = EVP_DigestFinal_ex (ctx, digest, &digest_len) == 1;
+      EVP_MD_CTX_free (ctx);
+      if (!ok)
+        return false;
+
+      static const char *hex = "0123456789abcdef";
+      std::string hexstr;
+      hexstr.reserve (digest_len * 2);
+      for (unsigned int i = 0; i < digest_len; ++i)
+      {
+        hexstr.push_back (hex[(digest[i] >> 4) & 0xF]);
+        hexstr.push_back (hex[digest[i] & 0xF]);
+      }
+      out_hex = std::move (hexstr);
+      out_size = total;
+      return true;
+    }
+
+    // Hardlink when possible (same filesystem, zero-copy); fall back to a
+    // real copy on EXDEV (cross-device) or any other link() failure —
+    // mirrors the uv global-cache pattern already used for Python deps.
+    bool link_or_copy (const std::filesystem::path &src,
+                       const std::filesystem::path &dst)
+    {
+      std::error_code ec;
+      std::filesystem::create_directories (dst.parent_path (), ec);
+      if (ec)
+        return false;
+      if (::link (src.c_str (), dst.c_str ()) == 0)
+        return true;
+      std::filesystem::copy_file (
+        src, dst, std::filesystem::copy_options::overwrite_existing, ec);
+      return !ec;
+    }
+  } // namespace
+
+  void Orchestrator::cmd_asset_register (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' and 'path' are required");
+      return;
+    }
+
+    const std::string user_id = params["user_id"].GetString ();
+    const fs::path source_path = params["path"].GetString ();
+
+    if (source_path.string ().find ("://") != std::string::npos
+        || !source_path.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'path' must be a local absolute path (relative paths "
+                   "resolve against the daemon's own working directory, "
+                   "not the caller's); remote sources are not supported "
+                   "yet: "
+                     + source_path.string ());
+      return;
+    }
+    if (!fs::exists (source_path) || !fs::is_regular_file (source_path))
+    {
+      reply_error (identity, request_id, -32602,
+                   "file not found: " + source_path.string ());
+      return;
+    }
+
+    std::string original_filename;
+    if (params.HasMember ("filename") && params["filename"].IsString ()
+        && std::string (params["filename"].GetString ()).size () > 0)
+      original_filename = params["filename"].GetString ();
+    else
+      original_filename = source_path.filename ().string ();
+
+    std::string sha256_hex;
+    int64_t size_bytes = 0;
+    if (!sha256_file (source_path, sha256_hex, size_bytes))
+    {
+      reply_error (identity, request_id, -32603,
+                   "failed to hash " + source_path.string ());
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / sha256_hex / "content";
+    if (!fs::exists (blob_path))
+    {
+      if (!link_or_copy (source_path, blob_path))
+      {
+        reply_error (identity, request_id, -32603,
+                     "failed to store blob for " + source_path.string ());
+        return;
+      }
+    }
+
+    const std::string asset_id = new_uuid ();
+    db_.insert_asset (asset_id, user_id, original_filename, sha256_hex,
+                      size_bytes, source_path.string ());
+
+    spdlog::info ("[orchestrator] registered asset {} ({}, {} bytes) for "
+                 "user {}",
+                 asset_id, original_filename, size_bytes, user_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("asset_id");
+    w.String (asset_id.c_str ());
+    w.Key ("sha256");
+    w.String (sha256_hex.c_str ());
+    w.Key ("size_bytes");
+    w.Int64 (size_bytes);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.show / asset.revoke
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_asset_show (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' is required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("asset_id");
+    w.String (asset->asset_id.c_str ());
+    w.Key ("user_id");
+    w.String (asset->user_id.c_str ());
+    w.Key ("original_filename");
+    w.String (asset->original_filename.c_str ());
+    w.Key ("sha256");
+    w.String (asset->sha256.c_str ());
+    w.Key ("size_bytes");
+    w.Int64 (asset->size_bytes);
+    w.Key ("status");
+    w.String (asset->status.c_str ());
+    w.Key ("registered_at");
+    w.Int64 (asset->registered_at);
+    w.Key ("blob_path");
+    w.String (blob_path.string ().c_str ());
+    w.Key ("blob_exists");
+    w.Bool (fs::exists (blob_path));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_asset_revoke (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' is required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    // Soft-delete only — same posture as worker.revoke: the row and the
+    // underlying blob both stay on disk (a job that already materialized
+    // this asset before the revoke keeps working; the content-addressed
+    // blob may be shared with other still-active assets referencing the
+    // same sha256 anyway, so it is never safe to delete purely on one
+    // asset row's revoke). Future job.submit calls referencing this
+    // asset_id will be rejected by cmd_job_submit's status=='active' check.
+    db_.set_asset_status (asset_id, "revoked");
+
+    spdlog::info ("[orchestrator] revoked asset {}", asset_id);
+
+    reply_ok (identity, request_id, R"({"asset_id":")" + asset_id + R"("})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.extract
+  // ---------------------------------------------------------------------------
+  //
+  // Pulls a registered asset's content back out of blob storage under its
+  // original registered filename, into a caller-specified directory —
+  // operational/debugging convenience (e.g. inspecting what actually got
+  // registered), not part of the job pipeline (which reads directly from
+  // the per-job materialized copy, never from an arbitrary extract
+  // destination). No ownership check, same posture as asset.show — this is
+  // an operator-level inspection tool, not a job-time data path.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_asset_extract (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ()
+        || !params.HasMember ("dest_dir") || !params["dest_dir"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' and 'dest_dir' are required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+    const fs::path dest_dir = params["dest_dir"].GetString ();
+    if (!dest_dir.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'dest_dir' must be an absolute path (relative paths "
+                     "resolve against the daemon's own working directory, "
+                     "not the caller's): "
+                     + dest_dir.string ());
+      return;
+    }
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+    if (!fs::exists (blob_path))
+    {
+      reply_error (identity, request_id, -32603,
+                   "blob missing from disk for asset " + asset_id + ": "
+                     + blob_path.string ());
+      return;
+    }
+
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      reply_error (identity, request_id, -32603,
+                   "cannot create " + dest_dir.string () + ": "
+                     + ec.message ());
+      return;
+    }
+
+    // Extraction always uses the asset's original registered filename —
+    // sanitized to a bare basename first, same discipline as
+    // cmd_job_submit's per-job materialization, so a hostile filename in
+    // the DB can't be used to write outside dest_dir.
+    std::string safe_name
+      = fs::path (asset->original_filename).filename ().string ();
+    if (safe_name.empty () || safe_name == "." || safe_name == "..")
+      safe_name = asset_id;
+
+    const fs::path dest_path = dest_dir / safe_name;
+    fs::copy_file (blob_path, dest_path, fs::copy_options::overwrite_existing,
+                   ec);
+    if (ec)
+    {
+      reply_error (identity, request_id, -32603,
+                   "failed to extract to " + dest_path.string () + ": "
+                     + ec.message ());
+      return;
+    }
+
+    spdlog::info ("[orchestrator] extracted asset {} ({}) to {}", asset_id,
+                 safe_name, dest_path.string ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("filename");
+    w.String (safe_name.c_str ());
+    w.Key ("path");
+    w.String (dest_path.string ().c_str ());
     w.EndObject ();
     reply_ok (identity, request_id, buf.GetString ());
   }
@@ -1909,7 +2403,42 @@ namespace agentos
 
   void Orchestrator::handle_adviser_done (const OrchestratorEvent &ev)
   {
-    // Adviser produced a plan — forward to Master for review.
+    auto it = active_jobs_.find (ev.job_id);
+    if (it != active_jobs_.end ())
+    {
+      // ADR-031 §9/§10: the job already has an established Plan, so this
+      // AdviserDone is a target_type:"adviser" pipeline step's result, not
+      // an initial Planning response — handle exactly like
+      // on_step_complete's Worker path (persist result, advance pipeline),
+      // not "forward to Master as a new Plan".
+      ActiveJob &job = it->second;
+      if (job.pending_steps.empty ())
+        return;
+
+      rapidjson::Document doc;
+      std::string result_json = "{}";
+      if (!doc.Parse (ev.payload_json.c_str ()).HasParseError ()
+          && doc.IsObject () && doc.HasMember ("result"))
+      {
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        doc["result"].Accept (w);
+        result_json = buf.GetString ();
+      }
+
+      db_.update_step_result (job.pending_steps.front ().step.id, result_json);
+      job.last_step_result = result_json;
+      job.pending_steps.pop_front ();
+
+      notify ("job.step_changed",
+              R"({"job_id":")" + ev.job_id + R"(","status":"done"})");
+
+      dispatch_next_step (job);
+      return;
+    }
+
+    // Job not yet active — this is the initial Planning/domain-Adviser
+    // response (a Plan), forward to Master for review as before.
     MasterEvent me;
     me.kind = MasterEvent::Kind::JobSubmit;
     me.job_id = ev.job_id;
@@ -1919,6 +2448,19 @@ namespace agentos
 
   void Orchestrator::handle_adviser_failed (const OrchestratorEvent &ev)
   {
+    if (active_jobs_.count (ev.job_id))
+    {
+      // ADR-031 §11: an already-dispatched adviser-target step failed —
+      // same local-retry policy as a Worker-target step's runtime failure,
+      // never escalate to Master here (Forge cannot help; it never
+      // generates Advisers).
+      on_step_failed (ev.job_id, /*run_id=*/"", /*exit_code=*/-1);
+      return;
+    }
+
+    // Job not yet active — the initial Planning/domain-Adviser spawn
+    // itself failed. This is a genuine Master-level concern (no step
+    // exists yet to retry).
     MasterEvent me;
     me.kind = MasterEvent::Kind::AdviserFailed;
     me.job_id = ev.job_id;
@@ -2048,12 +2590,33 @@ namespace agentos
         }
       }
 
+      // Assets attached to this job at submission time (cmd_job_submit) —
+      // queried here, on the Orchestrator thread, same as capability/adviser
+      // lists above; the detached thread below only ever sees pre-built
+      // strings, never touches db_ itself.
+      std::string attached_assets_str;
+      {
+        auto job_assets = db_.load_job_assets (job_id);
+        if (!job_assets.empty ())
+        {
+          attached_assets_str
+            = "Attached assets (reference in a step's input using "
+              "$asset:<asset_id> — write the exact asset_id shown, not the "
+              "filename):\n";
+          for (const auto &ja : job_assets)
+            attached_assets_str
+              += "  " + ja.filename + "  (asset_id: " + ja.asset_id + ")\n";
+        }
+      }
+
       // Detach LLM thread — never blocks Orchestrator event loop.
       // Captures by value; `this` is safe (Orchestrator outlives all threads).
       std::thread (
         [this, job_id, goal, system_prompt = std::move (system_prompt),
          capability_list_str = std::move (capability_list_str),
-         adviser_list_str = std::move (adviser_list_str), adviser_id] () mutable
+         adviser_list_str = std::move (adviser_list_str),
+         attached_assets_str = std::move (attached_assets_str),
+         adviser_id] () mutable
         {
           // ADR-033: inject domain‑knowledge from the selected Adviser’s
           // package
@@ -2089,6 +2652,8 @@ namespace agentos
           std::string user = "Goal: " + goal + "\n\n";
           user += capability_list_str + "\n";
           user += adviser_list_str + "\n";
+          if (!attached_assets_str.empty ())
+            user += attached_assets_str + "\n";
           if (!domain_knowledge.empty ())
             user += "Domain knowledge:\n" + domain_knowledge;
           user
@@ -2103,8 +2668,10 @@ namespace agentos
                "\"description\":\"<what this step does>\","
                "\"input\":{\"...\":\"step-specific input; reference an "
                "earlier step's result with \\\"$step:<step id>.<field>\\\", "
-               "or the immediately preceding step's whole result with "
-               "\\\"$prev_result\\\"\"}},...]}.\n"
+               "the immediately preceding step's whole result with "
+               "\\\"$prev_result\\\", or an attached asset's file path with "
+               "\\\"$asset:<asset_id>\\\" (see Attached assets below, if "
+               "any)\"}},...]}.\n"
                "Every step MUST include target_type — there is no default. "
                "Set needs_forge:true for any target_type:\"worker\" step "
                "whose required capability is not in the Available "
@@ -2236,6 +2803,43 @@ namespace agentos
             as.step.command = s["command"].GetString ();
           if (s.HasMember ("description") && s["description"].IsString ())
             as.step.description = s["description"].GetString ();
+          // ADR-031 §9: target_type is required, no default — leniently
+          // left empty here if missing/malformed; dispatch_next_step logs
+          // a warning and treats an empty target_type as "worker" as a
+          // second line of defense, but parsing it here means it's
+          // available immediately (e.g. for logging) rather than only at
+          // dispatch time.
+          if (s.HasMember ("target_type") && s["target_type"].IsString ())
+            as.step.target_type = s["target_type"].GetString ();
+          // ADR-031 §10 (+ asset attachment): the step's own input
+          // parameters — this was previously dropped entirely, meaning
+          // step.params was always empty regardless of what the
+          // Plan-authoring Adviser wrote (e.g. input_path/format for
+          // extract_segments, or $asset:<id>/$step:<id>.<field>/
+          // $prev_result reference tokens). Every value is stored as its
+          // JSON text representation (via Writer, not GetString()) so
+          // resolve_step_references' "parses as JSON -> embed raw, else ->
+          // quote" logic downstream sees consistent input regardless of
+          // whether the Adviser wrote a string, number, object, or array.
+          if (s.HasMember ("input") && s["input"].IsObject ())
+          {
+            for (auto it = s["input"].MemberBegin ();
+                 it != s["input"].MemberEnd (); ++it)
+            {
+              if (it->value.IsString ())
+              {
+                as.step.params[it->name.GetString ()]
+                  = it->value.GetString ();
+              }
+              else
+              {
+                rapidjson::StringBuffer vbuf;
+                rapidjson::Writer<rapidjson::StringBuffer> vw (vbuf);
+                it->value.Accept (vw);
+                as.step.params[it->name.GetString ()] = vbuf.GetString ();
+              }
+            }
+          }
           // ADR-031: needs_forge is required; absence is a Planning Adviser
           // failure — treat missing field as false and log a warning.
           if (s.HasMember ("needs_forge") && s["needs_forge"].IsBool ())
@@ -2438,9 +3042,24 @@ namespace agentos
       {
         OrchestratorEvent submit;
         submit.kind = OrchestratorEvent::Kind::GatewayInbound;
-        submit.payload_json
-          = R"({"method":"job.submit","key":"","id":"timer","params":{"goal":")"
-            + goal + R"("}})";
+        {
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("method");
+          w.String ("job.submit");
+          w.Key ("key");
+          w.String ("");
+          w.Key ("id");
+          w.String ("timer");
+          w.Key ("params");
+          w.StartObject ();
+          w.Key ("goal");
+          w.String (goal.c_str ());
+          w.EndObject ();
+          w.EndObject ();
+          submit.payload_json = buf.GetString ();
+        }
         on_message (std::move (submit));
       }
     }
@@ -2449,6 +3068,116 @@ namespace agentos
   // ---------------------------------------------------------------------------
   // Pipeline execution
   // ---------------------------------------------------------------------------
+
+  // ADR-031 §10: resolve $prev_result and $step:<id>.<field> reference
+  // tokens in a step's params against persisted step results. $prev_result
+  // is a shorthand for "the immediately preceding step's whole result" —
+  // callers pass it in explicitly since ActiveJob already tracks it
+  // (job.last_step_result), avoiding a redundant DB read for the common
+  // case. $step:<id> (no field) substitutes that step's whole result;
+  // $step:<id>.<field> extracts one top-level field from it. Values that
+  // aren't reference tokens pass through unchanged.
+  std::unordered_map<std::string, std::string>
+  Orchestrator::resolve_step_references (
+    const std::unordered_map<std::string, std::string> &params,
+    const std::string &prev_result, const std::string &job_id)
+  {
+    std::unordered_map<std::string, std::string> resolved;
+    resolved.reserve (params.size ());
+
+    for (const auto &[key, value] : params)
+    {
+      if (value == "$prev_result")
+      {
+        resolved[key] = prev_result.empty () ? "{}" : prev_result;
+        continue;
+      }
+
+      if (value.rfind ("$asset:", 0) == 0)
+      {
+        // Resolves to the absolute path of the file this job.submit call
+        // already validated ownership for and materialized into this job's
+        // own directory (cmd_job_submit) — never a fresh lookup here, per
+        // the static-binding decision: by the time a step dispatches, the
+        // job_id -> asset_id -> path mapping was fixed once at submission
+        // time and does not change for the life of the job.
+        const std::string asset_id = value.substr (7); // after "$asset:"
+        auto job_assets = db_.load_job_assets (job_id);
+        auto it = std::find_if (job_assets.begin (), job_assets.end (),
+                                [&] (const Database::JobAssetRow &r)
+                                { return r.asset_id == asset_id; });
+        if (it == job_assets.end ())
+        {
+          spdlog::warn ("[orchestrator] $asset reference '{}' not found "
+                       "among job {}'s attached assets",
+                       value, job_id);
+          resolved[key] = "\"\"";
+          continue;
+        }
+        const std::string path
+          = (agentos_home () / "jobs" / job_id / "assets" / it->filename)
+              .string ();
+        // Emit as a JSON string value (quoted), not a raw path — this
+        // result is later embedded into task_json/prompt text via the
+        // "parses as JSON -> emit raw, else -> quote" logic at each call
+        // site, so a bare path would be mis-typed as invalid JSON and get
+        // double-quoted incorrectly. Quoting it here up front keeps this
+        // function's contract uniform: every resolved value is valid JSON.
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        w.String (path.c_str ());
+        resolved[key] = buf.GetString ();
+        continue;
+      }
+
+      if (value.rfind ("$step:", 0) == 0)
+      {
+        const std::string rest = value.substr (6); // after "$step:"
+        const auto dot = rest.find ('.');
+        const std::string ref_step_id
+          = (dot == std::string::npos) ? rest : rest.substr (0, dot);
+        const std::string field
+          = (dot == std::string::npos) ? "" : rest.substr (dot + 1);
+
+        const std::string ref_result = db_.load_step_result (ref_step_id);
+        if (ref_result.empty ())
+        {
+          spdlog::warn ("[orchestrator] $step reference '{}' resolved to "
+                       "empty (step {} has no persisted result)",
+                       value, ref_step_id);
+          resolved[key] = "{}";
+          continue;
+        }
+
+        if (field.empty ())
+        {
+          resolved[key] = ref_result;
+          continue;
+        }
+
+        rapidjson::Document doc;
+        if (doc.Parse (ref_result.c_str ()).HasParseError () || !doc.IsObject ()
+            || !doc.HasMember (field.c_str ()))
+        {
+          spdlog::warn ("[orchestrator] $step reference '{}': field '{}' "
+                       "not found in step {}'s result",
+                       value, field, ref_step_id);
+          resolved[key] = "{}";
+          continue;
+        }
+
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        doc[field.c_str ()].Accept (w);
+        resolved[key] = buf.GetString ();
+        continue;
+      }
+
+      resolved[key] = value; // not a reference — pass through
+    }
+
+    return resolved;
+  }
 
   void Orchestrator::dispatch_next_step (ActiveJob &job)
   {
@@ -2462,6 +3191,25 @@ namespace agentos
     }
 
     ActiveStep &step = job.pending_steps.front ();
+
+    // ADR-031 §9: route by target_type. Missing target_type is leniently
+    // treated as "worker" (logged, not rejected) — mirrors the existing
+    // needs_forge leniency below rather than hard-failing the Plan; a
+    // Plan-authoring Adviser that omits it should be flagged, not let a
+    // whole job die over one missing field.
+    if (step.step.target_type.empty ())
+    {
+      spdlog::warn ("[orchestrator] plan step missing target_type for job {} "
+                   "step {} — treating as \"worker\"",
+                   job.job_id, step.step.id);
+      step.step.target_type = "worker";
+    }
+
+    if (step.step.target_type == "adviser")
+    {
+      dispatch_adviser_step (job);
+      return;
+    }
 
     // Look up Worker for this step's command.
     auto worker = registry_.find_worker_for_command (step.step.command);
@@ -2523,6 +3271,15 @@ namespace agentos
     // command and description give the worker its semantic context.
     // $prev_result carries the previous step's output (ADR-022).
     {
+      // Resolve $prev_result/$step:<id>.<field>/$asset:<id> tokens in this
+      // step's own input params before merging them in below. This was
+      // previously missing entirely for Worker-target steps — the Plan's
+      // per-step `input` (e.g. input_path/format for extract_segments) was
+      // never forwarded into task_json at all, only the fixed
+      // job_id/step_id/command/description/$prev_result fields were.
+      auto resolved_params = resolve_step_references (
+        step.step.params, job.last_step_result, job.job_id);
+
       rapidjson::StringBuffer tbuf;
       rapidjson::Writer<rapidjson::StringBuffer> tw (tbuf);
       tw.StartObject ();
@@ -2535,7 +3292,10 @@ namespace agentos
       tw.Key ("description");
       tw.String (step.step.description.c_str ());
       // Inject previous step result as $prev_result (empty object if first
-      // step).
+      // step) — kept as its own always-present key for backward
+      // compatibility with Worker scripts that look for it directly,
+      // independent of whether the Plan step's own params also reference
+      // $prev_result by name.
       tw.Key ("$prev_result");
       if (!job.last_step_result.empty ())
         tw.RawValue (job.last_step_result.c_str (),
@@ -2544,6 +3304,20 @@ namespace agentos
       {
         tw.StartObject ();
         tw.EndObject ();
+      }
+      // Merge the step's own resolved input params as top-level keys —
+      // e.g. extract_segments expects input_path/format directly on the
+      // task object, not nested under a "params" sub-object.
+      for (const auto &[k, v] : resolved_params)
+      {
+        tw.Key (k.c_str ());
+        rapidjson::Document probe;
+        if (!probe.Parse (v.c_str ()).HasParseError ()
+            && (probe.IsObject () || probe.IsArray () || probe.IsString ()
+                || probe.IsNumber () || probe.IsBool ()))
+          tw.RawValue (v.c_str (), v.size (), probe.GetType ());
+        else
+          tw.String (v.c_str ());
       }
       tw.EndObject ();
       req.task_json = tbuf.GetString ();
@@ -2587,6 +3361,190 @@ namespace agentos
 
     spdlog::info ("[orchestrator] dispatched step {} run_id={} pid={}",
                   step.step.id, run_id, result.pid);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-031 §9/§10: dispatch a target_type:"adviser" step
+  // ---------------------------------------------------------------------------
+  //
+  // Mirrors the Planning/domain-Adviser spawn (single-shot LlmClient::complete
+  // call in a detached thread, ADR-018) but with two differences: the prompt
+  // asks for a step result, not a Plan; and the parsed response is treated as
+  // an opaque JSON result object handed to the next step, not validated
+  // against the {"steps":[...]} Plan schema.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::dispatch_adviser_step (ActiveJob &job)
+  {
+    if (job.pending_steps.empty ())
+      return;
+
+    ActiveStep &step = job.pending_steps.front ();
+
+    auto adviser = registry_.find_adviser_by_id (step.step.command);
+    if (!adviser)
+    {
+      // No Forge fallback exists for Advisers (Forge only ever generates
+      // Workers, ADR-031 §9) — there is nothing to retry into existence.
+      // The Plan-authoring Adviser violated the Available-advisers
+      // constraint; fail the job directly rather than looping on a
+      // reference that will never resolve.
+      spdlog::error ("[orchestrator] target_type:adviser step '{}' "
+                    "references unknown adviser '{}' for job {} — "
+                    "Plan-authoring Adviser violated the Available-advisers "
+                    "constraint (ADR-031 §9)",
+                    step.step.id, step.step.command, job.job_id);
+      finish_job (job.job_id, false,
+                 "step " + step.step.id + " targets unknown adviser '"
+                   + step.step.command + "'");
+      return;
+    }
+
+    const std::string job_id = job.job_id;
+    const std::string step_id = step.step.id;
+    const std::string adviser_id = step.step.command;
+    const std::string step_description = step.step.description;
+
+    // ADR-031 §10: resolve $prev_result / $step:<id>.<field> before
+    // building the prompt.
+    auto resolved_params
+      = resolve_step_references (step.step.params, job.last_step_result,
+                                 job.job_id);
+
+    spdlog::info ("[orchestrator] dispatching adviser-target step {} → "
+                 "adviser {} for job {}",
+                 step_id, adviser_id, job_id);
+
+    db_.update_step_status (step.step.id, db::step_status::running);
+
+    auto home = agentos_home ();
+    const std::string skill_path
+      = (home / "advisers" / adviser_id / "skill.md").string ();
+    std::string system_prompt;
+    {
+      std::ifstream f (skill_path);
+      if (f)
+        system_prompt.assign (std::istreambuf_iterator<char> (f),
+                              std::istreambuf_iterator<char> ());
+      else
+        spdlog::warn ("[orchestrator] skill.md not found for adviser {}, "
+                     "using empty system prompt",
+                     adviser_id);
+    }
+
+    // ADR-031 §10 user prompt shape: description, then "Input from previous
+    // step" (omitted for a first step — mirrors $prev_result injection for
+    // Worker-target steps, ADR-022's "only if i > 0" rule), then remaining
+    // step params under their own heading.
+    std::string user_prompt = step_description + "\n\n";
+
+    if (!job.last_step_result.empty ())
+      user_prompt
+        += "Input from previous step:\n" + job.last_step_result + "\n\n";
+
+    if (!resolved_params.empty ())
+    {
+      user_prompt += "Step input parameters:\n";
+      rapidjson::StringBuffer pbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> pw (pbuf);
+      pw.StartObject ();
+      for (const auto &[k, v] : resolved_params)
+      {
+        pw.Key (k.c_str ());
+        // v may already be JSON (substituted from $step:/$prev_result) or a
+        // plain string literal from the Plan — emit raw if it parses as an
+        // object/array, else as a quoted string, so the adviser always sees
+        // well-formed JSON either way.
+        rapidjson::Document probe;
+        if (!probe.Parse (v.c_str ()).HasParseError ()
+            && (probe.IsObject () || probe.IsArray ()))
+          pw.RawValue (v.c_str (), v.size (), probe.GetType ());
+        else
+          pw.String (v.c_str ());
+      }
+      pw.EndObject ();
+      user_prompt += std::string (pbuf.GetString ()) + "\n";
+    }
+
+    std::thread (
+      [this, job_id, step_id, adviser_id,
+       system_prompt = std::move (system_prompt),
+       user_prompt = std::move (user_prompt)] () mutable
+      {
+        LlmClient client (llm_, config_.llm);
+        LlmRequest req;
+        req.system_prompt = std::move (system_prompt);
+        req.user_prompt = std::move (user_prompt);
+        req.max_tokens = 4096;
+
+        auto result = client.complete (req);
+
+        OrchestratorEvent ev;
+        ev.job_id = job_id;
+
+        if (!result.ok)
+        {
+          spdlog::error ("[orchestrator] adviser-step LLM call failed for "
+                        "job {} step {}: {}",
+                        job_id, step_id, result.error);
+          ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+          ev.payload_json = R"({"job_id":")" + job_id + R"(","step_id":")"
+                            + step_id
+                            + R"(","reason":"LLM call failed"})";
+          enqueue (std::move (ev));
+          return;
+        }
+
+        std::string content = result.value.content;
+        if (content.size () >= 3 && content.substr (0, 3) == "```")
+        {
+          auto first_nl = content.find ('\n');
+          if (first_nl != std::string::npos)
+            content = content.substr (first_nl + 1);
+          if (content.size () >= 3
+              && content.substr (content.size () - 3) == "```")
+            content.erase (content.size () - 3);
+          while (!content.empty ()
+                 && (content.back () == '\n' || content.back () == '\r'
+                     || content.back () == ' '))
+            content.pop_back ();
+        }
+
+        rapidjson::Document doc;
+        if (doc.Parse (content.c_str ()).HasParseError () || !doc.IsObject ())
+        {
+          spdlog::error ("[orchestrator] adviser {} produced invalid JSON "
+                        "for job {} step {}: {}",
+                        adviser_id, job_id, step_id, content);
+          ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+          ev.payload_json = R"({"job_id":")" + job_id + R"(","step_id":")"
+                            + step_id + R"(","reason":"invalid JSON output"})";
+          enqueue (std::move (ev));
+          return;
+        }
+
+        ev.kind = OrchestratorEvent::Kind::AdviserDone;
+        {
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("job_id");
+          w.String (job_id.c_str ());
+          w.Key ("step_id");
+          w.String (step_id.c_str ());
+          w.Key ("result");
+          doc.Accept (w); // re-serialize the validated document, not the
+                          // raw completion text — Parse() only guarantees
+                          // the leading JSON value was well-formed, not that
+                          // the whole string was consumed; reusing raw
+                          // `content` could smuggle trailing bytes into the
+                          // outer payload's structure.
+          w.EndObject ();
+          ev.payload_json = buf.GetString ();
+        }
+        enqueue (std::move (ev));
+      })
+      .detach ();
   }
 
   void Orchestrator::on_step_complete (const std::string &job_id,
@@ -2643,29 +3601,41 @@ namespace agentos
       return;
 
     ActiveJob &job = it->second;
+    if (job.pending_steps.empty ())
+      return;
 
-    // Extract command and needs_forge from the current step before escalating.
-    // pending_steps.front() is the step that just failed — it has not been
-    // popped yet (pop_front only happens on success in on_step_complete).
-    const std::string command = (!job.pending_steps.empty ())
-                                  ? job.pending_steps.front ().step.command
-                                  : "";
-    const bool needs_forge = (!job.pending_steps.empty ())
-                               ? job.pending_steps.front ().step.needs_forge
-                               : false;
-    const std::string step_desc
-      = (!job.pending_steps.empty ())
-          ? job.pending_steps.front ().step.description
-          : "";
+    // ADR-031 §11: this function is only ever reached after a step was
+    // successfully dispatched — dispatch_next_step's genuine Registry-miss
+    // case (no Worker/Adviser for the command at all) escalates to
+    // Master/WorkerExhausted directly and returns before any dispatch
+    // happens (see dispatch_next_step and dispatch_adviser_step). So a
+    // failure reaching this function always means "a capability that
+    // exists failed at runtime" -- retry the same step locally; never
+    // escalate to Forge for this (Forge rewrites code, it does not fix a
+    // transient runtime failure, and conflating the two burns LLM calls on
+    // failures that were never a missing-capability problem in the first
+    // place).
+    ActiveStep &step = job.pending_steps.front ();
+    step.attempts++;
 
-    // Escalate to Master with full context so trigger_forge has what it needs.
-    MasterEvent me;
-    me.kind = MasterEvent::Kind::WorkerExhausted;
-    me.job_id = job_id;
-    me.payload_json = R"({"job_id":")" + job_id + R"(","command":")" + command
-                      + R"(","needs_forge":)" + (needs_forge ? "true" : "false")
-                      + R"(,"step_description":")" + step_desc + R"("})";
-    send_to_master_ (std::move (me));
+    if (step.attempts <= kMaxStepRetries)
+    {
+      spdlog::warn ("[orchestrator] step {} ({}) failed, retrying job {} "
+                   "(attempt {}/{})",
+                   step.step.id, step.step.command, job_id, step.attempts,
+                   kMaxStepRetries);
+      job.current_run_id.clear ();
+      dispatch_next_step (job);
+      return;
+    }
+
+    spdlog::error ("[orchestrator] step {} ({}) exhausted {} retries -- "
+                  "failing job {}",
+                  step.step.id, step.step.command, kMaxStepRetries, job_id);
+    finish_job (job_id, false,
+               "step " + step.step.id + " (" + step.step.command
+                 + ") failed after " + std::to_string (kMaxStepRetries)
+                 + " retries");
   }
 
   void Orchestrator::finish_job (const std::string &job_id, bool success,

@@ -95,6 +95,8 @@ void register_job_commands (CLI::App &app)
     auto reviewer_id = std::make_shared<std::string> ();
     auto acceptance_criteria = std::make_shared<std::string> ();
     auto user_id = std::make_shared<std::string> ("0");
+    auto asset_paths = std::make_shared<std::vector<std::string>> ();
+    auto asset_ids = std::make_shared<std::vector<std::string>> ();
 
     submit->add_option ("--goal", *goal)->required ();
     submit->add_option ("--input", *input_str);
@@ -105,10 +107,21 @@ void register_job_commands (CLI::App &app)
     submit->add_option ("--reviewer", *reviewer_id);
     submit->add_option ("--acceptance-criteria", *acceptance_criteria);
     submit->add_option ("--user", *user_id)->default_val ("0");
+    submit->add_option ("--asset", *asset_paths)
+      ->description ("Local file path to register and attach — calls "
+                    "asset.register first, then attaches the resulting "
+                    "asset_id. Repeatable for multiple files. Convenience "
+                    "only: the production path is to call `asset register` "
+                    "yourself and pass --asset-id, e.g. to reuse the same "
+                    "asset across several `job submit` calls (one per "
+                    "target language) without re-uploading each time.");
+    submit->add_option ("--asset-id", *asset_ids)
+      ->description ("Already-registered asset_id to attach — repeatable.");
 
     submit->callback (
       [timeout_ms, socket_path, json_flag, access_key, goal, input_str, type, interval_s,
-       starts_at, max_iterations, reviewer_id, acceptance_criteria, user_id]
+       starts_at, max_iterations, reviewer_id, acceptance_criteria, user_id,
+       asset_paths, asset_ids]
       {
         try
         {
@@ -126,6 +139,34 @@ void register_job_commands (CLI::App &app)
             spdlog::error ("socket_path is unknown!");
             std::exit (-1);
           }
+
+          // --asset is sugar: register each path now, on this same
+          // connection, and fold the resulting asset_id into the same
+          // `assets` array --asset-id values go into. job.submit itself
+          // never sees a raw path — the request it receives is identical
+          // whether every asset_id came from --asset-id or from a fresh
+          // --asset registration done just now.
+          std::vector<std::string> all_asset_ids = *asset_ids;
+          for (const auto &path : *asset_paths)
+          {
+            // Resolved here, in the CLI process — its cwd is the user's
+            // actual shell directory, unlike the daemon's (a separate,
+            // long-running process whose cwd has nothing to do with where
+            // the user is standing).
+            std::string abs_path = std::filesystem::absolute (path).string ();
+            rapidjson::Document reg_params (rapidjson::kObjectType);
+            auto &reg_alloc = reg_params.GetAllocator ();
+            reg_params.AddMember (
+              "path", rapidjson::Value (abs_path.c_str (), reg_alloc),
+              reg_alloc);
+            reg_params.AddMember (
+              "user_id", rapidjson::Value (user_id->c_str (), reg_alloc),
+              reg_alloc);
+            auto reg_result
+              = client.send ("asset.register", std::move (reg_params));
+            all_asset_ids.push_back (reg_result["asset_id"].GetString ());
+          }
+
           auto params = agentos::cli::build_job_submit_params (
             *goal, *type, *input_str, *interval_s, *starts_at, *max_iterations,
             *reviewer_id, *acceptance_criteria);
@@ -134,6 +175,13 @@ void register_job_commands (CLI::App &app)
             auto &alloc = params.GetAllocator ();
             params.AddMember ("user_id", Value (user_id->c_str (), alloc),
                               alloc);
+            if (!all_asset_ids.empty ())
+            {
+              Value assets_arr (rapidjson::kArrayType);
+              for (const auto &id : all_asset_ids)
+                assets_arr.PushBack (Value (id.c_str (), alloc), alloc);
+              params.AddMember ("assets", assets_arr, alloc);
+            }
           }
           auto result = client.send ("job.submit", std::move (params));
           if (*json_flag)

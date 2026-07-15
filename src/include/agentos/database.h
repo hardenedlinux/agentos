@@ -437,6 +437,55 @@ namespace agentos
     load_suite_components (const std::string &suite_id);
     void set_suite_enabled (const std::string &suite_id, bool enabled);
 
+    // -- Asset registration (content-addressed local blob storage) ----------
+    // A blob's real bytes live at ~/.agentos/assets/blobs/<sha256>/content,
+    // deduplicated by content hash. This table is the queryable index:
+    // ownership (user_id), display name, and soft-delete status. The
+    // original_filename column holds user-authored text (same posture as
+    // `goal`/`description`/LLM output — free text, not a structural risk as
+    // long as anything that echoes it back stays on the rapidjson::Writer
+    // path, never hand-built string concatenation).
+    struct AssetRow
+    {
+      std::string asset_id;
+      std::string user_id;
+      std::string original_filename;
+      std::string sha256;
+      int64_t size_bytes = 0;
+      std::string source_path;
+      std::string status; // "active" | "revoked"
+      int64_t registered_at = 0;
+    };
+
+    void insert_asset (const std::string &asset_id, const std::string &user_id,
+                       const std::string &original_filename,
+                       const std::string &sha256, int64_t size_bytes,
+                       const std::string &source_path);
+    std::optional<AssetRow> load_asset (const std::string &asset_id);
+    void set_asset_status (const std::string &asset_id,
+                           const std::string &status);
+
+    // -- job_assets: which assets a given job.submit attached ----------------
+    // Many-to-many: the same asset_id may be attached to several jobs (e.g.
+    // translating one source document into several target languages, each
+    // a separate job.submit per the "one job per target language" design;
+    // ADR-031 Gap 6). filename is the sanitized (basename-only) name the
+    // asset was actually materialized under in this job's own directory —
+    // recorded per-job since two jobs could in principle materialize the
+    // same asset_id under different names if the caller passed a different
+    // display name at registration time for a re-registration of identical
+    // content (unlikely but not precluded by the schema).
+    struct JobAssetRow
+    {
+      std::string job_id;
+      std::string asset_id;
+      std::string filename;
+    };
+
+    void insert_job_asset (const std::string &job_id, const std::string &asset_id,
+                           const std::string &filename);
+    std::vector<JobAssetRow> load_job_assets (const std::string &job_id);
+
     std::optional<std::string> resolve_agent_binary (const std::string &ref,
                                                      const std::string &version
                                                      = "");

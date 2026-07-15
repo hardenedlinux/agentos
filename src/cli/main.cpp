@@ -55,6 +55,8 @@ void register_adviser_commands (CLI::App &app);
 void register_review_commands (CLI::App &app);
 void register_forge_commands (CLI::App &app);
 void register_user_commands (CLI::App &app);
+void register_suite_commands (CLI::App &app);
+void register_asset_commands (CLI::App &app);
 
 namespace
 {
@@ -128,14 +130,13 @@ int main (int argc, char **argv)
   app.add_flag ("--json", "JSON output mode");
   app.add_flag ("--no-color", no_color_flag, "Disable terminal color");
 
-
   // ---------- daemon mode ----------
   auto *run = app.add_subcommand ("run", "Start the AgentOS daemon");
   run->callback (
-                 [&]
-                 {
-                   spdlog::set_level (spdlog::level::info);
-                   spdlog::info ("AgentOS {} starting", "0.1.0");
+    [&]
+    {
+      spdlog::set_level (spdlog::level::info);
+      spdlog::info ("AgentOS {} starting", "0.1.0");
 
       agentos::initialise_home (agentos::agentos_home ());
 
@@ -165,22 +166,24 @@ int main (int argc, char **argv)
   register_review_commands (app);
   register_forge_commands (app);
   register_user_commands (app);
+  register_suite_commands (app);
+  register_asset_commands (app);
 
   agentos::cli::add_completion (&app);
 
   try
-  {
-    app.parse (argc, argv);
-  }
+    {
+      app.parse (argc, argv);
+    }
   catch (const CLI::ParseError &e)
-  {
-    return app.exit (e);
-  }
+    {
+      return app.exit (e);
+    }
 
   if (no_color_flag)
-  {
-    agentos::cli::set_color_enabled (false);
-  }
+    {
+      agentos::cli::set_color_enabled (false);
+    }
 
   return 0;
 }

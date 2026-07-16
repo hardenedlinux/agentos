@@ -124,6 +124,14 @@ namespace agentos
     std::string version;
     std::string binary_path; // path to the worker binary (from static catalog)
     std::vector<CommandSchema> commands; // self-described at registration
+    // Sandbox grants declared in manifest.json's top-level fs_read/fs_write
+    // (ADR-015/ADR-016). May contain the reserved placeholders
+    // __JOB_INPUT_PATH__/__JOB_OUTPUT_DIR__, substituted per-job at
+    // dispatch time (Orchestrator::dispatch_next_step) — never resolved
+    // here, since Registry has no concept of "which job" is dispatching.
+    std::vector<std::string> fs_read;
+    std::vector<std::string> fs_write;
+    bool network = false;
   };
 
   // Sandbox tiers (ADR-006)

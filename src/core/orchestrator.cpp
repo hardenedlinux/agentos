@@ -561,6 +561,8 @@ namespace agentos
       cmd_asset_register (params_json, identity, request_id);
     else if (method == "asset.show")
       cmd_asset_show (params_json, identity, request_id);
+    else if (method == "asset.list")
+      cmd_asset_list (params_json, identity, request_id);
     else if (method == "asset.revoke")
       cmd_asset_revoke (params_json, identity, request_id);
     else if (method == "asset.extract")
@@ -646,27 +648,50 @@ namespace agentos
           : "oneshot";
     const std::string job_id = new_uuid ();
 
-    // Optional `assets` array of asset_id strings. Validated and
-    // materialized BEFORE the job itself is persisted — if any asset_id is
-    // unknown or doesn't belong to this user_id, the whole job.submit is
-    // rejected atomically rather than creating a job that will fail later
-    // at dispatch time. This is the one and only place asset_id ->
-    // materialized-path binding happens for this job — static for the rest
-    // of the job's life (ADR-031 discussion: no re-resolution at dispatch
-    // time, no TOCTOU window).
+    // Assets are referenced inline in `goal` text as literal
+    // "[asset: <asset_id>]" tokens — not a separate `assets` parameter.
+    // Core understands exactly one format; bridge/CLI layers differ only
+    // in how a token gets into the goal text (auto-upload-then-insert, or
+    // the caller directly writes a token for an asset_id they already
+    // have — e.g. previously registered, or referencing someone else's
+    // asset). Every token found is validated and materialized BEFORE the
+    // job itself is persisted — if any asset_id is unknown or doesn't
+    // belong to this user_id, the whole job.submit is rejected atomically
+    // rather than creating a job that will fail later at dispatch time.
+    // This is the one and only place asset_id -> materialized-path binding
+    // happens for this job — static for the rest of the job's life
+    // (ADR-031 discussion: no re-resolution at dispatch time, no TOCTOU
+    // window). The token stays in `goal` untouched afterward — the
+    // Plan-authoring Adviser reads it in context and is expected to carry
+    // the same asset_id forward as $asset:<id> in a step's input (see the
+    // "Attached assets" prompt injection, which lists exactly the ids
+    // found here).
     std::vector<std::pair<std::string, std::string>>
       job_assets; // (asset_id, sanitized filename)
-    if (params.HasMember ("assets") && params["assets"].IsArray ())
     {
-      for (const auto &a : params["assets"].GetArray ())
+      static const std::string kOpenTag = "[asset:";
+      size_t pos = 0;
+      while ((pos = goal.find (kOpenTag, pos)) != std::string::npos)
       {
-        if (!a.IsString ())
-        {
-          reply_error (identity, request_id, -32602,
-                       "'assets' entries must be asset_id strings");
-          return;
-        }
-        const std::string asset_id = a.GetString ();
+        const size_t close = goal.find (']', pos);
+        if (close == std::string::npos)
+          break; // unterminated tag — nothing more to find past this point
+
+        std::string asset_id
+          = goal.substr (pos + kOpenTag.size (),
+                        close - (pos + kOpenTag.size ()));
+        // Trim surrounding whitespace (the convention is "[asset: <id>]"
+        // with a space after the colon, but tolerate "[asset:<id>]" too).
+        const auto first = asset_id.find_first_not_of (" \t");
+        const auto last = asset_id.find_last_not_of (" \t");
+        asset_id = (first == std::string::npos)
+                    ? std::string ()
+                    : asset_id.substr (first, last - first + 1);
+        pos = close + 1;
+
+        if (asset_id.empty ())
+          continue;
+
         auto asset = db_.load_asset (asset_id);
         if (!asset || asset->user_id != user_id || asset->status != "active")
         {
@@ -2045,6 +2070,53 @@ namespace agentos
     reply_ok (identity, request_id, buf.GetString ());
   }
 
+  void Orchestrator::cmd_asset_list (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    // user_id required; the server side does not default it silently — a
+    // missing user_id here means the caller (CLI or otherwise) failed to
+    // send one, which is a caller bug worth surfacing, not something to
+    // paper over. The CLI's own --user default (and its warning when the
+    // flag was omitted) is a separate, deliberate UX decision made at the
+    // CLI layer — this handler just requires the field to be present.
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    const std::string user_id = params["user_id"].GetString ();
+
+    auto assets = db_.load_assets_for_user (user_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("assets");
+    w.StartArray ();
+    for (const auto &a : assets)
+    {
+      w.StartObject ();
+      w.Key ("asset_id");
+      w.String (a.asset_id.c_str ());
+      w.Key ("original_filename");
+      w.String (a.original_filename.c_str ());
+      w.Key ("size_bytes");
+      w.Int64 (a.size_bytes);
+      w.Key ("status");
+      w.String (a.status.c_str ());
+      w.Key ("registered_at");
+      w.Int64 (a.registered_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
   void Orchestrator::cmd_asset_revoke (const std::string &params_json,
                                        const std::string &identity,
                                        const std::string &request_id)
@@ -2551,6 +2623,15 @@ namespace agentos
             if (!c.description.empty ())
               capability_list_str += "  — " + c.description;
             capability_list_str += "\n";
+            // input_schema tells the Adviser the EXACT field names a step's
+            // "input" object must use (e.g. "input_path"/"format") — the
+            // description alone is not sufficient; an Adviser without this
+            // will invent plausible-sounding names ("source_file") instead
+            // of the ones the Worker actually reads, and silently omit
+            // fields never mentioned in prose (e.g. "format").
+            if (!c.input_schema.empty () && c.input_schema != "{}")
+              capability_list_str
+                += "    input schema: " + c.input_schema + "\n";
           }
         }
       }
@@ -2669,9 +2750,11 @@ namespace agentos
                "\"input\":{\"...\":\"step-specific input; reference an "
                "earlier step's result with \\\"$step:<step id>.<field>\\\", "
                "the immediately preceding step's whole result with "
-               "\\\"$prev_result\\\", or an attached asset's file path with "
+               "\\\"$prev_result\\\", an attached asset's file path with "
                "\\\"$asset:<asset_id>\\\" (see Attached assets below, if "
-               "any)\"}},...]}.\n"
+               "any), or a real path to write this job's output to by "
+               "prefixing a filename with \\\"$job_output_dir\\\" e.g. "
+               "\\\"$job_output_dir/translated.md\\\"\"}},...]}.\n"
                "Every step MUST include target_type — there is no default. "
                "Set needs_forge:true for any target_type:\"worker\" step "
                "whose required capability is not in the Available "
@@ -3093,6 +3176,23 @@ namespace agentos
         continue;
       }
 
+      // Prefix substitution (not whole-value matching like $asset:/$step:
+      // below) — a step's input can build a real output filename on top
+      // of this job's actual output directory, e.g.
+      // "$job_output_dir/translated_en.md". Resolves to the exact same
+      // path __JOB_OUTPUT_DIR__ substitutes to for the manifest's
+      // fs_write grant (dispatch_next_step), so a Worker like `reassemble`
+      // can actually write to a path its own sandbox has been granted
+      // access to.
+      static const std::string kJobOutputDir = "$job_output_dir";
+      if (value.rfind (kJobOutputDir, 0) == 0)
+      {
+        const std::string real_output_dir
+          = (agentos_home () / "jobs" / job_id / "output").string ();
+        resolved[key] = real_output_dir + value.substr (kJobOutputDir.size ());
+        continue;
+      }
+
       if (value.rfind ("$asset:", 0) == 0)
       {
         // Resolves to the absolute path of the file this job.submit call
@@ -3267,6 +3367,53 @@ namespace agentos
     req.step_id = step.step.id;
     req.worker_id = worker->id.value ();
     req.binary_path = worker->binary_path;
+
+    // ADR-015/016: substitute the reserved __JOB_INPUT_PATH__/
+    // __JOB_OUTPUT_DIR__ placeholders in the Worker's declared fs_read/
+    // fs_write with this job's actual per-job directories. This is the
+    // piece that was missing entirely before — fs_read/fs_write were never
+    // populated on DispatchRequest at all, so a Worker's sandbox got no
+    // grant for its own declared paths no matter what the manifest said.
+    {
+      const std::string job_assets_dir
+        = (agentos_home () / "jobs" / job.job_id / "assets").string ();
+      const std::string job_output_dir
+        = (agentos_home () / "jobs" / job.job_id / "output").string ();
+      std::error_code ec;
+      fs::create_directories (job_assets_dir, ec); // may not exist yet if
+                                                    // this job had zero
+                                                    // attached assets
+      fs::create_directories (job_output_dir, ec); // fs_write target must
+                                                    // exist before Landlock
+                                                    // can grant it
+      if (ec)
+        spdlog::warn ("[orchestrator] cannot create output dir {}: {}",
+                     job_output_dir, ec.message ());
+
+      auto substitute = [&] (const std::string &path)
+      {
+        if (path == "__JOB_INPUT_PATH__")
+          return job_assets_dir;
+        if (path == "__JOB_OUTPUT_DIR__")
+          return job_output_dir;
+        return path; // not a placeholder — pass through as declared
+      };
+
+      for (const auto &p : worker->fs_read)
+        req.fs_read.push_back (substitute (p));
+      for (const auto &p : worker->fs_write)
+        req.fs_write.push_back (substitute (p));
+
+      std::string fs_read_str, fs_write_str;
+      for (const auto &p : req.fs_read)
+        fs_read_str += p + "; ";
+      for (const auto &p : req.fs_write)
+        fs_write_str += p + "; ";
+      spdlog::info ("[orchestrator] step {} fs_read=[{}] fs_write=[{}] "
+                   "network={}",
+                   step.step.id, fs_read_str, fs_write_str, worker->network);
+    }
+    req.network = worker->network;
     // Build task_json with all step data the worker needs (ADR-019).
     // command and description give the worker its semantic context.
     // $prev_result carries the previous step's output (ADR-022).
@@ -3321,8 +3468,9 @@ namespace agentos
       }
       tw.EndObject ();
       req.task_json = tbuf.GetString ();
+      spdlog::info ("[orchestrator] step {} task_json: {}", step.step.id,
+                   req.task_json);
     }
-    req.network = false; // from manifest; TODO: load from Registry
 
     // Persist worker_run before fork (ADR-022: persist before act).
     WorkerRun run;

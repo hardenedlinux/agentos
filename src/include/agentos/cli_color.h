@@ -12,9 +12,19 @@ namespace detail {
 inline bool& color_enabled_flag()
 {
     static bool value = []() -> bool {
-        if (!isatty(STDOUT_FILENO))             return false;
+        // NO_COLOR is an explicit opt-out and always wins, even over a
+        // forced-on request below (https://no-color.org convention).
         const char* no_color = std::getenv("NO_COLOR");
         if (no_color && no_color[0] != '\0')    return false;
+
+        // CLICOLOR_FORCE forces color on regardless of isatty() —
+        // needed because some wrappers (e.g. `watch`) never allocate a
+        // pty to the child process at all, so isatty() is false no
+        // matter what the wrapper itself ultimately renders to.
+        const char* force = std::getenv("CLICOLOR_FORCE");
+        if (force && force[0] != '\0' && force[0] != '0') return true;
+
+        if (!isatty(STDOUT_FILENO))             return false;
         const char* term = std::getenv("TERM");
         if (!term || std::string_view(term) == "dumb") return false;
         return true;

@@ -31,6 +31,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <set>
 #include <spdlog/spdlog.h>
 #include <string>
 #include <vector>
@@ -108,15 +109,21 @@ void register_job_commands (CLI::App &app)
     submit->add_option ("--acceptance-criteria", *acceptance_criteria);
     submit->add_option ("--user", *user_id)->default_val ("0");
     submit->add_option ("--asset", *asset_paths)
-      ->description ("Local file path to register and attach — calls "
-                    "asset.register first, then attaches the resulting "
-                    "asset_id. Repeatable for multiple files. Convenience "
+      ->description ("Local file path to register and attach. --goal must "
+                    "reference it by basename as \"[file: <name>]\" — "
+                    "every --asset and every [file: ...] reference in "
+                    "--goal must match exactly, checked before anything is "
+                    "uploaded. Repeatable for multiple files. Convenience "
                     "only: the production path is to call `asset register` "
                     "yourself and pass --asset-id, e.g. to reuse the same "
                     "asset across several `job submit` calls (one per "
                     "target language) without re-uploading each time.");
     submit->add_option ("--asset-id", *asset_ids)
-      ->description ("Already-registered asset_id to attach — repeatable.");
+      ->description ("Already-registered asset_id to attach — appends an "
+                    "\"[asset: <id>]\" token to --goal (no filename "
+                    "matching, since there's no file to upload). You can "
+                    "also just write the token directly in --goal "
+                    "yourself instead of using this flag.");
 
     submit->callback (
       [timeout_ms, socket_path, json_flag, access_key, goal, input_str, type, interval_s,
@@ -140,13 +147,69 @@ void register_job_commands (CLI::App &app)
             std::exit (-1);
           }
 
-          // --asset is sugar: register each path now, on this same
-          // connection, and fold the resulting asset_id into the same
-          // `assets` array --asset-id values go into. job.submit itself
-          // never sees a raw path — the request it receives is identical
-          // whether every asset_id came from --asset-id or from a fresh
-          // --asset registration done just now.
-          std::vector<std::string> all_asset_ids = *asset_ids;
+          // goal uses "[file: <name>]" tokens; --asset <path> supplies the
+          // actual files. Every --asset's basename must correspond to
+          // exactly one [file: <name>] reference in goal, and vice versa —
+          // checked BEFORE any upload happens, so a typo'd filename or a
+          // forgotten --asset never results in wasted registrations (each
+          // asset.register call hashes + stores a blob; there's no reason
+          // to pay that cost for a request that's going to be rejected
+          // anyway).
+          auto scan_file_tokens = [] (const std::string &text)
+          {
+            std::vector<std::string> names;
+            static const std::string kOpen = "[file:";
+            size_t pos = 0;
+            while ((pos = text.find (kOpen, pos)) != std::string::npos)
+            {
+              const size_t close = text.find (']', pos);
+              if (close == std::string::npos)
+                break;
+              std::string name
+                = text.substr (pos + kOpen.size (),
+                               close - (pos + kOpen.size ()));
+              const auto first = name.find_first_not_of (" \t");
+              const auto last = name.find_last_not_of (" \t");
+              name = (first == std::string::npos)
+                       ? std::string ()
+                       : name.substr (first, last - first + 1);
+              pos = close + 1;
+              if (!name.empty ())
+                names.push_back (name);
+            }
+            return names;
+          };
+
+          std::vector<std::string> goal_names_vec = scan_file_tokens (*goal);
+          std::set<std::string> goal_names (goal_names_vec.begin (),
+                                            goal_names_vec.end ());
+
+          std::set<std::string> asset_basenames;
+          for (const auto &path : *asset_paths)
+            asset_basenames.insert (
+              std::filesystem::path (path).filename ().string ());
+
+          if (goal_names != asset_basenames)
+          {
+            std::string msg = "goal's [file: ...] references and --asset "
+                              "paths do not match exactly; nothing was "
+                              "uploaded.";
+            for (const auto &n : goal_names)
+              if (!asset_basenames.count (n))
+                msg += " Missing --asset for '" + n + "'.";
+            for (const auto &n : asset_basenames)
+              if (!goal_names.count (n))
+                msg += " --asset '" + n + "' given but not referenced "
+                                          "anywhere in --goal.";
+            agentos::cli::die (2, msg);
+          }
+
+          // Matched exactly — now safe to upload. Register each file, then
+          // rebuild goal with every [file: <name>] token replaced by
+          // [asset: <id>] in place (a single pass over goal's actual token
+          // positions, so arbitrary whitespace inside the brackets and
+          // repeated references to the same file both work correctly).
+          std::vector<std::pair<std::string, std::string>> name_to_id;
           for (const auto &path : *asset_paths)
           {
             // Resolved here, in the CLI process — its cwd is the user's
@@ -154,6 +217,8 @@ void register_job_commands (CLI::App &app)
             // long-running process whose cwd has nothing to do with where
             // the user is standing).
             std::string abs_path = std::filesystem::absolute (path).string ();
+            std::string basename
+              = std::filesystem::path (path).filename ().string ();
             rapidjson::Document reg_params (rapidjson::kObjectType);
             auto &reg_alloc = reg_params.GetAllocator ();
             reg_params.AddMember (
@@ -164,24 +229,59 @@ void register_job_commands (CLI::App &app)
               reg_alloc);
             auto reg_result
               = client.send ("asset.register", std::move (reg_params));
-            all_asset_ids.push_back (reg_result["asset_id"].GetString ());
+            name_to_id.emplace_back (basename,
+                                     reg_result["asset_id"].GetString ());
           }
 
+          std::string final_goal;
+          {
+            static const std::string kOpen = "[file:";
+            size_t pos = 0;
+            while (true)
+            {
+              const size_t start = goal->find (kOpen, pos);
+              if (start == std::string::npos)
+              {
+                final_goal += goal->substr (pos);
+                break;
+              }
+              const size_t close = goal->find (']', start);
+              if (close == std::string::npos)
+              {
+                final_goal += goal->substr (pos);
+                break;
+              }
+              final_goal += goal->substr (pos, start - pos);
+              std::string name
+                = goal->substr (start + kOpen.size (),
+                               close - (start + kOpen.size ()));
+              const auto first = name.find_first_not_of (" \t");
+              const auto last = name.find_last_not_of (" \t");
+              name = (first == std::string::npos)
+                       ? std::string ()
+                       : name.substr (first, last - first + 1);
+              auto it = std::find_if (
+                name_to_id.begin (), name_to_id.end (),
+                [&] (const auto &kv) { return kv.first == name; });
+              final_goal += (it != name_to_id.end ())
+                              ? ("[asset: " + it->second + "]")
+                              : goal->substr (start, close - start + 1);
+              pos = close + 1;
+            }
+          }
+
+          // --asset-id has no filename to match against — append directly.
+          for (const auto &id : *asset_ids)
+            final_goal += " [asset: " + id + "]";
+
           auto params = agentos::cli::build_job_submit_params (
-            *goal, *type, *input_str, *interval_s, *starts_at, *max_iterations,
-            *reviewer_id, *acceptance_criteria);
+            final_goal, *type, *input_str, *interval_s, *starts_at,
+            *max_iterations, *reviewer_id, *acceptance_criteria);
           {
             using rapidjson::Value;
             auto &alloc = params.GetAllocator ();
             params.AddMember ("user_id", Value (user_id->c_str (), alloc),
                               alloc);
-            if (!all_asset_ids.empty ())
-            {
-              Value assets_arr (rapidjson::kArrayType);
-              for (const auto &id : all_asset_ids)
-                assets_arr.PushBack (Value (id.c_str (), alloc), alloc);
-              params.AddMember ("assets", assets_arr, alloc);
-            }
           }
           auto result = client.send ("job.submit", std::move (params));
           if (*json_flag)

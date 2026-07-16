@@ -259,6 +259,9 @@ namespace agentos
     void cmd_asset_show (const std::string &params_json,
                          const std::string &identity,
                          const std::string &request_id);
+    void cmd_asset_list (const std::string &params_json,
+                        const std::string &identity,
+                        const std::string &request_id);
     void cmd_asset_revoke (const std::string &params_json,
                            const std::string &identity,
                            const std::string &request_id);

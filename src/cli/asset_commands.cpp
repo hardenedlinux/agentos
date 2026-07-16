@@ -77,6 +77,45 @@ void register_asset_commands(CLI::App& app) {
         agentos::cli::add_completion(reg);
     }
 
+    // ---- asset list ----
+    {
+        auto* list = asset->add_subcommand("list", "List assets for a user");
+        auto user_id = std::make_shared<std::string>("0");
+        auto* user_opt = list->add_option("--user", *user_id)->default_val("0");
+        list->callback([timeout_ms, socket_path, json_flag, access_key, user_id, user_opt] {
+            try {
+                if (user_opt->count() == 0) {
+                    std::cerr << agentos::cli::color::yellow("warning: --user not specified, defaulting to user 0") << "\n";
+                }
+
+                agentos::cli::CliClient client(*timeout_ms);
+                if (!access_key->empty()) client.set_access_key(*access_key);
+                if (!socket_path->empty()) client.set_socket_path(*socket_path);
+
+                rapidjson::Document params(rapidjson::kObjectType);
+                auto& alloc = params.GetAllocator();
+                params.AddMember("user_id", rapidjson::Value(user_id->c_str(), alloc), alloc);
+
+                auto result = client.send("asset.list", std::move(params));
+                if (*json_flag) { print_json(result); return; }
+                if (!result.HasMember("assets") || !result["assets"].IsArray()
+                    || result["assets"].Empty()) {
+                    std::cout << "No assets for user " << *user_id << ".\n";
+                    return;
+                }
+                for (const auto& a : result["assets"].GetArray()) {
+                    std::cout << a["asset_id"].GetString() << "\t"
+                              << a["original_filename"].GetString() << "\t"
+                              << a["size_bytes"].GetInt64() << " bytes\t"
+                              << a["status"].GetString() << "\n";
+                }
+            } catch (const agentos::cli::CliError& e) {
+                agentos::cli::die(2, e.what());
+            }
+        });
+        agentos::cli::add_completion(list);
+    }
+
     // ---- asset show ----
     {
         auto* show = asset->add_subcommand("show", "Show asset details");

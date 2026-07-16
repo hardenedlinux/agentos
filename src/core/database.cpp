@@ -2309,6 +2309,37 @@ namespace agentos
       spdlog::error ("[database] set_asset_status: {}", sqlite3_errmsg (db_));
   }
 
+  std::vector<Database::AssetRow>
+  Database::load_assets_for_user (const std::string &user_id)
+  {
+    std::vector<AssetRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+      SELECT asset_id, user_id, original_filename, sha256, size_bytes,
+             source_path, status, registered_at
+      FROM assets WHERE user_id = ?
+      ORDER BY registered_at DESC
+  )"));
+    if (!stmt.s)
+      return rows;
+    sqlite3_bind_text (stmt, 1, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      AssetRow row;
+      row.asset_id = column_text_or_empty (stmt, 0);
+      row.user_id = column_text_or_empty (stmt, 1);
+      row.original_filename = column_text_or_empty (stmt, 2);
+      row.sha256 = column_text_or_empty (stmt, 3);
+      row.size_bytes = sqlite3_column_int64 (stmt, 4);
+      row.source_path = column_text_or_empty (stmt, 5);
+      row.status = column_text_or_empty (stmt, 6);
+      row.registered_at = sqlite3_column_int64 (stmt, 7);
+      rows.push_back (std::move (row));
+    }
+    return rows;
+  }
+
   void Database::insert_job_asset (const std::string &job_id,
                                    const std::string &asset_id,
                                    const std::string &filename)

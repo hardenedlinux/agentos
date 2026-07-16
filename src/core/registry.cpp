@@ -147,6 +147,30 @@ namespace agentos
     out_worker.version = version;
     out_worker.binary_path = binary_path;
 
+    // ADR-015/016 sandbox grants — top-level in manifest.json, worker-
+    // instance-wide (not per-capability). May contain the reserved
+    // placeholders __JOB_INPUT_PATH__/__JOB_OUTPUT_DIR__; substituting
+    // those with a real per-job path is Orchestrator's job at dispatch
+    // time, not Registry's — Registry has no job context here.
+    // ADR-015/016 sandbox grants live under manifest.json's "requires"
+    // object (CapabilityDeclaration shape — network/exec/fs_read/fs_write/
+    // tcp_connect_ports), not at the top level — confirmed against the
+    // actual Suite manifest, which nests them exactly this way.
+    if (doc.HasMember ("requires") && doc["requires"].IsObject ())
+    {
+      const auto &req = doc["requires"];
+      if (req.HasMember ("fs_read") && req["fs_read"].IsArray ())
+        for (const auto &p : req["fs_read"].GetArray ())
+          if (p.IsString ())
+            out_worker.fs_read.push_back (p.GetString ());
+      if (req.HasMember ("fs_write") && req["fs_write"].IsArray ())
+        for (const auto &p : req["fs_write"].GetArray ())
+          if (p.IsString ())
+            out_worker.fs_write.push_back (p.GetString ());
+      if (req.HasMember ("network") && req["network"].IsBool ())
+        out_worker.network = req["network"].GetBool ();
+    }
+
     if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())
     {
       spdlog::warn ("[registry] worker '{}' has no capabilities", agent_id);

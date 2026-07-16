@@ -464,6 +464,10 @@ namespace agentos
     std::optional<AssetRow> load_asset (const std::string &asset_id);
     void set_asset_status (const std::string &asset_id,
                            const std::string &status);
+    // Namespace-isolated by design: only ever returns assets owned by
+    // user_id — there is no "list all users' assets" call, matching the
+    // authoritative-check-only posture decided for asset ownership.
+    std::vector<AssetRow> load_assets_for_user (const std::string &user_id);
 
     // -- job_assets: which assets a given job.submit attached ----------------
     // Many-to-many: the same asset_id may be attached to several jobs (e.g.

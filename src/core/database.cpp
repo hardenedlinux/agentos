@@ -334,6 +334,15 @@ namespace agentos
         "ALTER TABLE tasks ADD COLUMN tokens_prompt INTEGER DEFAULT 0");
       maybe_add_column (
         "ALTER TABLE tasks ADD COLUMN tokens_completion INTEGER DEFAULT 0");
+      // ADR-031 §9 / crash-recovery fix: persist target_type and
+      // needs_forge so a step's dispatch routing survives a daemon
+      // restart. Previously only in-memory (PipelinePlanStep), silently
+      // lost on crash regardless of this migration's absence — resume
+      // never actually reconstructed steps at all until this fix (see
+      // load_pipeline_steps_for_job).
+      maybe_add_column ("ALTER TABLE tasks ADD COLUMN target_type TEXT");
+      maybe_add_column (
+        "ALTER TABLE tasks ADD COLUMN needs_forge INTEGER DEFAULT 0");
     }
 
     // ADR‑025: extend the jobs table with new columns (idempotent)
@@ -1474,39 +1483,16 @@ namespace agentos
       spdlog::error ("[database] update_job_phase: {}", sqlite3_errmsg (db_));
   }
 
-  void Database::update_job_plan (const TaskId &id,
-                                  const std::string &plan_json)
-  {
-    if (!db_)
-      return;
-    Stmt stmt (
-      prepare ("UPDATE jobs SET plan = ?, updated_at = ? WHERE id = ?"));
-    if (!stmt.s)
-      return;
-
-    sqlite3_bind_text (stmt, 1, plan_json.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 2, now_unix ());
-    sqlite3_bind_text (stmt, 3, id.value ().c_str (), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step (stmt) != SQLITE_DONE)
-      spdlog::error ("[database] update_job_plan: {}", sqlite3_errmsg (db_));
-  }
-
-  std::string Database::load_plan_json (const TaskId &job_id)
-  {
-    if (!db_)
-      return "";
-    Stmt stmt (prepare ("SELECT plan FROM jobs WHERE id = ?"));
-    if (!stmt.s)
-      return "";
-
-    sqlite3_bind_text (stmt, 1, job_id.value ().c_str (), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step (stmt) == SQLITE_ROW)
-      return column_text_or_empty (stmt, 0);
-    return "";
-  }
-
+  // NOTE: this used to be backed by an update_job_plan()/load_plan_json()
+  // pair writing/reading the jobs.plan column. Confirmed dead code as of
+  // this fix — update_job_plan had zero call sites across database.cpp,
+  // orchestrator.cpp, and master.cpp, so jobs.plan was never populated and
+  // resume_in_flight's previous "SELECT id, plan FROM jobs" always read an
+  // empty string. Removed rather than fixed: step reconstruction now goes
+  // through load_pipeline_steps_for_job (tasks table), which was already
+  // the real source of truth for method/params/target_type/needs_forge per
+  // step. The jobs.plan column itself is left in the schema (harmless,
+  // unused) rather than attempting a DROP COLUMN migration.
   std::vector<Database::InFlightJob> Database::resume_in_flight ()
   {
     std::vector<InFlightJob> jobs;
@@ -1514,7 +1500,7 @@ namespace agentos
       return jobs;
 
     Stmt stmt (prepare (
-      "SELECT id, plan FROM jobs WHERE phase NOT IN ('done','failed')"));
+      "SELECT id FROM jobs WHERE phase NOT IN ('done','failed')"));
     if (!stmt.s)
       return jobs;
 
@@ -1522,7 +1508,6 @@ namespace agentos
     {
       InFlightJob j;
       j.job_id = TaskId (column_text_or_empty (stmt, 0));
-      j.plan_json = column_text_or_empty (stmt, 1);
       jobs.push_back (std::move (j));
     }
     return jobs;
@@ -1541,9 +1526,9 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       INSERT OR REPLACE INTO tasks
-          (id, job_id, method, params,
+          (id, job_id, method, params, target_type, needs_forge,
            description, step_order, status, queued_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
     )"));
     if (!stmt.s)
       return;
@@ -1562,14 +1547,85 @@ namespace agentos
     sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 3, step.command.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 4, buf.GetString (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 5, step.description.c_str (), -1,
+    sqlite3_bind_text (stmt, 5, step.target_type.c_str (), -1,
                        SQLITE_TRANSIENT);
-    sqlite3_bind_int (stmt, 6, step_order);
-    sqlite3_bind_int64 (stmt, 7, now_unix ()); // queued_at = plan time
+    sqlite3_bind_int (stmt, 6, step.needs_forge ? 1 : 0);
+    sqlite3_bind_text (stmt, 7, step.description.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 8, step_order);
+    sqlite3_bind_int64 (stmt, 9, now_unix ()); // queued_at = plan time
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_pipeline_task: {}",
                      sqlite3_errmsg (db_));
+  }
+
+  static StepState row_to_step_state (sqlite3_stmt *stmt)
+  {
+    StepState ss;
+    ss.step.id = column_text_or_empty (stmt, 0);
+    ss.step.command = column_text_or_empty (stmt, 1);
+    ss.step.description = column_text_or_empty (stmt, 2);
+
+    // params was written by store_pipeline_task as a JSON object whose
+    // member values are themselves JSON-text strings (each original
+    // step.params[k] value, whatever its shape, was wrapped once more via
+    // w.String()). Reverse that exactly: pull each member back out via
+    // GetString() so step.params matches the in-memory shape produced by
+    // the live plan_ready parsing path (orchestrator.cpp) byte-for-byte —
+    // resolve_step_references downstream doesn't care which path produced
+    // it.
+    std::string params_json = column_text_or_empty (stmt, 3);
+    if (!params_json.empty ())
+    {
+      rapidjson::Document d;
+      if (!d.Parse (params_json.c_str ()).HasParseError () && d.IsObject ())
+      {
+        for (auto it = d.MemberBegin (); it != d.MemberEnd (); ++it)
+          if (it->value.IsString ())
+            ss.step.params[it->name.GetString ()] = it->value.GetString ();
+      }
+    }
+
+    ss.step.target_type = column_text_or_empty (stmt, 4);
+    ss.step.needs_forge = sqlite3_column_int (stmt, 5) != 0;
+
+    const std::string status_str = column_text_or_empty (stmt, 6);
+    if (status_str == std::string (db::step_status::running))
+      ss.status = StepStatus::running;
+    else if (status_str == std::string (db::step_status::done))
+      ss.status = StepStatus::done;
+    else if (status_str == std::string (db::step_status::failed))
+      ss.status = StepStatus::failed;
+    else
+      ss.status = StepStatus::pending;
+
+    return ss;
+  }
+
+  std::vector<StepState>
+  Database::load_pipeline_steps_for_job (const std::string &job_id)
+  {
+    std::vector<StepState> out;
+    if (!db_)
+      return out;
+
+    Stmt stmt (prepare (R"(
+      SELECT id, method, description, params, target_type, needs_forge,
+             status
+      FROM tasks
+      WHERE job_id = ? AND status IN ('pending', 'running')
+      ORDER BY step_order ASC
+    )"));
+    if (!stmt.s)
+      return out;
+
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      out.push_back (row_to_step_state (stmt));
+
+    return out;
   }
 
   std::string Database::load_step_result (const std::string &step_id)

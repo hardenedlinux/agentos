@@ -504,6 +504,7 @@ if __name__ == "__main__":
       base / "forge",
       base / "vault",
       base / "logs",
+      base / "assets" / "blobs", // content-addressed asset store
     };
 
     for (const auto &dir : dirs)
@@ -584,20 +585,15 @@ if __name__ == "__main__":
     seed_if_absent (base / "skills" / "extract_signatures.py",
                     EXTRACT_SIGNATURES);
 
-    // TPM state self-healing
-    const auto nvchip = base / "vault" / "NVChip";
-    if (std::filesystem::exists (nvchip))
-      {
-        // simple check: if file size is 0 then repair
-        std::error_code ec;
-        auto size = std::filesystem::file_size (nvchip, ec);
-        if (ec || size == 0)
-          {
-            spdlog::warn (
-                          "[home_init] NVChip appears corrupt, removing for reinitialisation");
-            std::filesystem::remove (nvchip, ec);
-          }
-      }
+    // NVChip is intentionally NOT inspected or repaired here (ADR-028).
+    // is_initialized() checks vault.sealed only; NVChip is libtpms-internal,
+    // rebuildable state, and any heuristic here that removes it (e.g. on
+    // apparent corruption) is redundant at best and a footgun at worst — a
+    // 0-byte NVChip is not necessarily corrupt (libtpms may create it before
+    // writing content), and even genuine corruption must be detected from
+    // TPMLIB_MainInit()'s actual return code, not guessed at from file size
+    // before libtpms has even been invoked. That recovery lives entirely in
+    // SoftwareTPMBackend::try_soft_tpm_init().
 
     // Clean up stale socket from previous unclean shutdown
     const auto sock = base / "run" / "agentos.sock";

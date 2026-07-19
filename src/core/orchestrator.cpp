@@ -298,19 +298,84 @@ namespace agentos
     // Mark any worker_runs with status='running' as 'crashed'.
     db_.mark_all_running_as_crashed ();
 
-    // Reconstruct in-memory job index from DB.
+    // Reconstruct in-memory job index from DB (ADR-005/ADR-022/ADR-031).
+    //
+    // Previously this only set job_id and a hardcoded type, leaving
+    // pending_steps empty — every in-flight job silently stalled forever
+    // after a restart, regardless of target_type. Now steps are re-loaded
+    // from the tasks table (the actual source of truth for
+    // command/params/target_type/needs_forge; jobs.plan was never written,
+    // see resume_in_flight) and re-queued for dispatch below.
     auto in_flight = db_.resume_in_flight ();
     for (const auto &rec : in_flight)
     {
-      // Reconstruct ActiveJob from DB record.
-      // Steps are re-loaded and pending ones re-queued.
       ActiveJob job;
       job.job_id = rec.job_id.value ();
-      job.type = "oneshot"; // TODO: persist type in jobs table
-      // For now push a placeholder — real step reconstruction
-      // requires loading tasks table by job_id (future ADR-022 impl).
-      active_jobs_[job.job_id] = std::move (job);
-      spdlog::info ("[orchestrator] recovered in-flight job {}", job.job_id);
+      job.type = "oneshot";
+
+      if (auto j = db_.load_job (job.job_id); j)
+      {
+        if (!j->type.empty ())
+          job.type = j->type;
+        job.goal = j->goal;
+        if (j->loop)
+        {
+          job.current_iteration = j->loop->current_iteration;
+          job.current_repairs = j->loop->current_repairs;
+        }
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] resume: no jobs row for in-flight job "
+                      "{}, using defaults",
+                      job.job_id);
+      }
+
+      auto steps = db_.load_pipeline_steps_for_job (job.job_id);
+      for (auto &ss : steps)
+      {
+        // A step still marked 'running' means the daemon crashed
+        // mid-dispatch — the worker process cannot have survived
+        // (mark_all_running_as_crashed above only touches worker_runs,
+        // not tasks.status). Reset it so dispatch_next_step starts a
+        // fresh attempt instead of waiting on a run_id that will never
+        // report back. worker_attempt is intentionally not persisted
+        // per-step (ADR-031 §11 max_step_retries is in-memory only), so a
+        // step that had already failed some attempts before the crash
+        // gets a fresh retry budget on resume — a known, accepted
+        // leniency rather than a correctness bug.
+        if (ss.status == StepStatus::running)
+          db_.update_step_status (ss.step.id, db::step_status::pending);
+
+        ActiveStep as;
+        as.step = std::move (ss.step);
+        job.pending_steps.push_back (std::move (as));
+      }
+
+      const std::string recovered_job_id = job.job_id;
+      const std::string recovered_type = job.type;
+      const size_t recovered_step_count = job.pending_steps.size ();
+      active_jobs_[recovered_job_id] = std::move (job);
+      spdlog::info (
+        "[orchestrator] recovered in-flight job {} ({}) with {} pending "
+        "step(s)",
+        recovered_job_id, recovered_type, recovered_step_count);
+    }
+
+    // Kick off dispatch for every recovered job that still has work queued.
+    // dispatch_next_step is a plain synchronous call — it's invoked the
+    // same way from the live plan_ready path (not through the event
+    // queue), and by this point in init() the Database/Registry/Dispatcher
+    // this Orchestrator holds references to are already fully constructed.
+    // Worth confirming under the kill/restart test alongside everything
+    // else here: this assumes it's safe to fork/exec Workers this early in
+    // startup (before Gateway is accepting connections), which matches
+    // "resume automatically, no user action needed" but is a real behavior
+    // change from today's silent no-op.
+    for (auto &[job_id, job] : active_jobs_)
+    {
+      if (!job.pending_steps.empty ())
+        dispatch_next_step (job);
     }
 
     // Register Dispatcher reap callback — fires on the PeriodicExecutor thread.

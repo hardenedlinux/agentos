@@ -135,7 +135,6 @@ namespace agentos
     struct InFlightJob
     {
       TaskId job_id;
-      std::string plan_json;
     };
 
     struct AgentRow
@@ -163,8 +162,6 @@ namespace agentos
     void update_job_phase (const TaskId &id, const std::string &phase);
     void update_job_type (const std::string &job_id, const std::string &type);
 
-    void update_job_plan (const TaskId &id, const std::string &plan_json);
-    std::string load_plan_json (const TaskId &job_id);
     std::vector<InFlightJob> resume_in_flight ();
 
     // -- Job table (ADR‑025) --------------------------------------------------
@@ -188,6 +185,13 @@ namespace agentos
     // ADR‑022 – Pipeline step persistence and retrieval
     void store_pipeline_task (const TaskId &job_id,
                               const PipelinePlanStep &step, int step_order);
+    // ADR-005/ADR-022/ADR-031 crash recovery: reconstruct not-yet-completed
+    // pipeline steps for a job from the tasks table, in step_order. Steps
+    // with status 'pending' or 'running' are returned; 'running' means the
+    // daemon crashed mid-step (mark_all_running_as_crashed only touches
+    // worker_runs, not tasks.status) — callers should reset such a step to
+    // 'pending' via update_step_status before re-queuing it.
+    std::vector<StepState> load_pipeline_steps_for_job (const std::string &job_id);
     std::string load_step_result (const std::string &step_id);
     void update_step_result (const std::string &step_id,
                              const std::string &result_json);

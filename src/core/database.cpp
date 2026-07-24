@@ -2053,11 +2053,29 @@ namespace agentos
   {
     if (!db_)
       return;
+    // Was INSERT OR REPLACE, which on a primary-key conflict deletes then
+    // re-inserts the row — and the VALUES clause hardcodes enabled=1. That
+    // meant re-registering an id that had been disabled or revoked
+    // silently reset it back to enabled, undoing set_worker_enabled()/
+    // revoke_worker() with no warning. UPSERT instead: a genuinely new id
+    // still gets enabled=1 (the INSERT branch), but re-registering an
+    // existing id leaves its current `enabled` value untouched — including
+    // -1 (revoked), consistent with revoke_worker()'s "retained for audit
+    // purposes, never re-dispatched" contract. Everything else about the
+    // row (role/binary_path/manifest/description/approved_by/approved_at)
+    // still updates to reflect the new registration.
     Stmt stmt (prepare (R"(
-      INSERT OR REPLACE INTO agents
+      INSERT INTO agents
           (id, role, binary_path, manifest, description, approved_by,
            approved_at, enabled)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      ON CONFLICT(id) DO UPDATE SET
+          role        = excluded.role,
+          binary_path = excluded.binary_path,
+          manifest    = excluded.manifest,
+          description = excluded.description,
+          approved_by = excluded.approved_by,
+          approved_at = excluded.approved_at
   )"));
     if (!stmt.s)
       return;

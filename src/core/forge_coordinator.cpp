@@ -224,13 +224,13 @@ namespace agentos::forge
             // which reads it directly from requirement_json.method — the LLM
             // has no input on the method name, so no consistency check against
             // writer output is needed here.
-            auto worker_id = promote_worker (job);
-            if (worker_id)
+            auto promote_result = promote_worker (job);
+            if (promote_result.outcome == PromoteOutcome::Success)
             {
               job.status = ForgeStatus::promoted;
               persist (job);
               spdlog::info ("[forge_coordinator] job {} promoted → worker {}",
-                            job.id, *worker_id);
+                            job.id, promote_result.worker_id);
               // Record cumulative Forge token usage on the pipeline step.
               // Write Forge token usage to the pipeline step row.
               // Use step_id (not job.task_id which is the job_id).
@@ -244,19 +244,41 @@ namespace agentos::forge
               on_complete_ (ForgeResult{job.id,
                                         job.task_id,
                                         ForgeResult::Outcome::promoted,
-                                        *worker_id,
+                                        promote_result.worker_id,
                                         {},
                                         {}});
               return;
             }
+            else if (promote_result.outcome
+                     == PromoteOutcome::RetryableFailure)
+            {
+              // finalize_worker_promotion() rejected the whole promotion
+              // (ADR-031: invalid capability method format) — this is a
+              // Code Writer generation-quality problem, not an
+              // infrastructure error, so it gets exactly the same
+              // treatment as a policy/reviewer rejection: set feedback
+              // and fall through to the shared retry-or-escalate block
+              // below. No `return` here — that's what lets it fall
+              // through.
+              job.feedback = promote_result.reason;
+              write_forge_log (job, "promotion_rejected", job.feedback);
+              spdlog::info (
+                "[forge_coordinator] job {} promotion rejected on attempt "
+                "{}, treating as generation failure",
+                job.id, job.attempt);
+            }
             else
             {
-              // promote_worker failure is a hard error — escalate.
+              // Hard error (filesystem/DB write failure) — not something
+              // a retry with regenerated code would fix. Escalate
+              // immediately, as before.
               const std::string reason
-                = "worker promotion failed (filesystem or DB error)";
+                = promote_result.reason.empty ()
+                    ? "worker promotion failed (filesystem or DB error)"
+                    : promote_result.reason;
               spdlog::error ("[forge_coordinator] promote_worker failed for "
-                             "job {}",
-                             job.id);
+                             "job {}: {}",
+                             job.id, reason);
               std::string review_id = escalate_to_human (job, reason);
               job.status = ForgeStatus::human_review;
               persist (job);
@@ -719,7 +741,7 @@ namespace agentos::forge
   // Promote worker (ADR-019 worker registration steps)
   // ---------------------------------------------------------------------------
 
-  std::optional<std::string>
+  ForgeCoordinator::PromoteResult
   ForgeCoordinator::promote_worker (const ForgePipelineJob &job)
   {
     // Parse writer output to extract code and capability.
@@ -728,7 +750,8 @@ namespace agentos::forge
     {
       spdlog::error (
         "[forge_coordinator] promote_worker: invalid writer_output_json");
-      return std::nullopt;
+      return {PromoteOutcome::HardFailure, {},
+             "promote_worker: invalid writer_output_json"};
     }
 
     const std::string language = writer_doc.HasMember ("language")
@@ -753,7 +776,8 @@ namespace agentos::forge
     {
       spdlog::error ("[forge_coordinator] cannot create worker dir {}: {}",
                      worker_dir.string (), ec.message ());
-      return std::nullopt;
+      return {PromoteOutcome::HardFailure, {},
+             "cannot create worker directory: " + ec.message ()};
     }
 
     // Write worker_impl.py — generated business logic.
@@ -764,7 +788,8 @@ namespace agentos::forge
       {
         spdlog::error ("[forge_coordinator] cannot write worker_impl.py {}",
                        impl_path.string ());
-        return std::nullopt;
+        return {PromoteOutcome::HardFailure, {},
+               "cannot write worker_impl.py"};
       }
       out << impl_code;
     }
@@ -783,7 +808,8 @@ namespace agentos::forge
           spdlog::error (
             "[forge_coordinator] cannot copy worker template to {}: {}",
             binary_path.string (), ec.message ());
-          return std::nullopt;
+          return {PromoteOutcome::HardFailure, {},
+                 "cannot copy worker template: " + ec.message ()};
         }
       }
       else
@@ -797,7 +823,8 @@ namespace agentos::forge
         {
           spdlog::error ("[forge_coordinator] cannot write worker.py {}",
                          binary_path.string ());
-          return std::nullopt;
+          return {PromoteOutcome::HardFailure, {},
+                 "cannot write worker.py"};
         }
         out << impl_code;
       }
@@ -902,17 +929,34 @@ namespace agentos::forge
       {
         spdlog::error ("[forge_coordinator] cannot write manifest.json for {}",
                        worker_id);
-        return std::nullopt;
+        return {PromoteOutcome::HardFailure, {},
+               "cannot write manifest.json"};
       }
       mf << manifest_json;
     }
 
-    // 4. Insert into agents + capabilities tables via Registry.
-    registry_.finalize_worker_promotion (job, impl_code, manifest_json, db_);
+    // 4. Insert into agents + capabilities tables via Registry. Atomic:
+    // finalize_worker_promotion() rejects the ENTIRE promotion (nothing
+    // written to DB/Registry) if any capability method fails ADR-031
+    // format validation. That is a Code Writer generation-quality
+    // problem — not an infrastructure error — so it must be treated
+    // exactly like a policy/reviewer rejection: eligible for Forge's
+    // normal retry loop via RetryableFailure, not an immediate escalation.
+    const bool promoted = registry_.finalize_worker_promotion (
+      job, impl_code, manifest_json, db_);
+    if (!promoted)
+    {
+      spdlog::warn ("[forge_coordinator] worker {} promotion rejected "
+                    "(ADR-031 capability validation) — eligible for retry",
+                    worker_id);
+      return {PromoteOutcome::RetryableFailure, {},
+             "worker promotion rejected: invalid capability method format "
+             "(ADR-031); see forge.log"};
+    }
 
     spdlog::info ("[forge_coordinator] worker {} promoted and registered",
                   worker_id);
-    return worker_id;
+    return {PromoteOutcome::Success, worker_id, {}};
   }
 
   // ---------------------------------------------------------------------------

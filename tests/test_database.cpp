@@ -17,6 +17,7 @@
 #include "agentos/database.h"
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 using namespace agentos;
 
@@ -82,4 +83,46 @@ TEST_F (DatabaseTest, ResumeInFlightNone)
 {
   auto jobs = db->resume_in_flight ();
   EXPECT_TRUE (jobs.empty ());
+}
+
+// ---------------------------------------------------------------------------
+// insert_agent used to be INSERT OR REPLACE, which hardcodes enabled=1 in
+// its VALUES clause. On a primary-key conflict SQLite deletes then
+// re-inserts the row, so re-registering an id that had been disabled or
+// revoked silently reset it back to enabled — undoing set_worker_enabled()/
+// revoke_worker() with no warning. This pins down the fix: re-registering
+// an existing id must preserve its current `enabled` value while still
+// updating everything else (manifest/description/etc).
+// ---------------------------------------------------------------------------
+TEST_F (DatabaseTest, InsertAgentPreservesEnabledStateAcrossReRegistration)
+{
+  db->insert_agent ("w1", "worker", "/bin/w1", "manifest v1", "desc v1",
+                    "human");
+  db->set_worker_enabled ("w1", false);
+
+  // Re-register the same id — as Forge/adviser.register/worker.register
+  // would on a legitimate re-registration.
+  db->insert_agent ("w1", "worker", "/bin/w1", "manifest v2", "desc v2",
+                    "human");
+
+  sqlite3 *raw = nullptr;
+  ASSERT_EQ (sqlite3_open (db_path.c_str (), &raw), SQLITE_OK);
+  sqlite3_stmt *stmt = nullptr;
+  ASSERT_EQ (sqlite3_prepare_v2 (
+               raw, "SELECT enabled, manifest, description FROM agents WHERE id = ?",
+               -1, &stmt, nullptr),
+            SQLITE_OK);
+  sqlite3_bind_text (stmt, 1, "w1", -1, SQLITE_TRANSIENT);
+  ASSERT_EQ (sqlite3_step (stmt), SQLITE_ROW);
+
+  // The disabled state must survive the re-registration...
+  EXPECT_EQ (sqlite3_column_int (stmt, 0), 0);
+  // ...while the rest of the row still reflects the new registration.
+  EXPECT_STREQ (reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1)),
+               "manifest v2");
+  EXPECT_STREQ (reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2)),
+               "desc v2");
+
+  sqlite3_finalize (stmt);
+  sqlite3_close (raw);
 }

@@ -93,7 +93,15 @@ namespace
   }
 
   // Minimal requirement JSON.
+  // "method" must be present and ADR-031-valid (namespace.verb, lowercase
+  // segments) — promote_worker falls back to worker_id (the forge_job_id,
+  // e.g. "llm-fc-1") when it's absent, which fails is_valid_method's dot
+  // check. Before finalize_worker_promotion's return value was actually
+  // checked, that fallback silently produced an empty-shell worker that
+  // still reported "promoted" — this fixture's whole point is to exercise
+  // the real promoted path, so it needs a method that actually validates.
   constexpr std::string_view kRequirement = R"({
+  "method":        "test.add",
   "description":   "Return the sum of a and b",
   "input_schema":  {"a":"integer","b":"integer"},
   "output_schema": {"result":"integer"}
@@ -567,4 +575,81 @@ TEST_F (ForgeCoordinatorLlmTest, EnforceLayer_BlocksNetworkWorker)
   // human_review (Enforce rejected all attempts). Must never be failed.
   EXPECT_NE (result->outcome, ForgeResult::Outcome::failed)
     << "unexpected hard failure: " << result->error;
+}
+
+// ---------------------------------------------------------------------------
+// promote_worker's RetryableFailure path (forge_coordinator.cpp): when
+// finalize_worker_promotion() rejects the whole promotion because the
+// capability method fails ADR-031 format validation, that must be treated
+// exactly like a Code Writer generation failure — fed into the normal
+// retry loop (job.attempt increments each pass) and, once max_attempts is
+// exhausted, escalated to human_review. It must NOT silently report
+// "promoted" with an empty-shell worker (the bug this fix closes), and it
+// must NOT skip straight to human_review without actually retrying first
+// (the regression this specific test guards against — a hard-error
+// short-circuit would show attempt == 1, not attempt == max_attempts).
+// ---------------------------------------------------------------------------
+TEST_F (ForgeCoordinatorLlmTest,
+       RetryableFailure_InvalidCapabilityMethod_RetriesThenHumanReview)
+{
+  // "BadMethodName" has no dot and uses uppercase — is_valid_method()
+  // rejects it every attempt regardless of what the Writer/Reviewer
+  // produce, so finalize_worker_promotion() fails deterministically on
+  // every pass through the loop.
+  ForgePipelineJob job = make_db_job ("llm-fc-badmethod", "task-llm-badmethod");
+  job.requirement_json = R"({
+    "method":        "BadMethodName",
+    "description":   "Return the sum of a and b",
+    "input_schema":  {"a":"integer","b":"integer"},
+    "output_schema": {"result":"integer"}
+  })";
+  job.max_attempts = 2; // keep LLM spend bounded — just need >1 to prove retry
+  db_->update_forge_pipeline_job (job);
+
+  std::optional<ForgeResult> result;
+  std::mutex mtx;
+  std::condition_variable cv;
+
+  ForgeCoordinator fc (*db_, *proxy_, *registry_,
+                       [&] (ForgeResult r)
+                       {
+                         std::lock_guard lk (mtx);
+                         result = r;
+                         cv.notify_one ();
+                       });
+  fc.start ();
+
+  ForgeRequest req = make_request (job);
+  req.max_attempts = 2;
+  fc.post (std::move (req));
+
+  {
+    std::unique_lock lk (mtx);
+    ASSERT_TRUE (cv.wait_for (lk, std::chrono::seconds (240),
+                              [&] { return result.has_value (); }))
+      << "pipeline did not complete within 4 minutes";
+  }
+  fc.stop ();
+
+  ASSERT_TRUE (result.has_value ());
+  EXPECT_EQ (result->outcome, ForgeResult::Outcome::human_review)
+    << "invalid capability method must never silently report promoted; "
+       "error="
+    << result->error;
+
+  // Never registered — no empty-shell worker in the DB (the bug this
+  // whole fix closes).
+  EXPECT_FALSE (registry_->find_worker_for_command ("BadMethodName")
+                  .has_value ());
+
+  auto loaded = db_->load_forge_pipeline_job ("llm-fc-badmethod");
+  ASSERT_TRUE (loaded.has_value ());
+  EXPECT_EQ (loaded->status, ForgeStatus::human_review);
+  // Proves the RetryableFailure path actually fell through into the
+  // shared retry loop (job.attempt incremented across passes) rather
+  // than short-circuiting to human_review on the very first attempt
+  // like a HardFailure would.
+  EXPECT_EQ (loaded->attempt, job.max_attempts)
+    << "expected all " << job.max_attempts
+    << " attempts to run before escalating — got " << loaded->attempt;
 }

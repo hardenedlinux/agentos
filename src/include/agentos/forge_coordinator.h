@@ -169,8 +169,32 @@ namespace agentos::forge
                           const std::string &language);
 
     // Register promoted worker: write binary, insert agents+capabilities rows.
-    // Returns the new worker_id on success.
-    std::optional<std::string> promote_worker (const ForgePipelineJob &job);
+    //
+    // finalize_worker_promotion() (registry.cpp) is atomic: it rejects the
+    // ENTIRE promotion — nothing written to DB/Registry — if any capability
+    // method fails ADR-031 format validation. That is a Code Writer
+    // generation-quality problem, not an infrastructure error, so it must
+    // be treated exactly like a policy/reviewer rejection: eligible for
+    // Forge's normal retry loop (RetryableFailure), not an immediate
+    // escalation to human review. Genuine fs/IO errors (can't create the
+    // worker directory, can't write manifest.json, etc.) are unrelated to
+    // generated-content quality and keep the original immediate-escalation
+    // behavior (HardFailure).
+    enum class PromoteOutcome
+    {
+      Success,
+      RetryableFailure, // ADR-031 capability validation rejected — retry
+      HardFailure       // fs/IO/DB error — escalate immediately
+    };
+
+    struct PromoteResult
+    {
+      PromoteOutcome outcome = PromoteOutcome::HardFailure;
+      std::string worker_id; // valid iff outcome == Success
+      std::string reason;    // set iff outcome != Success
+    };
+
+    PromoteResult promote_worker (const ForgePipelineJob &job);
 
     // Insert a human_reviews row and return its id.
     std::string escalate_to_human (const ForgePipelineJob &job,

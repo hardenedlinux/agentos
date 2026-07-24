@@ -76,18 +76,6 @@ namespace
   "tcp_connect_ports": [443]
 })";
 
-  // Build a minimal valid Code Writer JSON output.
-  std::string make_writer_output (std::string_view cap_json,
-                                  std::string_view task_id = "t1",
-                                  std::string_view language = "python")
-  {
-    return std::string (R"({"task_id":")") + std::string (task_id)
-           + R"(","understanding":"sum two numbers","language":")"
-           + std::string (language)
-           + R"(","entry_point":"main","code":"import json,sys\nargs=json.load(sys.stdin)\nprint(json.dumps({\"result\":args[\"a\"]+args[\"b\"]}))\n","capability":)"
-           + std::string (cap_json) + R"(,"notes":""})";
-  }
-
   // Build a minimal Code Reviewer accept verdict.
   std::string make_reviewer_accept (std::string_view task_id = "t1")
   {
@@ -433,7 +421,7 @@ protected:
 
     setenv ("AGENTOS_ADVISER_API_KEY", key, 1);
     setenv ("AGENTOS_ADVISER_BASE_URL", "https://api.deepseek.com", 1);
-    setenv ("AGENTOS_ADVISER_MODEL", "deepseek-chat", 1);
+    setenv ("AGENTOS_ADVISER_MODEL", "deepseek-v4-flash", 1);
 
     // Seed minimal skill.md files so code_writer/code_reviewer can load them.
     auto seed = [&] (const std::string &name, const std::string &content)
@@ -443,11 +431,28 @@ protected:
       std::ofstream (p / "skill.md") << content;
     };
     seed ("code-writer",
-          "You are a code writer for AgentOS. Output JSON only, no markdown.\n"
-          "Schema: {understanding, language, entry_point, code, capability, "
-          "notes}\n"
-          "language must be python or guile. capability: "
-          "{network,exec,fs_read,fs_write}\n");
+          "You are a code writer for AgentOS. Output JSON only, no markdown, "
+          "no code fences, no commentary before or after the JSON object.\n"
+          "Required top-level fields (all must be present, exact key names):\n"
+          "  language      — must be exactly \"python\" or \"guile\"\n"
+          "  entry_point   — name of the function to call, e.g. \"main\"\n"
+          "  impl_code     — the full source code as a single string\n"
+          "  signatures    — a JSON object describing entry_point's "
+          "input/output, e.g. "
+          "{\"main\":{\"input\":{\"a\":\"integer\",\"b\":\"integer\"},"
+          "\"output\":{\"result\":\"integer\"}}}\n"
+          "  capability    — object with keys network, exec, fs_read, "
+          "fs_write (network and exec are booleans; fs_read/fs_write are "
+          "arrays of paths)\n"
+          "Optional fields: understanding, notes.\n"
+          "Example response:\n"
+          "{\"language\":\"python\",\"entry_point\":\"main\","
+          "\"impl_code\":\"import json,sys\\nargs=json.load(sys.stdin)\\n"
+          "print(json.dumps({'result':args['a']+args['b']}))\\n\","
+          "\"signatures\":{\"main\":{\"input\":{\"a\":\"integer\","
+          "\"b\":\"integer\"},\"output\":{\"result\":\"integer\"}}},"
+          "\"capability\":{\"network\":false,\"exec\":false,\"fs_read\":[],"
+          "\"fs_write\":[]},\"notes\":\"\"}\n");
     seed (
       "code-reviewer",
       "You are a code reviewer for AgentOS. Output JSON only, no markdown.\n"

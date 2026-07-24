@@ -41,6 +41,20 @@ set(AGENTOS_TEST_SYSTEM_INCLUDES
   ${LIBTPMS_INC}
 )
 
+# Mutes spdlog output for the duration of every test run (see
+# tests/common/test_environment.cpp for rationale). Lives outside tests/ so
+# the file(GLOB) below does not pick it up as its own standalone test
+# executable. Built as an OBJECT library (not STATIC) so its translation
+# unit is always linked into every test binary; a STATIC archive could have
+# this .o dropped by the linker since nothing directly references its only
+# symbol (a static registration side effect via AddGlobalTestEnvironment).
+add_library(test_common OBJECT ${CMAKE_SOURCE_DIR}/tests/common/test_environment.cpp)
+target_compile_features(test_common PRIVATE cxx_std_23)
+target_include_directories(test_common PRIVATE ${AGENTOS_TEST_INCLUDES})
+target_include_directories(test_common SYSTEM PRIVATE
+  ${AGENTOS_TEST_SYSTEM_INCLUDES})
+add_dependencies(test_common googletest_ext)
+
 set(AGENTOS_TEST_LIBS
   agentos_core
   ${GTEST_LIB}
@@ -51,6 +65,7 @@ set(AGENTOS_TEST_LIBS
   ${OPENSSL_STATIC_CRYPTO}
   ${LIBTPMS_LIB}
   Threads::Threads
+  $<TARGET_OBJECTS:test_common>
 )
 
 # CLI layer sources needed by specific tests.

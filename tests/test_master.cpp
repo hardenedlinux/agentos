@@ -106,6 +106,18 @@ protected:
     master_->start ();
   }
 
+  // Database::open() now unconditionally seeds the three builtin advisers
+  // (planning / code-writer / code-reviewer) via seed_builtin_advisers().
+  // Tests that assume a genuinely empty or exact-count adviser registry
+  // must neutralize them explicitly before start_master(). set_worker_enabled
+  // operates generically on the `agents` table regardless of role, despite
+  // the name.
+  void disable_builtin_advisers ()
+  {
+    for (const char *id : {"planning", "code-writer", "code-reviewer"})
+      db_->set_worker_enabled (id, false);
+  }
+
   void TearDown () override
   {
     if (master_)
@@ -129,7 +141,10 @@ protected:
 
 TEST_F (MasterTest, JobSubmit_NoAdvisers_JobFailed)
 {
-  start_master (); // empty DB → registry_.all_advisers() is empty
+  disable_builtin_advisers (); // builtins are seeded by DB open now —
+                               // registry_.all_advisers() is only empty
+                               // once they're explicitly disabled
+  start_master ();
 
   MasterEvent ev;
   ev.kind = MasterEvent::Kind::JobSubmit;
@@ -175,14 +190,16 @@ TEST_F (MasterTest, JobSubmit_MissingGoal_JobFailedImmediately)
 
 TEST_F (MasterTest, JobSubmit_SingleAdviser_SkipsLlmAndSpawns)
 {
+  disable_builtin_advisers ();
+
   // Insert one adviser agent row before constructing Registry.
-  db_->insert_agent ("planning-adviser", "adviser", "", R"({
-    "id": "planning-adviser",
-    "name": "Planning Adviser",
-    "version": "1.0.0",
-    "skill_path": "advisers/planning/skill.md",
-    "domains": ["planning"]
-  })");
+  // Advisers ship manifest.toml, not manifest.json (ADR-018) —
+  // registry.cpp's parse_adviser_manifest_toml reads a [meta] table.
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning"]
+)");
 
   start_master ();
 
@@ -237,7 +254,9 @@ TEST_F (MasterTest, AdviserFailed_JobFailed)
 
 TEST_F (MasterTest, OnMessage_DoesNotBlock_ProcessesMultipleQuickly)
 {
-  start_master (); // 0 advisers → each JobSubmit fails fast, no LLM thread
+  disable_builtin_advisers (); // 0 advisers → each JobSubmit fails fast,
+                               // no LLM thread
+  start_master ();
 
   for (int i = 0; i < 5; ++i)
   {
@@ -288,20 +307,23 @@ TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
   // exactly two candidates (ADR-033 §1 Step 1), forcing selection into
   // Step 2's bounded LLM disambiguation rather than short-circuiting on a
   // single candidate or falling back to zero-candidate 'planning'.
-  db_->insert_agent ("planning-adviser", "adviser", "", R"({
-    "id": "planning-adviser",
-    "name": "Planning Adviser",
-    "version": "1.0.0",
-    "skill_path": "advisers/planning/skill.md",
-    "domains": ["planning", "general", "code"]
-  })");
-  db_->insert_agent ("code-writer", "adviser", "", R"({
-    "id": "code-writer",
-    "name": "Code Writer",
-    "version": "1.0.0",
-    "skill_path": "advisers/code-writer/skill.md",
-    "domains": ["code"]
-  })");
+  disable_builtin_advisers ();
+
+  // Advisers ship manifest.toml, not manifest.json (ADR-018) —
+  // registry.cpp's parse_adviser_manifest_toml reads a [meta] table.
+  // Note: named "code-writer-test" (not "code-writer") to avoid any
+  // ambiguity with the disabled builtin id of the same name, even
+  // though they're distinct rows and no collision would actually occur.
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning", "general", "code"]
+)");
+  db_->insert_agent ("code-writer-test", "adviser", "", R"(
+[meta]
+id = "code-writer-test"
+domains = ["code"]
+)");
 
   start_master ();
   ASSERT_EQ (registry_->all_advisers ().size (), 2u);
@@ -325,7 +347,8 @@ TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
   const bool picked_one_of_two
     = orch_events_[0].payload_json.find ("planning-adviser")
         != std::string::npos
-      || orch_events_[0].payload_json.find ("code-writer") != std::string::npos;
+      || orch_events_[0].payload_json.find ("code-writer-test")
+           != std::string::npos;
   EXPECT_TRUE (picked_one_of_two);
 }
 

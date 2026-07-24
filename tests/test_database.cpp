@@ -55,10 +55,16 @@ TEST_F (DatabaseTest, StoreAndLoadJob)
   task.input_json = R"({"key":"value"})";
   db->store_job (task);
   db->update_job_phase ("job1", "planning");
-  std::string plan_json = R"({"steps":[]})";
-  db->update_job_plan ("job1", plan_json);
-  std::string loaded = db->load_plan_json ("job1");
-  EXPECT_EQ (loaded, plan_json);
+
+  // The original job table (preserved for compatibility) has no per-job
+  // plan_json column — ADR-022 moved plan/step persistence to the tasks
+  // table (store_pipeline_task / load_pipeline_steps_for_job, keyed by
+  // PipelinePlanStep) instead of a single JSON blob per job. What this
+  // table actually offers is phase tracking + crash-recovery listing,
+  // so that's what this test verifies.
+  auto jobs = db->resume_in_flight ();
+  ASSERT_EQ (jobs.size (), 1);
+  EXPECT_EQ (jobs[0].job_id, "job1");
 }
 
 TEST_F (DatabaseTest, ResumeInFlight)
@@ -67,12 +73,9 @@ TEST_F (DatabaseTest, ResumeInFlight)
   task.id = "job1";
   task.goal = "test";
   db->store_job (task);
-  std::string plan_json = R"({"steps":[]})";
-  db->update_job_plan ("job1", plan_json);
   auto jobs = db->resume_in_flight ();
   ASSERT_EQ (jobs.size (), 1);
   EXPECT_EQ (jobs[0].job_id, "job1");
-  EXPECT_EQ (jobs[0].plan_json, plan_json);
 }
 
 TEST_F (DatabaseTest, ResumeInFlightNone)

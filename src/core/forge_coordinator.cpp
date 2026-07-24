@@ -252,11 +252,12 @@ namespace agentos::forge
             else
             {
               // promote_worker failure is a hard error — escalate.
+              const std::string reason
+                = "worker promotion failed (filesystem or DB error)";
               spdlog::error ("[forge_coordinator] promote_worker failed for "
                              "job {}",
                              job.id);
-              std::string review_id = escalate_to_human (
-                job, "worker promotion failed (filesystem or DB error)");
+              std::string review_id = escalate_to_human (job, reason);
               job.status = ForgeStatus::human_review;
               persist (job);
               on_complete_ (ForgeResult{job.id,
@@ -264,7 +265,7 @@ namespace agentos::forge
                                         ForgeResult::Outcome::human_review,
                                         {},
                                         review_id,
-                                        {}});
+                                        reason});
               return;
             }
           }
@@ -274,11 +275,11 @@ namespace agentos::forge
       // Attempt failed (policy rejection or reviewer rejection).
       if (job.attempt >= job.max_attempts)
       {
+        const std::string reason = "max_attempts reached: " + job.feedback;
         spdlog::info ("[forge_coordinator] job {} exhausted {} attempts, "
                       "escalating",
                       job.id, job.max_attempts);
-        std::string review_id
-          = escalate_to_human (job, "max_attempts reached: " + job.feedback);
+        std::string review_id = escalate_to_human (job, reason);
         job.status = ForgeStatus::human_review;
         persist (job);
         on_complete_ (ForgeResult{job.id,
@@ -286,7 +287,7 @@ namespace agentos::forge
                                   ForgeResult::Outcome::human_review,
                                   {},
                                   review_id,
-                                  {}});
+                                  reason});
         return;
       }
 

@@ -16,7 +16,10 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <string>
 #include <unistd.h>
@@ -83,6 +86,10 @@ class RegistryTest : public ::testing::Test
 protected:
   std::string db_path_;
   Database *db_ = nullptr;
+  std::string agentos_home_dir_;
+  bool had_agentos_home_ = false;
+  std::string prev_agentos_home_;
+  spdlog::level::level_enum prev_log_level_ = spdlog::level::info;
 
   void SetUp () override
   {
@@ -91,6 +98,32 @@ protected:
     ASSERT_NE (fd, -1) << "mkstemp failed";
     close (fd);
     db_path_ = tmp;
+
+    // finalize_worker_promotion() writes under agentos_home()/workers/<id>/
+    // (manifest.json, worker.py path). Sandbox AGENTOS_HOME per test so
+    // these tests never touch the real ~/.agentos and each test gets a
+    // clean directory.
+    char home_tmp[] = "/tmp/agentos_registry_test_home_XXXXXX";
+    char *home_dir = mkdtemp (home_tmp);
+    ASSERT_NE (home_dir, nullptr) << "mkdtemp failed";
+    agentos_home_dir_ = home_dir;
+
+    if (const char *existing = std::getenv ("AGENTOS_HOME"))
+    {
+      had_agentos_home_ = true;
+      prev_agentos_home_ = existing;
+    }
+    setenv ("AGENTOS_HOME", agentos_home_dir_.c_str (), 1);
+
+    // Database::open() runs seed_builtin_advisers(), which correctly
+    // reports missing manifest.toml/skill.md for planning/code-writer/
+    // code-reviewer under this deliberately empty sandbox — these tests
+    // don't seed those files on purpose (doing so would register real
+    // adviser rows and inflate adviser_count() in other tests). The
+    // check is accurate, not a bug; just silence log output for the
+    // duration of the test rather than fabricate files to quiet it.
+    prev_log_level_ = spdlog::get_level ();
+    spdlog::set_level (spdlog::level::off);
   }
 
   void TearDown () override
@@ -101,6 +134,16 @@ protected:
       delete db_;
     }
     std::remove (db_path_.c_str ());
+
+    std::error_code ec;
+    std::filesystem::remove_all (agentos_home_dir_, ec);
+
+    if (had_agentos_home_)
+      setenv ("AGENTOS_HOME", prev_agentos_home_.c_str (), 1);
+    else
+      unsetenv ("AGENTOS_HOME");
+
+    spdlog::set_level (prev_log_level_);
   }
 
   // Helper to create a Database object and open it
@@ -109,6 +152,25 @@ protected:
     db_ = new Database (db_path_);
     EXPECT_TRUE (db_->open ());
     return *db_;
+  }
+
+  // Raw-sqlite row count against db_path_, bypassing the Database/Registry
+  // layer, so assertions about what got persisted are independent of
+  // whatever in-memory bookkeeping finalize_worker_promotion also does.
+  int count_rows (const std::string &sql, const std::string &bind_value)
+  {
+    sqlite3 *raw = nullptr;
+    EXPECT_EQ (sqlite3_open (db_path_.c_str (), &raw), SQLITE_OK);
+    sqlite3_stmt *stmt = nullptr;
+    EXPECT_EQ (sqlite3_prepare_v2 (raw, sql.c_str (), -1, &stmt, nullptr),
+               SQLITE_OK);
+    sqlite3_bind_text (stmt, 1, bind_value.c_str (), -1, SQLITE_TRANSIENT);
+    int count = -1;
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      count = sqlite3_column_int (stmt, 0);
+    sqlite3_finalize (stmt);
+    sqlite3_close (raw);
+    return count;
   }
 };
 
@@ -149,10 +211,18 @@ TEST_F (RegistryTest, UnknownCommandReturnsNullopt)
 TEST_F (RegistryTest, RegisterAndFindAgent)
 {
   std::vector<std::string> inserts;
+  // Advisers ship manifest.toml (ADR-018) — parse_manifest dispatches
+  // role=="adviser" through the TOML parser, not JSON. This fixture used
+  // to be JSON and silently failed to parse after that dispatch was
+  // fixed; keeping it in sync here.
   inserts.push_back (R"(
     INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
     VALUES ('ag-1', 'adviser', '/usr/bin/adviser1',
-            '{"name":"research-agent","version":"1.0","domains":["research","general"]}',
+            '[meta]
+id = "ag-1"
+version = "1.0"
+domains = ["research", "general"]
+',
             'human', 1700000000, 1)
   )");
 
@@ -231,10 +301,15 @@ TEST_F (RegistryTest, AllCommandSchemas)
 TEST_F (RegistryTest, Counts)
 {
   std::vector<std::string> inserts;
+  // Advisers ship manifest.toml (ADR-018) — see note on RegisterAndFindAgent.
   inserts.push_back (R"(
     INSERT INTO agents (id, role, binary_path, manifest, approved_by, approved_at, enabled)
     VALUES ('ag-1', 'adviser', '/usr/bin/adviser1',
-            '{"name":"adviser","version":"1.0","domains":["general"]}',
+            '[meta]
+id = "ag-1"
+version = "1.0"
+domains = ["general"]
+',
             'human', 1700000000, 1)
   )");
   inserts.push_back (R"(
@@ -251,4 +326,101 @@ TEST_F (RegistryTest, Counts)
   reg.init (db);
   EXPECT_EQ (reg.adviser_count (), 1u);
   EXPECT_EQ (reg.worker_count (), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// finalize_worker_promotion: atomic promotion (regression tests for the
+// empty-shell-worker bug — a Forge-generated worker whose capability
+// method format failed validation used to still get an `agents` row
+// inserted, just with the bad capability silently skipped).
+// ---------------------------------------------------------------------------
+
+TEST_F (RegistryTest, FinalizeWorkerPromotionSuccessRegistersWorker)
+{
+  create_test_db (db_path_, {});
+  Database &db = open_db ();
+
+  Registry reg;
+  reg.init (db);
+
+  ForgePipelineJob job;
+  job.id = "forge-ok-1";
+
+  const std::string capability_json = R"({
+    "name": "forge-ok-1",
+    "version": "1.0",
+    "capabilities": [
+      {"method": "test.run", "description": "run a test", "input_schema": {}}
+    ]
+  })";
+
+  const bool ok = reg.finalize_worker_promotion (job, "print('worker')",
+                                                 capability_json, db);
+  EXPECT_TRUE (ok);
+
+  // In-memory registry sees the new command.
+  auto worker = reg.find_worker_for_command ("test.run");
+  ASSERT_TRUE (worker.has_value ());
+  EXPECT_EQ (worker->id, "forge-ok-1");
+
+  // DB: agent row and capability row both landed.
+  EXPECT_EQ (count_rows ("SELECT COUNT(*) FROM agents WHERE id = ?",
+                        job.id),
+            1);
+  EXPECT_EQ (
+    count_rows ("SELECT COUNT(*) FROM capabilities WHERE agent_id = ?",
+               job.id),
+    1);
+
+  // manifest.json was written to disk.
+  auto manifest_path = std::filesystem::path (agentos_home_dir_) / "workers"
+                      / job.id / "manifest.json";
+  EXPECT_TRUE (std::filesystem::exists (manifest_path));
+}
+
+TEST_F (RegistryTest, FinalizeWorkerPromotionRejectsInvalidMethodAtomically)
+{
+  create_test_db (db_path_, {});
+  Database &db = open_db ();
+
+  Registry reg;
+  reg.init (db);
+
+  ForgePipelineJob job;
+  job.id = "forge-bad-1";
+
+  // First capability is well-formed; second violates ADR-031's
+  // namespace.verb format (no dot, uppercase letters). The whole
+  // promotion must be rejected — not just the bad entry skipped.
+  const std::string capability_json = R"({
+    "name": "forge-bad-1",
+    "version": "1.0",
+    "capabilities": [
+      {"method": "test.run", "description": "valid one", "input_schema": {}},
+      {"method": "BadMethodName", "description": "invalid", "input_schema": {}}
+    ]
+  })";
+
+  const bool ok = reg.finalize_worker_promotion (job, "print('worker')",
+                                                 capability_json, db);
+  EXPECT_FALSE (ok);
+
+  // Regression guard: even the VALID capability from the same manifest
+  // must not have been registered in memory. This is the empty-shell
+  // worker bug — no partial registration allowed.
+  EXPECT_FALSE (reg.find_worker_for_command ("test.run").has_value ());
+
+  // DB: no agent row and no capability rows for this job at all.
+  EXPECT_EQ (count_rows ("SELECT COUNT(*) FROM agents WHERE id = ?",
+                        job.id),
+            0);
+  EXPECT_EQ (
+    count_rows ("SELECT COUNT(*) FROM capabilities WHERE agent_id = ?",
+               job.id),
+    0);
+
+  // manifest.json must not have been written either.
+  auto manifest_path = std::filesystem::path (agentos_home_dir_) / "workers"
+                      / job.id / "manifest.json";
+  EXPECT_FALSE (std::filesystem::exists (manifest_path));
 }

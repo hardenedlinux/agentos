@@ -51,6 +51,18 @@ protected:
 };
 
 // -------------------------------------------------------------------------
+// Helper: sqlite3_column_text() returns nullptr for SQL NULL columns.
+// std::string(nullptr) is undefined behavior / throws in libstdc++ — this
+// wraps the cast so a NULL column reads as "" instead of crashing the test.
+// -------------------------------------------------------------------------
+static std::string column_text_or_empty (sqlite3_stmt *stmt, int col)
+{
+  const unsigned char *text = sqlite3_column_text (stmt, col);
+  return text ? std::string (reinterpret_cast<const char *> (text))
+              : std::string ();
+}
+
+// -------------------------------------------------------------------------
 // Helper: execute a raw SQL string on the test database.
 // -------------------------------------------------------------------------
 static void exec_sql (sqlite3 *handle, const char *sql)
@@ -102,23 +114,17 @@ TEST_F (DatabasePipelineTest, StorePipelineTask_InsertNewStep)
   sqlite3_bind_text (stmt, 1, step.id.c_str (), -1, SQLITE_TRANSIENT);
   ASSERT_EQ (sqlite3_step (stmt), SQLITE_ROW);
 
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0))),
-             job_id.value ());
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 1))),
-             ""); // agent_id remains empty
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2))),
-             step.command);
+  EXPECT_EQ (column_text_or_empty (stmt, 0), job_id.value ());
+  // agent_id (col 1) is intentionally left NULL — store_pipeline_task does
+  // not write it (dead field, see backlog). NULL reads as "" via the helper
+  // above, matching the original intent of this assertion.
+  EXPECT_EQ (column_text_or_empty (stmt, 1), ""); // agent_id remains empty
+  EXPECT_EQ (column_text_or_empty (stmt, 2), step.command);
   // params is a JSON object; we only check that the string is not empty.
   EXPECT_GT (sqlite3_column_bytes (stmt, 3), 0);
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 4))),
-             step.description);
+  EXPECT_EQ (column_text_or_empty (stmt, 4), step.description);
   EXPECT_EQ (sqlite3_column_int (stmt, 5), order);
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 6))),
+  EXPECT_EQ (column_text_or_empty (stmt, 6),
              "pending"); // status set to 'pending' by store_pipeline_task
   EXPECT_EQ (sqlite3_column_type (stmt, 7), SQLITE_NULL); // result still null
 
@@ -259,12 +265,8 @@ TEST_F (DatabasePipelineTest, StorePipelineTask_Overwrite)
   sqlite3_bind_text (stmt, 1, step2.id.c_str (), -1, SQLITE_TRANSIENT);
   ASSERT_EQ (sqlite3_step (stmt), SQLITE_ROW);
 
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 0))),
-             step2.description);
+  EXPECT_EQ (column_text_or_empty (stmt, 0), step2.description);
   EXPECT_EQ (sqlite3_column_int (stmt, 1), 42);
-  EXPECT_EQ (std::string (
-               reinterpret_cast<const char *> (sqlite3_column_text (stmt, 2))),
-             step2.command);
+  EXPECT_EQ (column_text_or_empty (stmt, 2), step2.command);
   sqlite3_finalize (stmt);
 }

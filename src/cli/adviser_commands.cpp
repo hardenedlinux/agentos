@@ -22,6 +22,7 @@
 #include "agentos/cli_format.h"
 #include <CLI/CLI.hpp>
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <rapidjson/document.h>
@@ -66,7 +67,12 @@ void register_adviser_commands (CLI::App &app)
           agentos::cli::CliClient client (*timeout_ms);
           if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
-          auto params = agentos::cli::build_adviser_register_params (path);
+          // daemon is a separate long-running process — a relative path
+          // resolves against ITS cwd, not the caller's. Resolve to
+          // absolute before sending, same as worker/suite/asset/job
+          // commands.
+          auto abs_path = std::filesystem::absolute (path).string ();
+          auto params = agentos::cli::build_adviser_register_params (abs_path);
           auto result = client.send ("adviser.register", std::move (params));
           if (*json_flag)
           {

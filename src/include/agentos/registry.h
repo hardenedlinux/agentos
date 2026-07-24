@@ -86,7 +86,7 @@ namespace agentos
     size_t worker_count () const;
 
     // ADR-019: register a worker after forge pipeline reaches Promoted
-    void finalize_worker_promotion (const ForgePipelineJob &job,
+    bool finalize_worker_promotion (const ForgePipelineJob &job,
                                     const std::string &worker_code,
                                     const std::string &capability_json,
                                     Database &db);

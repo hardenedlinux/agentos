@@ -487,8 +487,20 @@ namespace agentos
 
   // -----------------------------------------------------------------------
   // ADR-019: worker registration after forge pipeline promotes
+  //
+  // Promotion is now all-or-nothing: EVERY capability method must pass
+  // ADR-031 format validation before we write manifest.json, insert the
+  // `agents` row, insert any capability rows, or touch the in-memory
+  // Registry. If any capability fails validation, nothing is written and
+  // this returns false — the caller must treat that exactly like a Code
+  // Writer generation failure (i.e. feed it into Forge's normal retry
+  // path), not attempt a partial registration. Previously the `agents`
+  // row was inserted first and invalid capabilities were silently
+  // skipped one-by-one, which could leave a registered worker with zero
+  // usable capabilities (observed in production via the misrouted
+  // glossary-adviser incident).
   // -----------------------------------------------------------------------
-  void Registry::finalize_worker_promotion (const ForgePipelineJob &job,
+  bool Registry::finalize_worker_promotion (const ForgePipelineJob &job,
                                             const std::string &worker_code,
                                             const std::string &capability_json,
                                             Database &db)
@@ -501,7 +513,7 @@ namespace agentos
     {
       spdlog::error ("[registry] cannot create worker directory {}: {}",
                      worker_dir.string (), ec.message ());
-      return;
+      return false;
     }
 
     // ADR-031: worker.py and worker_impl.py are written by
@@ -509,7 +521,45 @@ namespace agentos
     // This function only writes manifest.json and handles DB/in-memory sync.
     auto code_path = worker_dir / "worker.py";
 
-    // Write manifest.json
+    // ---- Pass 1: validate ALL capabilities before writing anything. ----
+    rapidjson::Document cap_doc;
+    cap_doc.Parse (capability_json.c_str ());
+    if (cap_doc.HasParseError () || !cap_doc.HasMember ("capabilities")
+        || !cap_doc["capabilities"].IsArray ())
+    {
+      spdlog::error (
+        "[registry] finalize_worker_promotion: worker '{}' manifest has no "
+        "valid 'capabilities' array — rejecting promotion (treat as Code "
+        "Writer generation failure, eligible for Forge retry)",
+        job.id);
+      return false;
+    }
+
+    for (const auto &cap : cap_doc["capabilities"].GetArray ())
+    {
+      if (!cap.IsObject () || !cap.HasMember ("method")
+          || !cap["method"].IsString ())
+      {
+        spdlog::error (
+          "[registry] finalize_worker_promotion: worker '{}' has a "
+          "capability entry missing a valid 'method' field — rejecting "
+          "entire promotion", job.id);
+        return false;
+      }
+
+      const std::string method = cap["method"].GetString ();
+      if (!is_valid_method (method))
+      {
+        spdlog::error (
+          "[registry] finalize_worker_promotion: invalid method format "
+          "'{}' for worker '{}' — rejecting entire promotion (ADR-031); "
+          "no partial registration allowed", method, job.id);
+        return false;
+      }
+    }
+
+    // ---- Pass 2: everything validated — commit manifest, DB, memory. ----
+
     auto manifest_path = worker_dir / "manifest.json";
     {
       std::ofstream out (manifest_path);
@@ -517,116 +567,58 @@ namespace agentos
       {
         spdlog::error ("[registry] cannot write manifest to {}",
                        manifest_path.string ());
-        return;
+        return false;
       }
       out << capability_json;
     }
 
-    // Insert agent record
+    // Insert agent record — only reached once every capability is known
+    // to be valid, so this can no longer produce an empty-shell worker.
     db.insert_agent (job.id, "worker", code_path.string (), capability_json);
 
-    // Insert capability rows
-    rapidjson::Document cap_doc;
-    cap_doc.Parse (capability_json.c_str ());
-    if (!cap_doc.HasParseError () && cap_doc.HasMember ("capabilities")
-        && cap_doc["capabilities"].IsArray ())
+    RegisteredExecutor executor;
+    executor.id = ClientId (job.id);
+    executor.name = job.id;
+    executor.binary_path = code_path.string ();
+
+    for (const auto &cap : cap_doc["capabilities"].GetArray ())
     {
-      for (const auto &cap : cap_doc["capabilities"].GetArray ())
+      const std::string method = cap["method"].GetString ();
+      const std::string desc
+        = cap.HasMember ("description") && cap["description"].IsString ()
+            ? cap["description"].GetString ()
+            : "";
+
+      std::string input_schema = "{}";
+      if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
       {
-        if (!cap.IsObject ())
-          continue;
-
-        if (!cap.HasMember ("method") || !cap["method"].IsString ())
-          continue;
-
-        const std::string method = cap["method"].GetString ();
-
-        // ADR-031: reject non-conforming method names before any write.
-        // in-memory sync below uses the same guard, so DB and Registry
-        // are always consistent.
-        if (!is_valid_method (method))
-        {
-          spdlog::error (
-            "[registry] finalize_worker_promotion: invalid method format '{}' "
-            "for worker '{}' — skipping capability registration (ADR-031)",
-            method, job.id);
-          continue;
-        }
-
-        const std::string desc
-          = cap.HasMember ("description") && cap["description"].IsString ()
-              ? cap["description"].GetString ()
-              : "";
-
-        std::string input_schema = "{}";
-        if (cap.HasMember ("input_schema") && cap["input_schema"].IsObject ())
-        {
-          rapidjson::StringBuffer ibuf;
-          rapidjson::Writer<rapidjson::StringBuffer> iw (ibuf);
-          cap["input_schema"].Accept (iw);
-          input_schema = ibuf.GetString ();
-        }
-
-        db.insert_capability (job.id, method, desc, input_schema);
+        rapidjson::StringBuffer ibuf;
+        rapidjson::Writer<rapidjson::StringBuffer> iw (ibuf);
+        cap["input_schema"].Accept (iw);
+        input_schema = ibuf.GetString ();
       }
-    }
-    else
-    {
-      spdlog::warn ("[registry] no capabilities in manifest for worker '{}'",
-                    job.id);
+
+      db.insert_capability (job.id, method, desc, input_schema);
+
+      CommandSchema cmd;
+      cmd.name = method;
+      cmd.description = desc;
+      executor.commands.push_back (std::move (cmd));
     }
 
     // Update forge job status to promoted
     db.update_forge_pipeline_job_status (job.id, ForgeStatus::promoted);
 
     // Sync in-memory registry
-    RegisteredExecutor executor;
-    executor.id = ClientId (job.id);
-    executor.name = job.id;
-    executor.binary_path = code_path.string ();
-
-    // Parse commands from capability_json
-    if (!cap_doc.HasParseError () && cap_doc.HasMember ("capabilities")
-        && cap_doc["capabilities"].IsArray ())
-    {
-      for (const auto &cap : cap_doc["capabilities"].GetArray ())
-      {
-        if (!cap.IsObject () || !cap.HasMember ("method")
-            || !cap["method"].IsString ())
-          continue;
-        CommandSchema cmd;
-        cmd.name = cap["method"].GetString ();
-        // ADR-031: skip non-conforming method names — they were already
-        // rejected in the DB insert pass above.
-        if (!is_valid_method (cmd.name))
-          continue;
-        cmd.description
-          = cap.HasMember ("description") && cap["description"].IsString ()
-              ? cap["description"].GetString ()
-              : "";
-        executor.commands.push_back (std::move (cmd));
-      }
-    }
-
     for (const auto &cmd : executor.commands)
     {
-      // ADR-031: only register methods that passed format validation above.
-      // This prevents non-conforming names from entering the in-memory
-      // Registry even when DB insert was already rejected.
-      if (!is_valid_method (cmd.name))
-      {
-        spdlog::warn ("[registry] skipping in-memory registration of "
-                      "invalid method '{}' for worker '{}'",
-                      cmd.name, job.id);
-        continue;
-      }
       impl_->command_to_worker[cmd.name] = job.id;
       impl_->command_schemas[cmd.name] = cmd;
     }
-
     impl_->workers[job.id] = std::move (executor);
 
     spdlog::info ("[registry] worker '{}' promoted and registered", job.id);
+    return true;
   }
 
   std::optional<RegisteredAdviser>

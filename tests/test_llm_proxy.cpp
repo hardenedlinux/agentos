@@ -69,7 +69,7 @@ TEST(LlmProxyTest, DeepSeekE2E) {
     LlmRequest req;
     req.base_url      = "https://api.deepseek.com";
     req.api_key       = key;
-    req.model         = "deepseek-chat";          // standard chat model
+    req.model         = "deepseek-v4-flash";      // v4 model (deepseek-chat retired 2026-07-24)
     req.api_path      = "/v1/chat/completions";   // OpenAI‑compatible endpoint
     req.system_prompt = "You are a helpful assistant.";
     req.user_prompt   = "Say hello world";

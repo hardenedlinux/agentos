@@ -1,5 +1,9 @@
 #include "agentos/config.h"
 #include "agentos/home_init.h"
+#include "agentos/memory_curve.h"
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
 #include <toml.hpp>
 #include <fstream>
 #include <sstream>
@@ -86,6 +90,55 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
         if (auto* log_tbl = tbl["logging"].as_table()) {
             if (auto v = log_tbl->at_path("level").as_string()) {
                 cfg.logging.level = v->get();
+            }
+        }
+
+        // [memory_curve]
+        if (auto* mc = tbl["memory_curve"].as_table()) {
+            for (const auto& [key, sub] : *mc) {
+                auto* sub_tbl = sub.as_table();
+                if (!sub_tbl) continue;
+
+                Config::MemoryCurveFactConfig cfg_mc;
+                cfg_mc.algorithm = sub_tbl->at_path("algorithm").value_or("");
+
+                auto* params_tbl = sub_tbl->at_path("params").as_table();
+                if (params_tbl) {
+                    rapidjson::StringBuffer buf;
+                    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+                    w.StartObject();
+                    for (const auto& [pk, pv] : *params_tbl) {
+                        w.Key(std::string{pk.str()}.c_str());
+                        if (auto s = pv.as_string()) {
+                            w.String(s->get().c_str());
+                        } else if (auto i = pv.as_integer()) {
+                            w.Int64(i->get());
+                        } else if (auto f = pv.as_floating_point()) {
+                            w.Double(f->get());
+                        } else if (auto b = pv.as_boolean()) {
+                            w.Bool(b->get());
+                        } else {
+                            w.Null();
+                        }
+                    }
+                    w.EndObject();
+                    cfg_mc.params_json = buf.GetString();
+                } else {
+                    cfg_mc.params_json = "{}";
+                }
+
+                cfg.memory_curve.emplace(std::string{key.str()},
+                                           std::move(cfg_mc));
+            }
+
+            // validate algorithm names
+            for (const auto& [fact_type, mc_cfg] : cfg.memory_curve) {
+                auto algo = MemoryCurveRegistry::instance().resolve(mc_cfg.algorithm);
+                if (!algo) {
+                    error = "memory_curve." + fact_type + ": algorithm '" +
+                            mc_cfg.algorithm + "' is not registered";
+                    return std::nullopt;
+                }
             }
         }
 

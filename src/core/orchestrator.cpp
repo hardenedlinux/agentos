@@ -27,6 +27,8 @@
 #include "agentos/cred_vault.h"
 #include "agentos/home_init.h"
 #include "agentos/time_utils.h"
+#include "agentos/memory_curve.h"
+#include "agentos/user_facts.h"
 #include "agentos/user_manager.h"
 #include "agentos/uuid.h"
 
@@ -42,6 +44,7 @@
 #include <fstream>
 #include <openssl/evp.h>
 #include <regex>
+#include <string_view>
 #include <toml.hpp>
 #include <unistd.h>
 
@@ -581,6 +584,20 @@ namespace agentos
       return;
     }
 
+    // Remember the authenticated key's id for per‑user scoping (used by
+    // cmd_user_facts_* / cmd_subject_* below to resolve the real caller
+    // instead of trusting a client-supplied user_id/subject ownership).
+    //
+    // This is safe ONLY because Orchestrator::on_message dispatches one
+    // event at a time ("serial dispatch") and every cmd_* handler reads
+    // this member synchronously, within the same call, before this function
+    // returns. If dispatch is ever made concurrent, or a cmd_* handler ever
+    // spawns work that reads current_caller_key_id_ after this function has
+    // returned, this becomes a cross-request identity leak — the fix at
+    // that point is to thread the resolved id through as an explicit
+    // parameter to each cmd_* handler instead of via this member.
+    current_caller_key_id_ = ak->id;
+
     // 5. Extract params.
     std::string params_json = "{}";
     if (doc.HasMember ("params"))
@@ -591,83 +608,63 @@ namespace agentos
       params_json = buf.GetString ();
     }
 
-    // 6. Route to command handler.
-    if (method == "job.submit")
-      cmd_job_submit (params_json, identity, request_id);
-    else if (method == "job.status")
-      cmd_job_status (params_json, identity, request_id);
-    else if (method == "job.list")
-      cmd_job_list (params_json, identity, request_id);
-    else if (method == "job.cancel")
-      cmd_job_cancel (params_json, identity, request_id);
-    else if (method == "review.approve")
-      cmd_review_approve (params_json, identity, request_id);
-    else if (method == "review.reject")
-      cmd_review_reject (params_json, identity, request_id);
-    else if (method == "worker.register")
-      cmd_worker_register (params_json, identity, request_id);
-    else if (method == "worker.list")
-      cmd_worker_list (params_json, identity, request_id);
-    else if (method == "worker.enable")
-      cmd_worker_enable (params_json, identity, request_id);
-    else if (method == "worker.disable")
-      cmd_worker_disable (params_json, identity, request_id);
-    else if (method == "worker.revoke")
-      cmd_worker_revoke (params_json, identity, request_id);
-    else if (method == "suite.list")
-      cmd_suite_list (params_json, identity, request_id);
-    else if (method == "suite.show")
-      cmd_suite_show (params_json, identity, request_id);
-    else if (method == "suite.install")
-      cmd_suite_install (params_json, identity, request_id);
-    else if (method == "suite.remove")
-      cmd_suite_remove (params_json, identity, request_id);
-    else if (method == "asset.register")
-      cmd_asset_register (params_json, identity, request_id);
-    else if (method == "asset.show")
-      cmd_asset_show (params_json, identity, request_id);
-    else if (method == "asset.list")
-      cmd_asset_list (params_json, identity, request_id);
-    else if (method == "asset.revoke")
-      cmd_asset_revoke (params_json, identity, request_id);
-    else if (method == "asset.extract")
-      cmd_asset_extract (params_json, identity, request_id);
-    else if (method == "adviser.list")
-      cmd_adviser_list (params_json, identity, request_id);
-    else if (method == "adviser.register")
-      cmd_adviser_register (params_json, identity, request_id);
-    else if (method == "forge.list")
-      cmd_forge_list (params_json, identity, request_id);
-    else if (method == "forge.status")
-      cmd_forge_status (params_json, identity, request_id);
-    // --- ADR-028: credential vault methods ---
-    else if (method == "cred.submit")
-      cmd_cred_submit (params_json, identity, request_id);
-    else if (method == "cred.revoke")
-      cmd_cred_revoke (params_json, identity, request_id);
-    else if (method == "cred.grant")
-      cmd_cred_grant (params_json, identity, request_id);
-    else if (method == "cred.revoke_grant")
-      cmd_cred_revoke_grant (params_json, identity, request_id);
-    else if (method == "cred.list")
-      cmd_cred_list (params_json, identity, request_id);
-    else if (method == "cred.audit")
-      cmd_cred_audit (params_json, identity, request_id);
-    else if (method == "vault.rekey")
-      cmd_vault_rekey (params_json, identity, request_id);
-    // --- ADR-029: user management methods (admin only) ---
-    else if (method == "user.register")
-      cmd_user_register (params_json, identity, request_id);
-    else if (method == "user.list")
-      cmd_user_list (params_json, identity, request_id);
-    else if (method == "user.enable")
-      cmd_user_enable (params_json, identity, request_id);
-    else if (method == "user.disable")
-      cmd_user_disable (params_json, identity, request_id);
-    else if (method == "user.profile")
-      cmd_user_profile (params_json, identity, request_id);
+    // 6. Route to command handler — table lookup, no hashing
+    using Handler = std::function<void(const std::string&,
+                                       const std::string&,
+                                       const std::string&)>;
+    static const std::unordered_map<std::string, Handler> sDispatch = {
+      {"job.submit",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_submit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.status",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_status(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.list",            [this](auto&& p,auto&& id,auto&& ri){cmd_job_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.cancel",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_cancel(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"review.approve",      [this](auto&& p,auto&& id,auto&& ri){cmd_review_approve(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"review.reject",       [this](auto&& p,auto&& id,auto&& ri){cmd_review_reject(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.register",     [this](auto&& p,auto&& id,auto&& ri){cmd_worker_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.list",         [this](auto&& p,auto&& id,auto&& ri){cmd_worker_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.enable",       [this](auto&& p,auto&& id,auto&& ri){cmd_worker_enable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.disable",      [this](auto&& p,auto&& id,auto&& ri){cmd_worker_disable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.revoke",       [this](auto&& p,auto&& id,auto&& ri){cmd_worker_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_suite_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.show",          [this](auto&& p,auto&& id,auto&& ri){cmd_suite_show(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.install",       [this](auto&& p,auto&& id,auto&& ri){cmd_suite_install(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.remove",        [this](auto&& p,auto&& id,auto&& ri){cmd_suite_remove(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.register",      [this](auto&& p,auto&& id,auto&& ri){cmd_asset_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.show",          [this](auto&& p,auto&& id,auto&& ri){cmd_asset_show(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_asset_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.revoke",        [this](auto&& p,auto&& id,auto&& ri){cmd_asset_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.extract",       [this](auto&& p,auto&& id,auto&& ri){cmd_asset_extract(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.facts.record",   [this](auto&& p,auto&& id,auto&& ri){cmd_user_facts_record(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.facts.get",      [this](auto&& p,auto&& id,auto&& ri){cmd_user_facts_get(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.register",          [this](auto&& p,auto&& id,auto&& ri){cmd_subject_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.populate",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_populate(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.next",        [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_next(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.complete",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_complete(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.progress",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_progress(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.memory.upsert",     [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.memory.query",      [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_query(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.list",        [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.register",    [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"forge.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_forge_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"forge.status",        [this](auto&& p,auto&& id,auto&& ri){cmd_forge_status(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.submit",         [this](auto&& p,auto&& id,auto&& ri){cmd_cred_submit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.revoke",         [this](auto&& p,auto&& id,auto&& ri){cmd_cred_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.grant",          [this](auto&& p,auto&& id,auto&& ri){cmd_cred_grant(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.revoke_grant",   [this](auto&& p,auto&& id,auto&& ri){cmd_cred_revoke_grant(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.list",           [this](auto&& p,auto&& id,auto&& ri){cmd_cred_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.audit",          [this](auto&& p,auto&& id,auto&& ri){cmd_cred_audit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"vault.rekey",         [this](auto&& p,auto&& id,auto&& ri){cmd_vault_rekey(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.register",       [this](auto&& p,auto&& id,auto&& ri){cmd_user_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.list",           [this](auto&& p,auto&& id,auto&& ri){cmd_user_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.enable",         [this](auto&& p,auto&& id,auto&& ri){cmd_user_enable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.disable",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_disable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.profile",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_profile(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+    };
+
+    auto it = sDispatch.find(method);
+    if (it != sDispatch.end())
+        it->second(params_json, identity, request_id);
     else
-      reply_error (identity, request_id, -32601, "Method not found");
+        reply_error(identity, request_id, -32601, "Method not found");
   }
 
   // ---------------------------------------------------------------------------
@@ -2314,6 +2311,489 @@ namespace agentos
     w.String (safe_name.c_str ());
     w.Key ("path");
     w.String (dest_path.string ().c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_facts_record (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("fact_type") || !params["fact_type"].IsString ()
+        || !params.HasMember ("fact_key") || !params["fact_key"].IsString ()
+        || !params.HasMember ("payload") || !params["payload"].IsObject ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error: no authenticated user");
+      return;
+    }
+
+    const std::string fact_type_name = params["fact_type"].GetString ();
+    auto ft_info = lookup_fact_type (fact_type_name);
+    if (!ft_info)
+    {
+      reply_error (identity, request_id, -32602, "Unknown fact_type");
+      return;
+    }
+
+    const std::string fact_key = params["fact_key"].GetString ();
+
+    // payload to JSON string
+    rapidjson::StringBuffer payload_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> pw (payload_buf);
+    params["payload"].Accept (pw);
+    const std::string payload_json = payload_buf.GetString ();
+
+    const std::string source = current_caller_key_id_;
+
+    Database::UserFactEvent event;
+    event.user_id    = user_id;
+    event.fact_type  = fact_type_name;
+    event.fact_key   = fact_key;
+    event.payload    = payload_json;
+    event.source     = source;
+    event.created_at = now_unix ();
+
+    // early validation for decayed facts – reject before any write
+    if (ft_info->decayed)
+    {
+        if (!params.HasMember ("signal") || !params["signal"].IsNumber ())
+        {
+            reply_error (identity, request_id, -32602,
+                         "Invalid params: signal required for decayed fact_type");
+            return;
+        }
+
+        double signal = params["signal"].GetDouble ();
+
+        // -32031 is this operation's business-rule-violation bucket (same
+        // pattern as -32030 elsewhere in this file for cred/vault
+        // operations): one code, distinguished by the message string,
+        // covering "this fact_type is configured/registered incorrectly or
+        // the write itself failed" — not a per-condition code, matching how
+        // -32030 is already used for cred.submit/vault.rekey failures.
+        auto it = config_.memory_curve.find (fact_type_name);
+        if (it == config_.memory_curve.end ())
+        {
+            reply_error (identity, request_id, -32031,
+                         "No memory_curve config for fact_type " + fact_type_name);
+            return;
+        }
+        const auto &mc = it->second;
+        auto algo = MemoryCurveRegistry::instance ().resolve (mc.algorithm);
+        if (!algo)
+        {
+            reply_error (identity, request_id, -32031,
+                         "Algorithm not found: " + mc.algorithm);
+            return;
+        }
+
+        rapidjson::Document cfg_params;
+        cfg_params.Parse (mc.params_json.c_str ());
+
+        auto compute_fn = [&](std::optional<double> old_score, double sig) -> double
+        {
+            ScoreUpdateInput inp{old_score, sig};
+            return (*algo)(inp, cfg_params);
+        };
+
+        double new_score = 0.0;
+        if (!db_.record_user_fact (event, /*decayed=*/true, signal, compute_fn, source, new_score))
+        {
+            reply_error (identity, request_id, -32031, "Failed to record fact");
+            return;
+        }
+    }
+    else
+    {
+        double dummy_score = 0.0;
+        if (!db_.record_user_fact (event, /*decayed=*/false, 0.0,
+                                   [](std::optional<double>,double)->double{return 0.0;},
+                                   source, dummy_score))
+        {
+            reply_error (identity, request_id, -32031, "Failed to record fact");
+            return;
+        }
+    }
+
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  void Orchestrator::cmd_user_facts_get (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error");
+      return;
+    }
+    std::vector<std::string> fact_types;
+    if (params.HasMember ("fact_types") && params["fact_types"].IsArray ())
+    {
+      for (const auto &v : params["fact_types"].GetArray ())
+        if (v.IsString ())
+          fact_types.emplace_back (v.GetString ());
+    }
+
+    auto rows = db_.load_user_facts_for_user (user_id, fact_types);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("facts");
+    w.StartArray ();
+    for (const auto &row : rows)
+    {
+      w.StartObject ();
+      w.Key ("fact_type");
+      w.String (row.fact_type.c_str ());
+      w.Key ("fact_key");
+      w.String (row.fact_key.c_str ());
+      w.Key ("value");
+      rapidjson::Document val_doc;
+      if (!val_doc.Parse (row.fact_value.c_str ()).HasParseError ())
+        val_doc.Accept (w);
+      else
+        w.String (row.fact_value.c_str ());
+      w.Key ("updated_at");
+      w.Int64 (row.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_register (const std::string &params_json,
+                                           const std::string &identity,
+                                           const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_type") || !params["subject_type"].IsString ()
+        || !params.HasMember ("unit_type") || !params["unit_type"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error");
+      return;
+    }
+    const std::string subject_type = params["subject_type"].GetString ();
+    const std::string unit_type = params["unit_type"].GetString ();
+    if (unit_type != "file" && unit_type != "line")
+    {
+      reply_error (identity, request_id, -32602,
+                    "unit_type must be 'file' or 'line'");
+      return;
+    }
+    std::string title;
+    if (params.HasMember ("title") && params["title"].IsString ())
+      title = params["title"].GetString ();
+
+    const std::string subject_id = new_uuid ();
+    int64_t ts = now_unix ();
+    Database::SubjectRow srow;
+    srow.subject_id = subject_id;
+    srow.user_id    = user_id;
+    srow.subject_type = subject_type;
+    srow.unit_type  = unit_type;
+    srow.title      = title;
+    srow.created_at = ts;
+    srow.updated_at = ts;
+    db_.insert_subject (srow);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("subject_id");
+    w.String (subject_id.c_str ());
+    w.Key ("created_at");
+    w.Int64 (ts);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_populate (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("units") || !params["units"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    auto subj = db_.load_subject (subject_id);
+    if (!subj || subj->user_id != current_caller_key_id_)
+    {
+      reply_error (identity, request_id, -32020, "subject not found");
+      return;
+    }
+    std::vector<std::string> units;
+    for (const auto &v : params["units"].GetArray ())
+      if (v.IsString ())
+        units.emplace_back (v.GetString ());
+
+    int inserted = 0, already = 0;
+    db_.populate_subject_units (subject_id, units, inserted, already);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("inserted");
+    w.Int (inserted);
+    w.Key ("already_known");
+    w.Int (already);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_next (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    int limit = 50;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto rows = db_.next_pending_subject_units (subject_id, limit);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("units");
+    w.StartArray ();
+    for (const auto &r : rows)
+    {
+      w.StartObject ();
+      w.Key ("unit_index");
+      w.Int (r.unit_index);
+      w.Key ("unit_ref");
+      w.String (r.unit_ref.c_str ());
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_complete (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("unit_indices") || !params["unit_indices"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    std::vector<int> indices;
+    for (const auto &v : params["unit_indices"].GetArray ())
+      if (v.IsInt ())
+        indices.push_back (v.GetInt ());
+
+    bool ok = db_.complete_subject_units (subject_id, indices);
+    reply_ok (identity, request_id, ok ? R"({"ok":true})" : R"({"ok":false})");
+  }
+
+  void Orchestrator::cmd_subject_units_progress (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    auto prog = db_.get_subject_progress (subject_id);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("total");
+    w.Int (prog.total);
+    w.Key ("completed");
+    w.Int (prog.completed);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_memory_upsert (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("entry_key") || !params["entry_key"].IsString ()
+        || !params.HasMember ("entry_value") || !params["entry_value"].IsObject ()
+        || !params.HasMember ("source_job_id") || !params["source_job_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id_str = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id_str);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    Database::SubjectMemoryRow row;
+    row.subject_id = params["subject_id"].GetString ();
+    row.entry_key  = params["entry_key"].GetString ();
+    {
+      rapidjson::StringBuffer vb;
+      rapidjson::Writer<rapidjson::StringBuffer> vw (vb);
+      params["entry_value"].Accept (vw);
+      row.entry_value = vb.GetString ();
+    }
+    if (params.HasMember ("related_asset_ids") && params["related_asset_ids"].IsArray ())
+    {
+      rapidjson::StringBuffer ab;
+      rapidjson::Writer<rapidjson::StringBuffer> aw (ab);
+      params["related_asset_ids"].Accept (aw);
+      row.related_asset_ids = ab.GetString ();
+    }
+    else
+      row.related_asset_ids = "[]";
+    row.source_job_id = params["source_job_id"].GetString ();
+    row.created_at = now_unix ();
+    row.updated_at = now_unix ();
+    db_.upsert_subject_memory (row);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("revision");
+    w.Int (row.revision);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_memory_query (const std::string &params_json,
+                                               const std::string &identity,
+                                               const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    std::optional<std::string> key_prefix;
+    if (params.HasMember ("key_prefix") && params["key_prefix"].IsString ())
+      key_prefix = params["key_prefix"].GetString ();
+    int limit = 100;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+    std::optional<std::string> cursor;
+    if (params.HasMember ("cursor") && params["cursor"].IsString ())
+      cursor = params["cursor"].GetString ();
+
+    auto rows = db_.query_subject_memory (subject_id, key_prefix, limit, cursor);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("entries");
+    w.StartArray ();
+    for (const auto &r : rows)
+    {
+      w.StartObject ();
+      w.Key ("entry_key");
+      w.String (r.entry_key.c_str ());
+      w.Key ("entry_value");
+      rapidjson::Document val;
+      if (!val.Parse (r.entry_value.c_str ()).HasParseError ())
+        val.Accept (w);
+      else
+        w.String (r.entry_value.c_str ());
+      w.Key ("revision");
+      w.Int (r.revision);
+      w.Key ("updated_at");
+      w.Int64 (r.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    std::string next_cursor;
+    if (!rows.empty () && static_cast<int>(rows.size ()) == limit)
+      next_cursor = rows.back ().entry_key;
+    w.Key ("next_cursor");
+    if (next_cursor.empty ()) w.Null ();
+    else w.String (next_cursor.c_str ());
     w.EndObject ();
     reply_ok (identity, request_id, buf.GetString ());
   }

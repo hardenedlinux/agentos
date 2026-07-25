@@ -21,6 +21,7 @@
 #include "agentos/types.h"
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
@@ -557,6 +558,97 @@ namespace agentos
       return {};
     }
 
+    // -- User Facts ------------------------------------------------------------
+    struct UserFactEvent
+    {
+      int64_t     id = 0;
+      std::string user_id;
+      std::string fact_type;
+      std::string fact_key;
+      std::string payload;
+      std::string source;
+      int64_t     created_at = 0;
+    };
+    struct UserFactRow
+    {
+      std::string user_id;
+      std::string fact_type;
+      std::string fact_key;
+      std::string fact_value;
+      std::string source;
+      int64_t     created_at = 0;
+      int64_t     updated_at = 0;
+    };
+
+    // record_user_fact is the ONLY write path for user facts — it wraps the
+    // user_fact_events insert and (for decayed fact_types) the user_facts
+    // upsert in a single transaction, so a failure partway through never
+    // leaves an event recorded with no corresponding score update. Do not
+    // reintroduce separate non-transactional insert/upsert helpers for this;
+    // that shape was tried and removed for exactly this reason.
+    [[nodiscard]] bool record_user_fact (const UserFactEvent &event,
+                                         bool decayed,
+                                         double signal,
+                                         const std::function<double(std::optional<double>, double)> &compute_fn,
+                                         const std::string &source,
+                                         double &out_new_score);
+
+    std::vector<UserFactRow>
+    load_user_facts_for_user (const std::string &user_id,
+                              const std::vector<std::string> &fact_types);
+
+    // -- Subject tables --------------------------------------------------------
+    struct SubjectRow
+    {
+      std::string subject_id;
+      std::string user_id;
+      std::string subject_type;
+      std::string unit_type;
+      std::string title;
+      int64_t     created_at = 0;
+      int64_t     updated_at = 0;
+    };
+    struct SubjectUnitRow
+    {
+      std::string subject_id;
+      int         unit_index = 0;
+      std::string unit_ref;
+      int         status       = 0;  // 0 pending, 1 completed
+      int64_t     completed_at = 0;
+    };
+    struct SubjectProgress
+    {
+      int total     = 0;
+      int completed = 0;
+    };
+    struct SubjectMemoryRow
+    {
+      std::string subject_id;
+      std::string entry_key;
+      std::string entry_value;
+      int         revision   = 0;
+      std::string related_asset_ids;
+      std::string source_job_id;
+      int64_t     created_at = 0;
+      int64_t     updated_at = 0;
+    };
+
+    void insert_subject (const SubjectRow &row);
+    std::optional<SubjectRow> load_subject (const std::string &subject_id);
+    void populate_subject_units (const std::string &subject_id,
+                                 const std::vector<std::string> &unit_refs,
+                                 int &inserted, int &already_known);
+    std::vector<SubjectUnitRow>
+    next_pending_subject_units (const std::string &subject_id, int limit);
+    bool complete_subject_units (const std::string &subject_id,
+                                 const std::vector<int> &unit_indices);
+    SubjectProgress get_subject_progress (const std::string &subject_id);
+    void upsert_subject_memory (SubjectMemoryRow &row);
+    std::vector<SubjectMemoryRow>
+    query_subject_memory (const std::string &subject_id,
+                          const std::optional<std::string> &key_prefix,
+                          int limit,
+                          const std::optional<std::string> &cursor);
 
   private:
     // -- Internal helpers -----------------------------------------------------

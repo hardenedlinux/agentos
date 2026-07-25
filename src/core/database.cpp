@@ -469,6 +469,68 @@ namespace agentos
     if (!exec_ddl (schema_assets))
       return false;
 
+    static const char *schema_user_facts = R"(
+      CREATE TABLE IF NOT EXISTS user_fact_events (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id    TEXT NOT NULL,
+          fact_type  TEXT NOT NULL,
+          fact_key   TEXT NOT NULL,
+          payload    TEXT NOT NULL,
+          source     TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_fact_events_lookup
+          ON user_fact_events(user_id, fact_type, fact_key);
+      CREATE TABLE IF NOT EXISTS user_facts (
+          user_id     TEXT NOT NULL,
+          fact_type   TEXT NOT NULL,
+          fact_key    TEXT NOT NULL,
+          fact_value  TEXT NOT NULL,
+          source      TEXT NOT NULL,
+          created_at  INTEGER NOT NULL,
+          updated_at  INTEGER NOT NULL,
+          PRIMARY KEY (user_id, fact_type, fact_key)
+      );
+    )";
+    if (!exec_ddl (schema_user_facts)) return false;
+
+    static const char *schema_subjects = R"(
+      CREATE TABLE IF NOT EXISTS subjects (
+          subject_id   TEXT PRIMARY KEY,
+          user_id      TEXT NOT NULL,
+          subject_type TEXT NOT NULL,
+          unit_type    TEXT NOT NULL,
+          title        TEXT,
+          created_at   INTEGER NOT NULL,
+          updated_at   INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_subjects_user ON subjects(user_id);
+      CREATE TABLE IF NOT EXISTS subject_units (
+          subject_id   TEXT NOT NULL,
+          unit_index   INTEGER NOT NULL,
+          unit_ref     TEXT NOT NULL,
+          status       INTEGER NOT NULL DEFAULT 0,
+          completed_at INTEGER,
+          PRIMARY KEY (subject_id, unit_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_subject_units_pending
+          ON subject_units(subject_id, status, unit_index);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subject_units_unique
+          ON subject_units(subject_id, unit_ref);
+      CREATE TABLE IF NOT EXISTS subject_memory (
+          subject_id        TEXT NOT NULL,
+          entry_key         TEXT NOT NULL,
+          entry_value       TEXT NOT NULL,
+          revision          INTEGER NOT NULL DEFAULT 1,
+          related_asset_ids TEXT,
+          source_job_id     TEXT NOT NULL,
+          created_at        INTEGER NOT NULL,
+          updated_at        INTEGER NOT NULL,
+          PRIMARY KEY (subject_id, entry_key)
+      );
+    )";
+    if (!exec_ddl (schema_subjects)) return false;
+
     // Must run after all migrations above (needs agents.description) and
     // before returning — Registry::init(db) and anything else that reads
     // the agents table happens after Database::open() returns, so builtin
@@ -3528,5 +3590,390 @@ namespace agentos
       jobs.push_back (row_to_job (stmt));
     return jobs;
   }
+
+// ---------------------------------------------------------------------------
+// user_fact_events
+// ---------------------------------------------------------------------------
+
+bool Database::record_user_fact (const UserFactEvent &event,
+                                bool decayed,
+                                double signal,
+                                const std::function<double(std::optional<double>, double)> &compute_fn,
+                                const std::string &source,
+                                double &out_new_score)
+{
+    if (!db_) return false;
+
+    return with_transaction ([&]() -> bool {
+        // 1. insert user_fact_events
+        Stmt estmt (prepare (
+            "INSERT INTO user_fact_events "
+            "(user_id, fact_type, fact_key, payload, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)"));
+        if (!estmt.s) return false;
+
+        sqlite3_bind_text (estmt, 1, event.user_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (estmt, 2, event.fact_type.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (estmt, 3, event.fact_key.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (estmt, 4, event.payload.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (estmt, 5, source.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64 (estmt, 6, event.created_at ? event.created_at : now_unix ());
+
+        if (sqlite3_step (estmt) != SQLITE_DONE)
+        {
+            spdlog::error ("[database] record_user_fact event: {}", sqlite3_errmsg (db_));
+            return false;
+        }
+
+        if (!decayed)
+            return true;
+
+        // 2. compute decayed score inside the same transaction
+        std::optional<double> old_score;
+        {
+            Stmt r (prepare (
+                "SELECT fact_value FROM user_facts "
+                "WHERE user_id=? AND fact_type=? AND fact_key=?"));
+            if (!r.s) return false;
+
+            sqlite3_bind_text (r, 1, event.user_id.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (r, 2, event.fact_type.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (r, 3, event.fact_key.c_str (), -1, SQLITE_TRANSIENT);
+
+            if (sqlite3_step (r) == SQLITE_ROW)
+            {
+                const std::string val = column_text_or_empty (r, 0);
+                rapidjson::Document d;
+                if (!d.Parse (val.c_str ()).HasParseError ()
+                    && d.HasMember ("score") && d["score"].IsNumber ())
+                    old_score = d["score"].GetDouble ();
+            }
+        }
+
+        out_new_score = compute_fn (old_score, signal);
+        const int64_t ts = now_unix ();
+
+        Stmt w (prepare (
+            "INSERT INTO user_facts "
+            "(user_id, fact_type, fact_key, fact_value, source, "
+            " created_at, updated_at) "
+            "VALUES (?1, ?2, ?3, json_object('score', ?4), ?5, ?6, ?6) "
+            "ON CONFLICT(user_id, fact_type, fact_key) DO UPDATE SET "
+            "fact_value = json_object('score', ?7), "
+            "source     = excluded.source, "
+            "updated_at = excluded.updated_at"));
+        if (!w.s) return false;
+
+        sqlite3_bind_text (w, 1, event.user_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (w, 2, event.fact_type.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (w, 3, event.fact_key.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double (w, 4, out_new_score);
+        sqlite3_bind_text (w, 5, source.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64 (w, 6, ts);
+        sqlite3_bind_double (w, 7, out_new_score);
+
+        if (sqlite3_step (w) != SQLITE_DONE)
+        {
+            spdlog::error ("[database] record_user_fact upsert: {}",
+                           sqlite3_errmsg (db_));
+            return false;
+        }
+        return true;
+    }).has_value ();
+}
+
+std::vector<Database::UserFactRow>
+Database::load_user_facts_for_user (const std::string &user_id,
+                                    const std::vector<std::string> &fact_types)
+{
+    std::vector<UserFactRow> results;
+    if (!db_) return results;
+
+    std::string sql = "SELECT user_id, fact_type, fact_key, fact_value, "
+                      "source, created_at, updated_at FROM user_facts "
+                      "WHERE user_id=?";
+    if (!fact_types.empty ())
+    {
+        sql += " AND fact_type IN (";
+        for (size_t i = 0; i < fact_types.size (); ++i)
+        {
+            if (i) sql += ",";
+            sql += "?";
+        }
+        sql += ")";
+    }
+    sql += " ORDER BY updated_at DESC";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s) return results;
+
+    int idx = 1;
+    sqlite3_bind_text (stmt, idx++, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    for (const auto &ft : fact_types)
+        sqlite3_bind_text (stmt, idx++, ft.c_str (), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        UserFactRow row;
+        row.user_id    = column_text_or_empty (stmt, 0);
+        row.fact_type  = column_text_or_empty (stmt, 1);
+        row.fact_key   = column_text_or_empty (stmt, 2);
+        row.fact_value = column_text_or_empty (stmt, 3);
+        row.source     = column_text_or_empty (stmt, 4);
+        row.created_at = sqlite3_column_int64 (stmt, 5);
+        row.updated_at = sqlite3_column_int64 (stmt, 6);
+        results.push_back (std::move (row));
+    }
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// subjects
+// ---------------------------------------------------------------------------
+
+void Database::insert_subject (const SubjectRow &row)
+{
+    if (!db_) return;
+    Stmt stmt (prepare (
+        "INSERT INTO subjects "
+        "(subject_id, user_id, subject_type, unit_type, title, "
+        " created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?)"));
+    if (!stmt.s) return;
+    sqlite3_bind_text (stmt, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, row.user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, row.subject_type.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, row.unit_type.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, row.title.c_str (), -1, SQLITE_TRANSIENT);
+    const int64_t ts = row.created_at ? row.created_at : now_unix ();
+    sqlite3_bind_int64 (stmt, 6, ts);
+    sqlite3_bind_int64 (stmt, 7, row.updated_at ? row.updated_at : ts);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+        spdlog::error ("[database] insert_subject: {}", sqlite3_errmsg (db_));
+}
+
+std::optional<Database::SubjectRow>
+Database::load_subject (const std::string &subject_id)
+{
+    if (!db_) return std::nullopt;
+    Stmt stmt (prepare (
+        "SELECT subject_id, user_id, subject_type, unit_type, title, "
+        "created_at, updated_at FROM subjects WHERE subject_id=?"));
+    if (!stmt.s) return std::nullopt;
+    sqlite3_bind_text (stmt, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        SubjectRow row;
+        row.subject_id   = column_text_or_empty (stmt, 0);
+        row.user_id      = column_text_or_empty (stmt, 1);
+        row.subject_type = column_text_or_empty (stmt, 2);
+        row.unit_type    = column_text_or_empty (stmt, 3);
+        row.title        = column_text_or_empty (stmt, 4);
+        row.created_at   = sqlite3_column_int64 (stmt, 5);
+        row.updated_at   = sqlite3_column_int64 (stmt, 6);
+        return row;
+    }
+    return std::nullopt;
+}
+
+void Database::populate_subject_units (
+    const std::string &subject_id,
+    const std::vector<std::string> &unit_refs,
+    int &inserted, int &already_known)
+{
+    inserted = 0;
+    already_known = 0;
+    if (!db_) return;
+
+    with_transaction ([&]() -> bool {
+        int next_idx = 0;
+        {
+            Stmt maxstmt (prepare (
+                "SELECT COALESCE(MAX(unit_index), -1) + 1 FROM subject_units "
+                "WHERE subject_id=?"));
+            if (!maxstmt.s) return false;
+            sqlite3_bind_text (maxstmt, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step (maxstmt) == SQLITE_ROW)
+                next_idx = sqlite3_column_int (maxstmt, 0);
+        }
+
+        for (const auto &ref : unit_refs)
+        {
+            Stmt ins (prepare (
+                "INSERT INTO subject_units (subject_id, unit_index, unit_ref) "
+                "VALUES (?1, ?2, ?3) "
+                "ON CONFLICT(subject_id, unit_ref) DO NOTHING"));
+            if (!ins.s) return false;
+
+            sqlite3_bind_text (ins, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int  (ins, 2, next_idx);
+            sqlite3_bind_text (ins, 3, ref.c_str (), -1, SQLITE_TRANSIENT);
+
+            if (sqlite3_step (ins) != SQLITE_DONE)
+            {
+                spdlog::error ("[database] populate_subject_units: {}",
+                               sqlite3_errmsg (db_));
+                return false;
+            }
+
+            if (sqlite3_changes (db_) > 0)
+            {
+                ++inserted;
+                ++next_idx;
+            }
+            else
+            {
+                ++already_known;
+            }
+        }
+        return true;
+    });
+}
+
+std::vector<Database::SubjectUnitRow>
+Database::next_pending_subject_units (const std::string &subject_id, int limit)
+{
+    std::vector<SubjectUnitRow> out;
+    if (!db_) return out;
+    Stmt stmt (prepare (
+        "SELECT subject_id, unit_index, unit_ref, status, completed_at "
+        "FROM subject_units WHERE subject_id=? AND status=0 "
+        "ORDER BY unit_index ASC LIMIT ?"));
+    if (!stmt.s) return out;
+    sqlite3_bind_text (stmt, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (stmt, 2, limit);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        SubjectUnitRow row;
+        row.subject_id   = column_text_or_empty (stmt, 0);
+        row.unit_index   = sqlite3_column_int (stmt, 1);
+        row.unit_ref     = column_text_or_empty (stmt, 2);
+        row.status       = sqlite3_column_int (stmt, 3);
+        row.completed_at = (sqlite3_column_type (stmt, 4) == SQLITE_NULL)
+                               ? 0 : sqlite3_column_int64 (stmt, 4);
+        out.push_back (std::move (row));
+    }
+    return out;
+}
+
+bool Database::complete_subject_units (
+    const std::string &subject_id,
+    const std::vector<int> &unit_indices)
+{
+    if (!db_ || unit_indices.empty ()) return false;
+    const int64_t ts = now_unix ();
+    Stmt stmt (prepare ("UPDATE subject_units SET status=1, completed_at=? "
+                        "WHERE subject_id=? AND unit_index=? AND status=0"));
+    if (!stmt.s) return false;
+    for (int idx : unit_indices)
+    {
+        sqlite3_bind_int64 (stmt, 1, ts);
+        sqlite3_bind_text  (stmt, 2, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int   (stmt, 3, idx);
+        if (sqlite3_step (stmt) != SQLITE_DONE)
+            return false;
+        sqlite3_reset (stmt);
+    }
+    return true;
+}
+
+Database::SubjectProgress
+Database::get_subject_progress (const std::string &subject_id)
+{
+    SubjectProgress p;
+    if (!db_) return p;
+    Stmt stmt (prepare (
+        "SELECT COUNT(*), SUM(CASE WHEN status=1 THEN 1 ELSE 0 END) "
+        "FROM subject_units WHERE subject_id=?"));
+    if (!stmt.s) return p;
+    sqlite3_bind_text (stmt, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        p.total     = sqlite3_column_int (stmt, 0);
+        p.completed = sqlite3_column_int (stmt, 1);
+    }
+    return p;
+}
+
+void Database::upsert_subject_memory (SubjectMemoryRow &row)
+{
+    if (!db_) return;
+    const int64_t ts = now_unix ();
+    Stmt stmt (prepare (
+        "INSERT INTO subject_memory "
+        "(subject_id, entry_key, entry_value, revision, related_asset_ids, "
+        " source_job_id, created_at, updated_at) "
+        "VALUES (?,?,?,1,?,?,?,?) "
+        "ON CONFLICT(subject_id, entry_key) DO UPDATE SET "
+        "entry_value       = excluded.entry_value, "
+        "revision          = subject_memory.revision + 1, "
+        "related_asset_ids = excluded.related_asset_ids, "
+        "source_job_id     = excluded.source_job_id, "
+        "updated_at        = excluded.updated_at"));
+    if (!stmt.s) return;
+    sqlite3_bind_text (stmt, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, row.entry_key.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, row.entry_value.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, row.related_asset_ids.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, row.source_job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 6, row.created_at ? row.created_at : ts);
+    sqlite3_bind_int64 (stmt, 7, ts);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+        spdlog::error ("[database] upsert_subject_memory: {}", sqlite3_errmsg (db_));
+    Stmt r (prepare ("SELECT revision FROM subject_memory WHERE subject_id=? AND entry_key=?"));
+    if (r.s)
+    {
+        sqlite3_bind_text (r, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (r, 2, row.entry_key.c_str (), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step (r) == SQLITE_ROW)
+            row.revision = sqlite3_column_int (r, 0);
+    }
+}
+
+std::vector<Database::SubjectMemoryRow>
+Database::query_subject_memory (
+    const std::string &subject_id,
+    const std::optional<std::string> &key_prefix,
+    int limit,
+    const std::optional<std::string> &cursor)
+{
+    std::vector<SubjectMemoryRow> out;
+    if (!db_) return out;
+
+    std::string sql = "SELECT subject_id, entry_key, entry_value, revision, "
+                      "related_asset_ids, source_job_id, created_at, "
+                      "updated_at FROM subject_memory WHERE subject_id=?";
+    if (key_prefix) sql += " AND entry_key LIKE ?";
+    if (cursor && !cursor->empty ()) sql += " AND entry_key > ?";
+    sql += " ORDER BY entry_key ASC LIMIT ?";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s) return out;
+    int idx = 1;
+    sqlite3_bind_text (stmt, idx++, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (key_prefix)
+    {
+        std::string pat = *key_prefix + "%";
+        sqlite3_bind_text (stmt, idx++, pat.c_str (), -1, SQLITE_TRANSIENT);
+    }
+    if (cursor && !cursor->empty ())
+        sqlite3_bind_text (stmt, idx++, cursor->c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, idx++, limit);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        SubjectMemoryRow row;
+        row.subject_id        = column_text_or_empty (stmt, 0);
+        row.entry_key         = column_text_or_empty (stmt, 1);
+        row.entry_value       = column_text_or_empty (stmt, 2);
+        row.revision          = sqlite3_column_int (stmt, 3);
+        row.related_asset_ids = column_text_or_empty (stmt, 4);
+        row.source_job_id     = column_text_or_empty (stmt, 5);
+        row.created_at        = sqlite3_column_int64 (stmt, 6);
+        row.updated_at        = sqlite3_column_int64 (stmt, 7);
+        out.push_back (std::move (row));
+    }
+    return out;
+}
 
 } // namespace agentos

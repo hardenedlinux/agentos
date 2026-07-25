@@ -3,6 +3,7 @@
 #include <optional>
 #include <string_view>
 #include <filesystem>
+#include <unordered_map>
 #include <vector>
 
 namespace agentos {
@@ -48,6 +49,12 @@ struct Config {
         int         refresh_poll_interval = 60;        // seconds between refresh scans
         std::vector<int> pcr_indices   = {0, 1, 2, 7}; // enterprise PCR selection
     } vault;
+
+    struct MemoryCurveFactConfig {
+        std::string algorithm;
+        std::string params_json;
+    };
+    std::unordered_map<std::string, MemoryCurveFactConfig> memory_curve;
 };
 
 // Load config from TOML file. Returns nullopt on error, with error message in `error`.

@@ -269,6 +269,37 @@ namespace agentos
                             const std::string &identity,
                             const std::string &request_id);
 
+    // --- ADR user.facts
+    void cmd_user_facts_record (const std::string &params_json,
+                                const std::string &identity,
+                                const std::string &request_id);
+    void cmd_user_facts_get (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+
+    // --- ADR subject.* methods
+    void cmd_subject_register (const std::string &params_json,
+                               const std::string &identity,
+                               const std::string &request_id);
+    void cmd_subject_units_populate (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id);
+    void cmd_subject_units_next (const std::string &params_json,
+                                 const std::string &identity,
+                                 const std::string &request_id);
+    void cmd_subject_units_complete (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id);
+    void cmd_subject_units_progress (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id);
+    void cmd_subject_memory_upsert (const std::string &params_json,
+                                    const std::string &identity,
+                                    const std::string &request_id);
+    void cmd_subject_memory_query (const std::string &params_json,
+                                   const std::string &identity,
+                                   const std::string &request_id);
+
     // ---------------------------------------------------------------------------
     // Shared registration helpers (ADR-031 §1/§2, ADR-018 Skill Package
     // Format) — used by cmd_worker_register/cmd_adviser_register directly,
@@ -369,6 +400,10 @@ namespace agentos
 
     // Access key cache: key_value → AccessKey (ADR-022)
     std::unordered_map<std::string, Database::AccessKey> active_keys_;
+
+    // The authenticated caller's identity (access‑key id) for the current
+    // request; set during handle_gateway_inbound and used for per‑user scoping.
+    std::string current_caller_key_id_;
   };
 
 } // namespace agentos

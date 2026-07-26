@@ -536,7 +536,22 @@ if __name__ == "__main__":
         out << "max_concurrent = 0\n\n";
         out << "[daemon]\n";
         out << "log_level = \"info\"\n";
-        out << "max_concurrent_jobs = 4\n";
+        out << "max_concurrent_jobs = 4\n\n";
+
+        // ADR-036 / ADR-034: every decay-tracked fact_type must resolve
+        // to a registered algorithm at config load, or the daemon fails
+        // fast at startup. Seed the same defaults documented in
+        // memory-curve-algorithm.md's "Current config" section so a
+        // fresh ~/.agentos install doesn't fail to start on first run.
+        out << "[memory_curve.category_interest]\n";
+        out << "algorithm = \"ema\"\n";
+        out << "params = { alpha = 0.25 }\n\n";
+        out << "[memory_curve.risk_preference]\n";
+        out << "algorithm = \"ema\"\n";
+        out << "params = { alpha = 0.25 }\n\n";
+        out << "[memory_curve.market_region]\n";
+        out << "algorithm = \"ema\"\n";
+        out << "params = { alpha = 0.20 }\n";
         out.close ();
       }
       else

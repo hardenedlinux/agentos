@@ -38,6 +38,7 @@
 #include "agentos/central.h"
 #include "agentos/config.h"
 #include "agentos/home_init.h"
+#include "agentos/memory_curve.h"
 
 #include "agentos/adviser_params.h"
 #include "agentos/cli_color.h"
@@ -57,6 +58,7 @@ void register_forge_commands (CLI::App &app);
 void register_user_commands (CLI::App &app);
 void register_suite_commands (CLI::App &app);
 void register_asset_commands (CLI::App &app);
+void register_subject_commands (CLI::App &app);
 
 namespace
 {
@@ -140,6 +142,16 @@ int main (int argc, char **argv)
 
       agentos::initialise_home (agentos::agentos_home ());
 
+      // ADR-036: the memory-curve algorithm registry must be populated
+      // before config is loaded. load_config() validates every
+      // decay-tracked fact_type's configured `algorithm` name against
+      // MemoryCurveRegistry (per ADR-034/ADR-036's fail-fast startup
+      // contract) — if this call is missing or moved after
+      // load_config(), a perfectly valid "ema" config entry will fail
+      // to resolve and the daemon will refuse to start with an error
+      // that looks like a config problem but isn't one.
+      agentos::register_builtin_memory_curve_algorithms ();
+
       std::string error;
       auto config = agentos::load_config (
         (agentos::agentos_home () / "config.toml").string (), error);
@@ -168,6 +180,7 @@ int main (int argc, char **argv)
   register_user_commands (app);
   register_suite_commands (app);
   register_asset_commands (app);
+  register_subject_commands (app);
 
   agentos::cli::add_completion (&app);
 

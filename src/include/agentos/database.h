@@ -597,6 +597,19 @@ namespace agentos
     load_user_facts_for_user (const std::string &user_id,
                               const std::vector<std::string> &fact_types);
 
+    // Debug/test-only accessor for the raw event log — deliberately no RPC
+    // method wraps this (ADR-034: user_fact_events is an internal audit
+    // trail, not a client-queryable surface — it carries the full raw
+    // signal history behind every derived user_facts score, which is
+    // exactly the privacy boundary ADR-034 draws). The only sanctioned
+    // caller is the local `agentos user facts events` CLI command, which
+    // opens this Database directly — same trust model as
+    // `key generate/list/revoke`, never through Orchestrator/CliClient/RPC.
+    std::vector<UserFactEvent>
+    load_user_fact_events (const std::string &user_id,
+                          const std::optional<std::string> &fact_type,
+                          int limit);
+
     // -- Subject tables --------------------------------------------------------
     struct SubjectRow
     {

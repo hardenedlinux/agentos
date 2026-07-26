@@ -3682,6 +3682,53 @@ bool Database::record_user_fact (const UserFactEvent &event,
     }).has_value ();
 }
 
+std::vector<Database::UserFactEvent>
+Database::load_user_fact_events (const std::string &user_id,
+                                 const std::optional<std::string> &fact_type,
+                                 int limit)
+{
+    // Debug/test-only accessor for the raw append-only event log. There is
+    // deliberately no RPC method wrapping this (ADR-034's user_fact_events
+    // table is an internal audit trail, not a client-queryable surface —
+    // exposing it over RPC would leak the full raw signal history behind
+    // every derived score, which is exactly the privacy boundary ADR-034
+    // draws around user_facts vs user_fact_events). The only sanctioned
+    // caller is the local `agentos user facts events` CLI command, which
+    // opens this Database directly the same way `key generate/list/revoke`
+    // do — never through Orchestrator, never through CliClient/RPC.
+    std::vector<UserFactEvent> results;
+    if (!db_) return results;
+
+    std::string sql = "SELECT id, user_id, fact_type, fact_key, payload, "
+                      "source, created_at FROM user_fact_events WHERE user_id=?";
+    if (fact_type)
+        sql += " AND fact_type=?";
+    sql += " ORDER BY id DESC LIMIT ?";
+
+    Stmt stmt (prepare (sql.c_str ()));
+    if (!stmt.s) return results;
+
+    int idx = 1;
+    sqlite3_bind_text (stmt, idx++, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (fact_type)
+        sqlite3_bind_text (stmt, idx++, fact_type->c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, idx++, limit);
+
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        UserFactEvent row;
+        row.id         = sqlite3_column_int64 (stmt, 0);
+        row.user_id    = column_text_or_empty (stmt, 1);
+        row.fact_type  = column_text_or_empty (stmt, 2);
+        row.fact_key   = column_text_or_empty (stmt, 3);
+        row.payload    = column_text_or_empty (stmt, 4);
+        row.source     = column_text_or_empty (stmt, 5);
+        row.created_at = sqlite3_column_int64 (stmt, 6);
+        results.push_back (std::move (row));
+    }
+    return results;
+}
+
 std::vector<Database::UserFactRow>
 Database::load_user_facts_for_user (const std::string &user_id,
                                     const std::vector<std::string> &fact_types)

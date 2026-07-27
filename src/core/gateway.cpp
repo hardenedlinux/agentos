@@ -1,4 +1,21 @@
 /**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * agentos/gateway.cpp
  *
  * ADR-020 implementation — pure byte-pushing I/O thread for the external ZMQ
@@ -18,14 +35,64 @@
 #include "agentos/home_init.h"
 
 #include <chrono>
+#include <optional>
 #include <spdlog/spdlog.h>
 
 namespace agentos
 {
 
+  namespace
+  {
+
+    // Receives exactly one frame, bounded by `timeout`. Deliberately never
+    // a truly blocking recv() call — ZMQ's multi-part delivery is supposed
+    // to land every frame of one message atomically, but this doesn't
+    // trust that assumption blindly: if it's ever violated (a malformed
+    // client, a future bridge that doesn't speak DEALER framing
+    // correctly, or a libzmq surprise), this still returns instead of
+    // hanging the Gateway thread forever. Used for both the identity and
+    // payload frames of an inbound message, each with its own independent
+    // timeout — see the bug this replaces: the previous code used two
+    // independent recv_flags::dontwait calls with no timeout/retry at
+    // all, so if the payload frame wasn't immediately available the
+    // identity frame already read was silently discarded, desynchronizing
+    // frame boundaries for every message read afterward.
+    std::optional<zmq::message_t>
+    recv_frame_with_timeout (zmq::socket_t &sock,
+                             std::chrono::milliseconds timeout)
+    {
+      auto deadline = std::chrono::steady_clock::now () + timeout;
+      for (;;)
+      {
+        zmq::message_t msg;
+        auto res = sock.recv (msg, zmq::recv_flags::dontwait);
+        if (res.has_value ())
+          return msg;
+
+        auto remaining
+          = std::chrono::duration_cast<std::chrono::milliseconds> (
+            deadline - std::chrono::steady_clock::now ());
+        if (remaining.count () <= 0)
+          return std::nullopt;
+
+        zmq::pollitem_t items[]
+          = {{static_cast<void *> (sock), 0, ZMQ_POLLIN, 0}};
+        try
+        {
+          zmq::poll (items, 1, remaining);
+        }
+        catch (const zmq::error_t &)
+        {
+          return std::nullopt;
+        }
+        // loop back and try the non-blocking recv again
+      }
+    }
+
+  } // unnamed namespace
+
   Gateway::Gateway (zmq::context_t &zmq_ctx, ForwardFn forward_fn)
-    : zmq_ctx_ (zmq_ctx),
-      agentos_sock_ (zmq_ctx, zmq::socket_type::router),
+    : zmq_ctx_ (zmq_ctx), agentos_sock_ (zmq_ctx, zmq::socket_type::router),
       forward_fn_ (std::move (forward_fn))
   {
   }
@@ -46,7 +113,7 @@ namespace agentos
     spdlog::info ("[gateway] bound external socket at {}", socket_path);
 
     running_ = true;
-    thread_  = std::thread (&Gateway::run, this);
+    thread_ = std::thread (&Gateway::run, this);
   }
 
   void Gateway::stop ()
@@ -71,7 +138,7 @@ namespace agentos
   void Gateway::enqueue_outbound (std::string identity, std::string payload)
   {
     std::lock_guard lock (out_mutex_);
-    out_queue_.push (OutboundMsg{ std::move (identity), std::move (payload) });
+    out_queue_.push (OutboundMsg{std::move (identity), std::move (payload)});
   }
 
   void Gateway::flush_outbound ()
@@ -92,13 +159,14 @@ namespace agentos
           auto r = agentos_sock_.send (id_frame, zmq::send_flags::sndmore);
           if (!r)
           {
-            spdlog::warn ("[gateway] send identity frame failed, dropping message");
+            spdlog::warn (
+              "[gateway] send identity frame failed, dropping message");
             local.pop ();
             continue;
           }
         }
         zmq::message_t payload_frame (msg.payload.data (), msg.payload.size ());
-        auto r = agentos_sock_.send (payload_frame, zmq::send_flags::none);
+        auto r = agentos_sock_.send (payload_frame, zmq::send_flags::dontwait);
         if (!r)
           spdlog::warn ("[gateway] send payload frame failed");
       }
@@ -130,40 +198,52 @@ namespace agentos
 
       // ── 2. Poll for inbound messages ──────────────────────────────────
       zmq::pollitem_t items[]
-        = { { static_cast<void *> (agentos_sock_), 0, ZMQ_POLLIN, 0 } };
+        = {{static_cast<void *> (agentos_sock_), 0, ZMQ_POLLIN, 0}};
 
       try
-        {
-          zmq::poll (items, 1, std::chrono::milliseconds (poll_timeout_ms));
-        }
+      {
+        zmq::poll (items, 1, std::chrono::milliseconds (poll_timeout_ms));
+      }
       catch (const zmq::error_t &)
-        {
-          continue;
-        }
+      {
+        continue;
+      }
 
       // ── 3. Flush again after poll — actors may have enqueued during wait
       flush_outbound ();
 
       // ── 4. Handle inbound ─────────────────────────────────────────────
       if (items[0].revents & ZMQ_POLLIN)
+      {
+        spdlog::info ("[gateway] inbound message arrived");
+
+        auto identity_msg = recv_frame_with_timeout (
+          agentos_sock_, std::chrono::milliseconds (poll_timeout_ms));
+        if (!identity_msg)
+          continue;
+
+        if (!identity_msg->more ())
         {
-          spdlog::info ("[gateway] inbound message arrived");
-
-          zmq::message_t identity_msg;
-          if (!agentos_sock_.recv (identity_msg, zmq::recv_flags::dontwait)
-                 .has_value ())
-            continue;
-
-          std::string identity = identity_msg.to_string ();
-
-          zmq::message_t payload_msg;
-          if (!agentos_sock_.recv (payload_msg, zmq::recv_flags::dontwait)
-                 .has_value ())
-            continue;
-
-          forward_fn_ (GatewayInbound{ .identity = std::move (identity),
-                                       .message  = payload_msg.to_string () });
+          spdlog::warn ("[gateway] single-frame message with no "
+                        "continuation — dropping malformed message");
+          continue;
         }
+
+        auto payload_msg = recv_frame_with_timeout (
+          agentos_sock_, std::chrono::milliseconds (poll_timeout_ms));
+        if (!payload_msg)
+        {
+          spdlog::warn ("[gateway] identity frame arrived but payload "
+                        "frame never followed within {}ms — dropping "
+                        "incomplete message",
+                        poll_timeout_ms);
+          continue;
+        }
+
+        std::string identity = identity_msg->to_string ();
+        forward_fn_ (GatewayInbound{.identity = std::move (identity),
+                                    .message = payload_msg->to_string ()});
+      }
     }
     spdlog::info ("[gateway] poll thread exited");
   }

@@ -145,6 +145,7 @@ namespace agentos
       std::string binary_path;
       std::string manifest;
       int64_t approved_at = 0;
+      bool supports_continuation = false; // ADR-038
       std::string description; // ADR-031 §3 addition: required for Advisers,
                                // optional/empty for Workers
     };
@@ -254,6 +255,34 @@ namespace agentos
     // Toggle a worker's enabled flag (1=enabled, 0=disabled).
     // Silently no-ops if worker_id does not exist.
     void set_worker_enabled (const std::string &worker_id, bool enabled);
+
+    // ADR-038: set the supports_continuation flag for a registered agent
+    // (typically an adviser).  Silently no-ops if the id is unknown.
+    void set_agent_supports_continuation (const std::string &id, bool value);
+
+    // -- ADR-038 interaction continuations ----------------------------------
+
+    struct InteractionContinuationRow
+    {
+      std::string continuation_id;
+      std::string user_id;
+      std::string adviser_id;
+      std::string context_payload;
+      int64_t created_at = 0;
+      std::optional<int64_t> consumed_at;
+    };
+
+    /// Insert a fresh row (consumed_at = NULL). Called after an Adviser
+    /// returns an updated_context.
+    void insert_interaction_continuation (const InteractionContinuationRow &row);
+
+    /// Atomically read an unconsumed row (matching continuation_id, user_id,
+    /// adviser_id) and mark it consumed. Returns the full row on success,
+    /// std::nullopt when not found / already consumed / mismatched.
+    [[nodiscard]] std::optional<InteractionContinuationRow>
+    read_and_consume_continuation (const std::string &continuation_id,
+                                   const std::string &user_id,
+                                   const std::string &adviser_id);
 
     // Soft-delete a worker: sets enabled = -1 (revoked).
     // Revoked workers are excluded from load_enabled_agents() and are never

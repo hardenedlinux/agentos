@@ -58,6 +58,7 @@ namespace agentos
     std::string job_id;
     std::string type;                     // oneshot | scheduled | loop
     std::string goal;                     // original user goal, injected into every task
+    std::string user_id;                  // ADR-038: job owner for continuation access
     std::deque<ActiveStep> pending_steps; // steps not yet dispatched
     std::string current_run_id;           // run_id of the step in flight
     std::string last_step_result;         // result_json of the last completed step;
@@ -402,6 +403,10 @@ namespace agentos
     // The authenticated caller's identity (access‑key id) for the current
     // request; set during handle_gateway_inbound and used for per‑user scoping.
     std::string current_caller_key_id_;
+
+    // ADR-038: pending continuation_ids provided via job.submit before
+    // the job is activated (plan_ready).
+    std::unordered_map<std::string, std::string> pending_continuation_ids_;
   };
 
 } // namespace agentos

@@ -418,6 +418,8 @@ namespace agentos
         }
       };
       maybe_add_column ("ALTER TABLE agents ADD COLUMN description TEXT");
+      // ADR-038: adds support for optional interaction continuation.
+      maybe_add_column ("ALTER TABLE agents ADD COLUMN supports_continuation INTEGER NOT NULL DEFAULT 0");
     }
 
     // Suite installation tracking (ADR-030, worker.register/adviser.register/
@@ -442,6 +444,22 @@ namespace agentos
       );
     )";
     if (!exec_ddl (schema_installed_suites))
+      return false;
+
+    // ADR-038 interaction continuations
+    static const char *schema_interaction_continuations = R"(
+      CREATE TABLE IF NOT EXISTS interaction_continuations (
+          continuation_id  TEXT    PRIMARY KEY,
+          user_id          TEXT    NOT NULL,
+          adviser_id       TEXT    NOT NULL,
+          context_payload  TEXT    NOT NULL,
+          created_at       INTEGER NOT NULL,
+          consumed_at       INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_interaction_continuations_lookup
+          ON interaction_continuations(user_id, adviser_id);
+    )";
+    if (!exec_ddl (schema_interaction_continuations))
       return false;
 
     // Asset registration (content-addressed blob storage index). See
@@ -2155,7 +2173,8 @@ namespace agentos
       return rows;
 
     Stmt stmt (prepare (R"(
-      SELECT id, role, binary_path, manifest, approved_at, description
+      SELECT id, role, binary_path, manifest, approved_at,
+             description, supports_continuation
       FROM agents WHERE enabled = 1
   )"));
     if (!stmt.s)
@@ -2170,6 +2189,7 @@ namespace agentos
       row.manifest = column_text_or_empty (stmt, 3);
       row.approved_at = sqlite3_column_int64 (stmt, 4);
       row.description = column_text_or_empty (stmt, 5);
+      row.supports_continuation = sqlite3_column_int (stmt, 6) != 0;
       rows.push_back (std::move (row));
     }
     return rows;
@@ -2227,7 +2247,8 @@ namespace agentos
     if (!db_)
       return std::nullopt;
     Stmt stmt (prepare (R"(
-      SELECT id, role, binary_path, manifest, approved_at, description
+      SELECT id, role, binary_path, manifest, approved_at, description,
+             supports_continuation
       FROM agents WHERE id = ?
   )"));
     if (!stmt.s)
@@ -2243,6 +2264,7 @@ namespace agentos
     row.manifest = column_text_or_empty (stmt, 3);
     row.approved_at = sqlite3_column_int64 (stmt, 4);
     row.description = column_text_or_empty (stmt, 5);
+    row.supports_continuation = sqlite3_column_int (stmt, 6) != 0;
     return row;
   }
 
@@ -2667,6 +2689,99 @@ namespace agentos
     sqlite3_bind_text (stmt, 2, worker_id.c_str (), -1, SQLITE_TRANSIENT);
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] set_worker_enabled: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::set_agent_supports_continuation (const std::string &id, bool value)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (
+      prepare ("UPDATE agents SET supports_continuation=? WHERE id=?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, value ? 1 : 0);
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_agent_supports_continuation: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::insert_interaction_continuation (const InteractionContinuationRow &row)
+  {
+    if (!db_)
+      return;
+    const int64_t ts = now_unix ();
+    Stmt stmt (prepare (R"(
+      INSERT INTO interaction_continuations
+          (continuation_id, user_id, adviser_id, context_payload, created_at, consumed_at)
+      VALUES (?, ?, ?, ?, ?, NULL)
+    )"));
+    if (!stmt.s) return;
+    sqlite3_bind_text (stmt, 1, row.continuation_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, row.user_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, row.adviser_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, row.context_payload.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 5, ts);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] insert_interaction_continuation: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::optional<Database::InteractionContinuationRow>
+  Database::read_and_consume_continuation (const std::string &continuation_id,
+                                           const std::string &user_id,
+                                           const std::string &adviser_id)
+  {
+    if (!db_)
+      return std::nullopt;
+
+    std::optional<InteractionContinuationRow> out;
+
+    auto tx = with_transaction ([&]() -> bool {
+      Stmt sel (prepare (R"(
+        SELECT continuation_id, user_id, adviser_id, context_payload,
+               created_at, consumed_at
+        FROM interaction_continuations
+        WHERE continuation_id = ? AND user_id = ? AND adviser_id = ?
+          AND consumed_at IS NULL
+      )"));
+      if (!sel.s) return false;
+
+      sqlite3_bind_text (sel, 1, continuation_id.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (sel, 2, user_id.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (sel, 3, adviser_id.c_str (), -1, SQLITE_TRANSIENT);
+
+      if (sqlite3_step (sel) != SQLITE_ROW)
+        return false; // not found or already consumed
+
+      out.emplace ();
+      out->continuation_id = column_text_or_empty (sel, 0);
+      out->user_id         = column_text_or_empty (sel, 1);
+      out->adviser_id      = column_text_or_empty (sel, 2);
+      out->context_payload = column_text_or_empty (sel, 3);
+      out->created_at      = sqlite3_column_int64 (sel, 4);
+      out->consumed_at     = column_int64_opt (sel, 5);
+
+      const int64_t ts = now_unix ();
+      Stmt up (prepare ("UPDATE interaction_continuations "
+                        "SET consumed_at = ? "
+                        "WHERE continuation_id = ?"));
+      if (!up.s) return false;
+
+      sqlite3_bind_int64 (up, 1, ts);
+      sqlite3_bind_text (up, 2, continuation_id.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (up) != SQLITE_DONE)
+      {
+        spdlog::error ("[database] read_and_consume_continuation update: {}",
+                       sqlite3_errmsg (db_));
+        return false;
+      }
+      return true;
+    });
+
+    if (!tx.has_value ())
+      return std::nullopt;
+    return out;
   }
 
   void Database::revoke_worker (const std::string &worker_id)

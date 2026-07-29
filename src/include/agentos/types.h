@@ -115,6 +115,13 @@ namespace agentos
     // "coding")
     std::vector<std::string> domains;
     int priority = 0;
+    // Natural-language description from manifest.toml [meta].description.
+    // ADR-033 Step 2's LLM disambiguation prompt relies on this to tell
+    // candidates apart — without it, the classifier only had `id` and
+    // `domains` to go on, which duplicates Step 1's signal rather than
+    // adding to it. Optional; empty if the manifest omits it.
+    std::string description;
+    bool supports_continuation = false; // ADR-038
   };
 
   struct RegisteredExecutor

@@ -744,6 +744,14 @@ namespace agentos
           : "oneshot";
     const std::string job_id = new_uuid ();
 
+    // ADR-038: optional continuation_id from job.submit params
+    std::string continuation_id;
+    if (params.HasMember ("continuation_id") && params["continuation_id"].IsString ())
+      continuation_id = params["continuation_id"].GetString ();
+
+    if (!continuation_id.empty ())
+      pending_continuation_ids_[job_id] = continuation_id;
+
     // Assets are referenced inline in `goal` text as literal
     // "[asset: <asset_id>]" tokens — not a separate `assets` parameter.
     // Core understands exactly one format; bridge/CLI layers differ only
@@ -1682,6 +1690,16 @@ namespace agentos
     }
     db_.insert_agent (adviser_id, "adviser", installed_skill_path, manifest_raw,
                       description, "operator");
+
+    // ADR-038 — read [continuation] section and store supports flag
+    {
+      bool supports_cont = false;
+      if (auto cont_node = manifest["continuation"]; cont_node.is_table ())
+        supports_cont = cont_node["supports"].value_or (false);
+
+      if (supports_cont)
+        db_.set_agent_supports_continuation (adviser_id, true);
+    }
 
     spdlog::info ("[orchestrator] registered adviser {} from {}", adviser_id,
                   src_dir.string ());
@@ -3237,6 +3255,91 @@ namespace agentos
         result_json = buf.GetString ();
       }
 
+      // ADR-038 post‑completion: check for "updated_context" in the
+      // adviser’s output and, if present, create a fresh continuation row.
+      const ActiveStep &step_ref = job.pending_steps.front ();
+      bool final_step = (job.pending_steps.size () == 1);
+      rapidjson::Document out_doc;
+      bool has_out_doc = false;
+      if (!out_doc.Parse (result_json.c_str ()).HasParseError ()
+          && out_doc.IsObject ())
+        has_out_doc = true;
+      std::string updated_context_str;
+      if (has_out_doc && out_doc.HasMember ("updated_context"))
+      {
+        rapidjson::StringBuffer ctx_buf;
+        rapidjson::Writer<rapidjson::StringBuffer> ctx_w (ctx_buf);
+        out_doc["updated_context"].Accept (ctx_w);
+        updated_context_str = ctx_buf.GetString ();
+      }
+
+      if (!updated_context_str.empty ())
+      {
+        auto adv_obj = registry_.find_adviser_by_id (step_ref.step.command);
+        if (adv_obj && adv_obj->supports_continuation)
+        {
+          Database::InteractionContinuationRow row;
+          row.continuation_id = new_uuid ();
+          row.user_id         = job.user_id;
+          row.adviser_id      = step_ref.step.command;
+          row.context_payload = std::move (updated_context_str);
+          row.created_at      = now_unix ();
+          row.consumed_at     = std::nullopt;
+          db_.insert_interaction_continuation (row);
+          spdlog::info ("[orchestrator] created continuation {} for "
+                       "step‑adviser {} (job {})",
+                       row.continuation_id, step_ref.step.command, job.job_id);
+
+          if (final_step)
+          {
+            const fs::path output_dir
+              = agentos_home () / "jobs" / job.job_id / "output";
+            const std::string hint_file = "continuation_hint.json";
+            const fs::path hint_path = output_dir / hint_file;
+            std::error_code ec;
+            fs::create_directories (output_dir, ec);
+            if (!ec)
+            {
+              std::string hint_json
+                = std::string ("{\"continuation_id\":\"") + row.continuation_id + "\"}";
+              std::ofstream ofs (hint_path);
+              if (ofs) ofs << hint_json;
+              else
+                spdlog::warn ("[orchestrator] could not write {}",
+                              hint_path.string ());
+            }
+            else
+              spdlog::warn ("[orchestrator] mkdir {}: {}",
+                            output_dir.string (), ec.message ());
+
+            // Attach bridge_hint to result JSON
+            if (!has_out_doc)
+            {
+              out_doc.SetObject ();
+              has_out_doc = true;
+            }
+            rapidjson::Value hint_obj (rapidjson::kObjectType);
+            hint_obj.AddMember ("key",
+              rapidjson::Value ("interaction_continuation", out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            hint_obj.AddMember ("path",
+              rapidjson::Value (hint_file.c_str (), out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            out_doc.AddMember ("bridge_hint", std::move (hint_obj),
+                               out_doc.GetAllocator ());
+          }
+        }
+      }
+
+      // Re‑serialize result_json if it was mutated
+      if (has_out_doc && !updated_context_str.empty () && final_step)
+      {
+        rapidjson::StringBuffer new_buf;
+        rapidjson::Writer<rapidjson::StringBuffer> nw (new_buf);
+        out_doc.Accept (nw);
+        result_json = new_buf.GetString ();
+      }
+
       db_.update_step_result (job.pending_steps.front ().step.id, result_json);
       job.last_step_result = result_json;
       job.pending_steps.pop_front ();
@@ -3429,6 +3532,70 @@ namespace agentos
         }
       }
 
+      // ADR-038: consume a pending continuation (if any) *before* the
+      // one‑shot LLM call. Must happen on the Orchestrator thread.
+      //
+      // Fast in-memory check first (registry_ is already populated from
+      // the DB and refreshed on every register/enable/disable mutation —
+      // see Registry::init) — this keeps the invocation path for every
+      // non-opted-in Adviser (Planning, Code Writer, Code Reviewer, and
+      // any domain Adviser that doesn't declare [continuation] supports =
+      // true) exactly as cheap as it was before this ADR: zero extra DB
+      // hits. Only an Adviser that both opted in AND was actually handed
+      // a continuation_id at job.submit time reaches the DB lookup below.
+      std::string context_payload_consumed;
+      bool has_consumed_continuation = false;
+      std::string job_user_id;
+
+      auto reg_adviser_for_cont = registry_.find_adviser_by_id (adviser_id);
+      if (!reg_adviser_for_cont || !reg_adviser_for_cont->supports_continuation)
+      {
+        // Entry Adviser doesn't opt in — any continuation_id supplied at
+        // job.submit time for this job is meaningless and discarded
+        // silently here (same "degrade silently, never error" posture as
+        // an unknown/expired continuation_id). Must still erase the
+        // pending entry, or it would never be cleaned up (there is no
+        // other cleanup path for this specific case).
+        pending_continuation_ids_.erase (job_id);
+      }
+      else
+      {
+        // job_user_id is needed regardless of whether an incoming
+        // continuation_id is present: turn 1 of a chain (no incoming
+        // continuation_id yet, just about to produce the first
+        // updated_context below) still needs it for the post-completion
+        // write. Only fetched here, inside the opt-in branch, so
+        // non-opted-in Advisers still incur zero extra DB hits.
+        if (auto maybe_job = db_.load_job (job_id))
+          job_user_id = maybe_job->user_id;
+
+        auto it = pending_continuation_ids_.find (job_id);
+        if (it != pending_continuation_ids_.end ())
+        {
+          const std::string cid = it->second;
+          pending_continuation_ids_.erase (it);
+
+          if (!cid.empty ())
+          {
+            auto row = db_.read_and_consume_continuation (
+              cid, job_user_id, adviser_id);
+            if (row)
+            {
+              context_payload_consumed = std::move (row->context_payload);
+              has_consumed_continuation = true;
+              spdlog::info ("[orchestrator] consumed continuation {} for "
+                           "adviser {} (job {})",
+                           cid, adviser_id, job_id);
+            }
+            else
+              spdlog::warn ("[orchestrator] continuation_id {} not found / "
+                           "already consumed / mismatched for adviser {} "
+                           "(job {}), proceeding without it",
+                           cid, adviser_id, job_id);
+          }
+        }
+      }
+
       // Detach LLM thread — never blocks Orchestrator event loop.
       // Captures by value; `this` is safe (Orchestrator outlives all threads).
       std::thread (
@@ -3436,7 +3603,10 @@ namespace agentos
          capability_list_str = std::move (capability_list_str),
          adviser_list_str = std::move (adviser_list_str),
          attached_assets_str = std::move (attached_assets_str),
-         adviser_id] () mutable
+         adviser_id,
+         context_payload_consumed = std::move (context_payload_consumed),
+         has_consumed_continuation,
+         job_user_id = std::move (job_user_id)] () mutable
         {
           // ADR-033: inject domain‑knowledge from the selected Adviser’s
           // package
@@ -3469,7 +3639,11 @@ namespace agentos
           LlmRequest req;
           req.system_prompt = std::move (system_prompt);
 
-          std::string user = "Goal: " + goal + "\n\n";
+          std::string user;
+          if (has_consumed_continuation && !context_payload_consumed.empty ())
+            user = "Context from previous interaction:\n"
+                   + context_payload_consumed + "\n\n";
+          user += "Goal: " + goal + "\n\n";
           user += capability_list_str + "\n";
           user += adviser_list_str + "\n";
           if (!attached_assets_str.empty ())
@@ -3538,11 +3712,213 @@ namespace agentos
               content.pop_back ();
           }
 
-          // Parse steps JSON from LLM response.
+          // Parse response JSON from LLM. Two mutually exclusive shapes are
+          // valid (Suite-ADR-001 §A): a Plan ({"steps":[...]}) or a
+          // clarification request ({"needs_clarification":true, ...}).
           rapidjson::Document resp;
           if (resp.Parse (content.c_str ()).HasParseError ()
-              || !resp.IsObject () || !resp.HasMember ("steps")
-              || !resp["steps"].IsArray ())
+              || !resp.IsObject ())
+          {
+            spdlog::error (
+              "[orchestrator] adviser produced invalid JSON for job {}: {}",
+              job_id, content);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json = R"({"job_id":")" + job_id
+                              + R"(","reason":"invalid response JSON"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          const bool wants_clarification
+            = resp.HasMember ("needs_clarification")
+              && resp["needs_clarification"].IsBool ()
+              && resp["needs_clarification"].GetBool ();
+
+          if (wants_clarification)
+          {
+            // A missing/empty clarification_question is not recoverable
+            // the way an absent bridge_hint is — fall through to
+            // AdviserFailed rather than silently degrading, per §A.
+            if (!resp.HasMember ("clarification_question")
+                || !resp["clarification_question"].IsString ()
+                || std::string (
+                     resp["clarification_question"].GetString ())
+                     .empty ())
+            {
+              spdlog::error (
+                "[orchestrator] adviser set needs_clarification but "
+                "omitted clarification_question for job {}: {}",
+                job_id, content);
+              ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+              ev.payload_json
+                = R"({"job_id":")" + job_id
+                  + R"(","reason":"needs_clarification with no question"})";
+              enqueue (std::move (ev));
+              return;
+            }
+
+            // clarification_options, if present, must be an array of
+            // strings — a malformed options field invalidates the whole
+            // response (do not silently drop just the options).
+            if (resp.HasMember ("clarification_options"))
+            {
+              bool options_ok = resp["clarification_options"].IsArray ();
+              if (options_ok)
+                for (const auto &opt :
+                     resp["clarification_options"].GetArray ())
+                  if (!opt.IsString ())
+                  {
+                    options_ok = false;
+                    break;
+                  }
+              if (!options_ok)
+              {
+                spdlog::error (
+                  "[orchestrator] adviser's clarification_options is "
+                  "malformed for job {}: {}",
+                  job_id, content);
+                ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+                ev.payload_json
+                  = R"({"job_id":")" + job_id
+                    + R"(","reason":"malformed clarification_options"})";
+                enqueue (std::move (ev));
+                return;
+              }
+            }
+
+            // Build the result_json this job will expose at job.status.
+            rapidjson::Document out_doc;
+            out_doc.SetObject ();
+            out_doc.AddMember ("needs_clarification", true,
+                               out_doc.GetAllocator ());
+            out_doc.AddMember (
+              "clarification_question",
+              rapidjson::Value (resp["clarification_question"].GetString (),
+                                 out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            if (resp.HasMember ("clarification_options"))
+            {
+              rapidjson::Value opts (rapidjson::kArrayType);
+              for (const auto &opt : resp["clarification_options"].GetArray ())
+                opts.PushBack (
+                  rapidjson::Value (opt.GetString (), out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+              out_doc.AddMember ("clarification_options", std::move (opts),
+                                 out_doc.GetAllocator ());
+            }
+
+            // ADR-038 post-completion: write a continuation row if this
+            // Adviser opted in and produced updated_context — same logic
+            // as the Plan-shape branch below, against `resp` instead of a
+            // parsed Plan. Unlike the Plan-shape branch (which never
+            // attaches bridge_hint, since Planning is never itself the
+            // final step of a job), this response IS the job's terminal
+            // output — there is no pipeline to run afterward — so we DO
+            // attach bridge_hint here, mirroring handle_adviser_done's
+            // final_step==true branch.
+            if (resp.HasMember ("updated_context"))
+            {
+              auto reg_adviser = registry_.find_adviser_by_id (adviser_id);
+              if (reg_adviser && reg_adviser->supports_continuation)
+              {
+                std::string updated_ctx;
+                {
+                  rapidjson::StringBuffer ctx_buf;
+                  rapidjson::Writer<rapidjson::StringBuffer> ctw (ctx_buf);
+                  resp["updated_context"].Accept (ctw);
+                  updated_ctx = ctx_buf.GetString ();
+                }
+
+                Database::InteractionContinuationRow row;
+                row.continuation_id = new_uuid ();
+                row.user_id         = job_user_id;
+                row.adviser_id      = adviser_id;
+                row.context_payload = std::move (updated_ctx);
+                row.created_at      = now_unix ();
+                row.consumed_at     = std::nullopt;
+                db_.insert_interaction_continuation (row);
+                spdlog::info ("[orchestrator] created continuation {} for "
+                             "entry adviser {} (job {}, clarification)",
+                             row.continuation_id, adviser_id, job_id);
+
+                const fs::path output_dir
+                  = agentos_home () / "jobs" / job_id / "output";
+                const std::string hint_file = "continuation_hint.json";
+                std::error_code ec;
+                fs::create_directories (output_dir, ec);
+                if (!ec)
+                {
+                  std::ofstream ofs (output_dir / hint_file);
+                  if (ofs)
+                    ofs << "{\"continuation_id\":\"" << row.continuation_id
+                        << "\"}";
+                  else
+                    spdlog::warn ("[orchestrator] could not write {}",
+                                 (output_dir / hint_file).string ());
+                }
+                else
+                  spdlog::warn ("[orchestrator] mkdir {}: {}",
+                               output_dir.string (), ec.message ());
+
+                rapidjson::Value hint_obj (rapidjson::kObjectType);
+                hint_obj.AddMember (
+                  "key",
+                  rapidjson::Value ("interaction_continuation",
+                                    out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+                hint_obj.AddMember (
+                  "path",
+                  rapidjson::Value (hint_file.c_str (),
+                                    out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+                out_doc.AddMember ("bridge_hint", std::move (hint_obj),
+                                   out_doc.GetAllocator ());
+              }
+            }
+
+            rapidjson::StringBuffer out_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
+            out_doc.Accept (out_w);
+            const std::string clarification_result_json = out_buf.GetString ();
+
+            // No PipelinePlan was produced, so there is no pipeline step to
+            // dispatch and this job never enters active_jobs_. But
+            // cmd_job_status's "done" result_json/bridge_hint exposure is
+            // hard-wired to read steps.back().result_json — that's the
+            // only source it has (there is no job-level result_json
+            // column). So this entry Adviser's own completion is persisted
+            // as a single synthetic step, already "done", purely so the
+            // existing query-time code picks it up unmodified. This is the
+            // one piece of plumbing the original §A design didn't
+            // anticipate — it assumed a job-level result_json write path
+            // that doesn't actually exist.
+            PipelinePlanStep synthetic_step;
+            synthetic_step.id = new_uuid ();
+            synthetic_step.target_type = "adviser";
+            synthetic_step.command = adviser_id;
+            synthetic_step.description
+              = "Entry adviser clarification response";
+            synthetic_step.needs_forge = false;
+            db_.store_pipeline_task (TaskId (job_id), synthetic_step,
+                                     /*order=*/0);
+            db_.update_step_result (synthetic_step.id,
+                                    clarification_result_json);
+
+            // active_jobs_ is only ever touched from the Orchestrator's own
+            // event-loop thread, never from this detached thread — enqueue
+            // a lightweight event and let handle_master_decision's
+            // "needs_clarification_done" branch call finish_job() on the
+            // correct thread, matching how plan_ready already hands off to
+            // the main thread below instead of building the ActiveJob here.
+            ev.kind = OrchestratorEvent::Kind::MasterDecision;
+            ev.payload_json
+              = R"({"type":"needs_clarification_done","job_id":")" + job_id
+                + R"("})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          if (!resp.HasMember ("steps") || !resp["steps"].IsArray ())
           {
             spdlog::error (
               "[orchestrator] adviser produced invalid plan for job {}: {}",
@@ -3564,6 +3940,41 @@ namespace agentos
                 rapidjson::Value ("id", resp.GetAllocator ()),
                 rapidjson::Value (new_uuid ().c_str (), resp.GetAllocator ()),
                 resp.GetAllocator ());
+            }
+          }
+
+          // ADR-038 post‑completion: if the parsed output includes an
+          // "updated_context" field, write a new interaction‑continuation
+          // row. The planning Adviser is never a pipeline step, so we do
+          // NOT attach any bridge_hint for it.
+          if (resp.HasMember ("updated_context"))
+          {
+            std::string updated_ctx;
+            {
+              rapidjson::StringBuffer ctx_buf;
+              rapidjson::Writer<rapidjson::StringBuffer> ctw (ctx_buf);
+              resp["updated_context"].Accept (ctw);
+              updated_ctx = ctx_buf.GetString ();
+            }
+            // Only produce a row if the Adviser is opted‑in. Fast
+            // in-memory check (same rationale as the pre-call check
+            // above) rather than a DB round trip.
+            {
+              auto reg_adviser = registry_.find_adviser_by_id (adviser_id);
+              if (reg_adviser && reg_adviser->supports_continuation)
+              {
+                Database::InteractionContinuationRow row;
+                row.continuation_id = new_uuid ();          // fresh UUID
+                row.user_id         = job_user_id;
+                row.adviser_id      = adviser_id;
+                row.context_payload = std::move (updated_ctx);
+                row.created_at      = now_unix ();
+                row.consumed_at     = std::nullopt;
+                db_.insert_interaction_continuation (row);
+                spdlog::info ("[orchestrator] created continuation {} for "
+                             "planning adviser {} (job {})",
+                             row.continuation_id, adviser_id, job_id);
+              }
             }
           }
 
@@ -3596,6 +4007,30 @@ namespace agentos
       return;
     }
 
+    if (type == "needs_clarification_done")
+    {
+      // Suite-ADR-001 §A: the entry Adviser's response, its DB-side
+      // continuation row/hint file, and its synthetic "done" step were all
+      // already built and persisted on the detached LLM thread (identical
+      // db_ usage to the existing ADR-038 continuation write a few lines
+      // below, which already runs from that same thread). The only thing
+      // that must happen on THIS thread is finish_job, since it touches
+      // active_jobs_ — an in-memory map the Orchestrator's event loop owns
+      // exclusively and that is never safe to mutate from another thread.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      if (job_id.empty ())
+      {
+        spdlog::error (
+          "[orchestrator] needs_clarification_done: missing job_id");
+        return;
+      }
+      finish_job (job_id, /*success=*/true, /*error=*/"");
+      return;
+    }
+
     if (type == "plan_ready")
     {
       // Master has produced a plan — build ActiveJob and start pipeline.
@@ -3612,6 +4047,17 @@ namespace agentos
       job.type = (doc.HasMember ("job_type") && doc["job_type"].IsString ())
                    ? doc["job_type"].GetString ()
                    : "oneshot";
+
+      // ADR-029 + ADR-038: store the owning user for later use (continuation reads/writes).
+      if (auto j = db_.load_job (job_id); j)
+      {
+        job.user_id = j->user_id;
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] plan_ready: job {} not found in DB "
+                      "while building active_job", job_id);
+      }
 
       if (doc.HasMember ("steps") && doc["steps"].IsArray ())
       {
@@ -4292,6 +4738,40 @@ namespace agentos
     const std::string adviser_id = step.step.command;
     const std::string step_description = step.step.description;
 
+    // ADR-038: consume a mid‑pipeline continuation_id (section 4).
+    std::string ctx_payload;     // will be injected into the prompt
+    bool has_ctx = false;
+    {
+      std::string cid;
+      auto it = step.step.params.find ("continuation_id");
+      if (it != step.step.params.end ())
+        cid = it->second;
+      if (!cid.empty ())
+      {
+        // 'adviser' was already fetched via registry_.find_adviser_by_id
+        // above (needed to validate the step's target in the first place)
+        // — reuse it instead of a redundant DB round trip.
+        if (adviser->supports_continuation)
+        {
+          auto row = db_.read_and_consume_continuation (cid, job.user_id,
+                                                        adviser_id);
+          if (row)
+          {
+            ctx_payload = std::move (row->context_payload);
+            has_ctx      = true;
+            spdlog::info ("[orchestrator] consumed continuation {} "
+                         "for step‑adviser {} (job {})",
+                         cid, adviser_id, job_id);
+          }
+          else
+            spdlog::warn ("[orchestrator] continuation_id {} not found / "
+                         "already consumed / mismatched for adviser {} "
+                         "(job {}), proceeding without it",
+                         cid, adviser_id, job_id);
+        }
+      }
+    }
+
     // ADR-031 §10: resolve $prev_result / $step:<id>.<field> before
     // building the prompt.
     auto resolved_params
@@ -4324,6 +4804,9 @@ namespace agentos
     // Worker-target steps, ADR-022's "only if i > 0" rule), then remaining
     // step params under their own heading.
     std::string user_prompt = step_description + "\n\n";
+    if (has_ctx && !ctx_payload.empty ())
+      user_prompt += "Context from previous interaction:\n"
+                     + ctx_payload + "\n\n";
 
     if (!job.last_step_result.empty ())
       user_prompt

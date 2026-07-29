@@ -305,7 +305,7 @@ TEST_F(SubjectMemoryTest, UpsertSubjectMemoryInitial)
     mem.created_at   = nowUnix();
     mem.updated_at   = mem.created_at;
 
-    db.upsert_subject_memory(mem);
+    ASSERT_FALSE(db.upsert_subject_memory(mem).has_value());
     EXPECT_EQ(mem.revision, 1);
     EXPECT_EQ(countSubjectMemory(db_path_, "s6"), 1);
 }
@@ -325,7 +325,7 @@ TEST_F(SubjectMemoryTest, UpsertSubjectMemorySecondCallIncrementsRevision)
     mem.created_at   = nowUnix();
     mem.updated_at   = mem.created_at;
 
-    db.upsert_subject_memory(mem);
+    ASSERT_FALSE(db.upsert_subject_memory(mem).has_value());
     ASSERT_EQ(mem.revision, 1);
 
     // Store created_at from the persisted row (raw query) so we can assert it
@@ -349,7 +349,7 @@ TEST_F(SubjectMemoryTest, UpsertSubjectMemorySecondCallIncrementsRevision)
     // Second upsert with different value.
     mem.entry_value  = R"({"v":"second"})";
     mem.updated_at   = nowUnix();
-    db.upsert_subject_memory(mem);
+    ASSERT_FALSE(db.upsert_subject_memory(mem).has_value());
     EXPECT_EQ(mem.revision, 2);
 
     // Verify that created_at stayed unchanged and updated_at moved forward.
@@ -408,7 +408,7 @@ TEST_F(SubjectMemoryTest, QuerySubjectMemoryPagination)
         mem.source_job_id = "job";
         mem.created_at   = nowUnix();
         mem.updated_at   = mem.created_at;
-        db.upsert_subject_memory(mem);
+        ASSERT_FALSE(db.upsert_subject_memory(mem).has_value());
     }
 
     const int limit = 2;
@@ -468,7 +468,7 @@ TEST_F(SubjectMemoryTest, QuerySubjectMemoryKeyPrefix)
         mem.source_job_id = "job";
         mem.created_at   = nowUnix();
         mem.updated_at   = mem.created_at;
-        db.upsert_subject_memory(mem);
+        ASSERT_FALSE(db.upsert_subject_memory(mem).has_value());
     };
 
     ins("alpha");
@@ -514,7 +514,7 @@ TEST_F(SubjectMemoryTest, DifferentUsersIsolation)
     memA.source_job_id = "jA";
     memA.created_at   = nowUnix();
     memA.updated_at   = memA.created_at;
-    db.upsert_subject_memory(memA);
+    ASSERT_FALSE(db.upsert_subject_memory(memA).has_value());
 
     // User Bob subject + units + memory.
     Database::SubjectRow bob{"subb", "bob", "type", "file", "Bob", nowUnix(), nowUnix()};
@@ -530,7 +530,7 @@ TEST_F(SubjectMemoryTest, DifferentUsersIsolation)
     memB.source_job_id = "jB";
     memB.created_at   = nowUnix();
     memB.updated_at   = memB.created_at;
-    db.upsert_subject_memory(memB);
+    ASSERT_FALSE(db.upsert_subject_memory(memB).has_value());
 
     // Alice's domain should NOT see Bob's subject or units.
     EXPECT_FALSE(db.load_subject("subb")->user_id == "alice"); // Bob subject has user bob.

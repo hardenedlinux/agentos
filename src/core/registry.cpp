@@ -97,6 +97,7 @@ namespace agentos
     auto meta = tbl["meta"];
     std::string name = meta["id"].value_or (agent_id);
     std::string version = meta["version"].value_or (std::string ("1.0"));
+    std::string description = meta["description"].value_or (std::string ());
 
     std::vector<std::string> domains;
     if (auto domains_arr = meta["domains"].as_array ())
@@ -114,6 +115,14 @@ namespace agentos
     out_adviser.skill_path = binary_path;
     out_adviser.domains = std::move (domains);
     out_adviser.priority = priority;
+    out_adviser.description = std::move (description);
+
+    // ADR-038: read optional [continuation] section
+    bool supports_cont = false;
+    if (auto cont_node = tbl["continuation"]; cont_node.is_table ())
+      supports_cont = cont_node["supports"].value_or (false);
+    out_adviser.supports_continuation = supports_cont;
+
     return true;
   }
 
@@ -332,6 +341,8 @@ namespace agentos
       if (row.role == "adviser")
       {
         impl_->advisers[row.id] = adviser;
+        // No separate map needed; supports_continuation is now on the
+        // RegisteredAdviser struct itself.
       }
       else if (row.role == "worker")
       {

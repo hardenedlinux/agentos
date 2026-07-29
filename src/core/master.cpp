@@ -648,7 +648,13 @@ namespace agentos
     for (const auto &c : candidates)
     {
       user_msg += "- " + c.id.value () + ": ";
-      if (!c.name.empty ())
+      // Prefer the manifest's natural-language description — this is the
+      // actual signal ADR-033 intends for disambiguation. `name` is just
+      // meta.id repeated (see parse_adviser_manifest_toml), so it adds
+      // nothing beyond what the classifier already has in the id itself.
+      if (!c.description.empty ())
+        user_msg += c.description;
+      else if (!c.name.empty ())
         user_msg += c.name;
       if (!c.domains.empty ())
         {

@@ -122,9 +122,6 @@ namespace agentos
     // Authentication (ADR-022)
     // ---------------------------------------------------------------------------
 
-    // Load all valid access keys from DB into active_keys_ cache.
-    void load_active_keys ();
-
     // Verify key from inbound message. Returns the AccessKey on success,
     // or nullopt on failure (missing, invalid, expired, revoked).
     std::optional<Database::AccessKey>
@@ -299,6 +296,10 @@ namespace agentos
     void cmd_subject_memory_query (const std::string &params_json,
                                    const std::string &identity,
                                    const std::string &request_id);
+    // ADR-035 write-provenance addition.
+    void cmd_subject_memory_write_policy_upsert (const std::string &params_json,
+                                                 const std::string &identity,
+                                                 const std::string &request_id);
 
     // ---------------------------------------------------------------------------
     // Shared registration helpers (ADR-031 §1/§2, ADR-018 Skill Package
@@ -397,9 +398,6 @@ namespace agentos
 
     // Active jobs: job_id → ActiveJob
     std::unordered_map<std::string, ActiveJob> active_jobs_;
-
-    // Access key cache: key_value → AccessKey (ADR-022)
-    std::unordered_map<std::string, Database::AccessKey> active_keys_;
 
     // The authenticated caller's identity (access‑key id) for the current
     // request; set during handle_gateway_inbound and used for per‑user scoping.

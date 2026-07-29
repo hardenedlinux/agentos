@@ -82,13 +82,19 @@ namespace agentos::cli
   // ---- access key loading
   // -----------------------------------------------------
 
+  // Best-effort default: the first admin-role key, or the first active key
+  // of any role if there's no admin key. Returns an empty string if the DB
+  // can't be opened or no active key exists — this used to die() here
+  // unconditionally, which meant CliClient::set_access_key() could never
+  // override a missing default (the process was already gone by the time
+  // a caller's explicit --key would have taken effect). The actual "do we
+  // have a usable key" check now happens in send(), at the point a key is
+  // actually needed and after any override has had a chance to run.
   static std::string load_admin_key ()
   {
     agentos::Database db;
     if (!db.open ())
-    {
-      die (5, "cannot open agentos.db");
-    }
+      return {};
     auto keys = db.load_active_access_keys ();
     for (const auto &k : keys)
     {
@@ -97,7 +103,6 @@ namespace agentos::cli
     }
     if (!keys.empty ())
       return keys.front ().key;
-    die (3, "no active access key found — run: agentos key generate");
     return {};
   }
 
@@ -164,6 +169,11 @@ namespace agentos::cli
   rapidjson::Document CliClient::send (std::string_view method,
                                        rapidjson::Document params)
   {
+    if (access_key_.empty ())
+    {
+      throw CliError ("no active access key found — run: agentos key generate");
+    }
+
     rapidjson::Document req (rapidjson::kObjectType);
     auto &alloc = req.GetAllocator ();
     req.AddMember ("jsonrpc", "2.0", alloc);
@@ -201,7 +211,7 @@ namespace agentos::cli
         throw CliError ("daemon not responding (timeout)");
 
       zmq::message_t reply;
-      auto res = sock_.recv (reply, zmq::recv_flags::none);
+      auto res = sock_.recv (reply, zmq::recv_flags::dontwait);
       if (!res)
         continue;
 

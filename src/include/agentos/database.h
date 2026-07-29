@@ -310,6 +310,14 @@ namespace agentos
     void touch_access_key (const std::string &id);
     std::vector<AccessKey> load_active_access_keys ();
 
+    // Direct single-row lookup by key value, applying the same
+    // active/non-expired predicate as load_active_access_keys(). Used by
+    // Orchestrator::authenticate() so a key generated (or revoked) while
+    // the daemon is already running is usable immediately — there is no
+    // in-memory snapshot to go stale, unlike the old active_keys_ cache
+    // this replaces (which was only ever populated once at startup).
+    std::optional<AccessKey> find_active_access_key (const std::string &key_value);
+
     // -- timer_tasks table (ADR-023) ------------------------------------------
 
     void insert_timer_task (const TimerTask &t);  // INSERT OR IGNORE
@@ -639,11 +647,65 @@ namespace agentos
       std::string subject_id;
       std::string entry_key;
       std::string entry_value;
+      std::string track       = "inferred"; // ADR-035 write-provenance addition:
+                                             // "inferred" | "attested". Never set
+                                             // to "attested" without going through
+                                             // upsert_subject_memory's signed_off_by
+                                             // authorization check below.
+      std::optional<std::string> signed_off_by; // NULL/nullopt for inferred rows.
+                                                  // Denormalized copy of "who
+                                                  // currently vouches for this" —
+                                                  // the full history (including
+                                                  // prior signers this row's value
+                                                  // has had) lives in
+                                                  // subject_memory_signoffs below,
+                                                  // since this row itself is
+                                                  // overwrite-in-place and would
+                                                  // otherwise lose that history.
+      std::optional<int64_t>     signed_off_at;  // NULL/nullopt for inferred rows
       int         revision   = 0;
       std::string related_asset_ids;
       std::string source_job_id;
       int64_t     created_at = 0;
       int64_t     updated_at = 0;
+    };
+
+    // ADR-035 write-provenance addition. Append-only audit trail: one row
+    // per successful attested write, regardless of whether it also
+    // overwrote a prior subject_memory value. Never updated or deleted —
+    // this is the durable answer to "who has ever signed off on this
+    // entry_key, and when," which the overwrite-in-place subject_memory
+    // row alone cannot provide once a value has been re-signed by someone
+    // else.
+    struct SubjectMemorySignoffRow
+    {
+      int64_t     id = 0;
+      std::string subject_id;
+      std::string entry_key;
+      std::string entry_value;    // snapshot of what was signed off on
+      std::string signed_off_by;
+      std::string source_job_id;
+      int64_t     signed_off_at = 0;
+    };
+
+    // ADR-035 write-provenance addition. A policy row is an allow-list entry:
+    // its mere existence does not restrict anything by itself — it only
+    // gates writes that explicitly request track == "attested" for a
+    // matching entry_key. Absence of any matching row means "attested" can
+    // never be written for that key by anyone (fail closed), while
+    // "inferred" writes to the same key remain unaffected either way.
+    struct SubjectMemoryWritePolicyRow
+    {
+      std::string entry_key_prefix;
+      std::string authorized_signers; // raw JSON array of signer identity strings
+    };
+
+    enum class SubjectMemoryWriteError
+    {
+      SignOffDenied, // row.track == "attested" but signed_off_by is not in
+                           // the authorized_signers list of the longest
+                           // matching subject_memory_write_policy row (or no
+                           // row matches at all)
     };
 
     void insert_subject (const SubjectRow &row);
@@ -656,12 +718,70 @@ namespace agentos
     bool complete_subject_units (const std::string &subject_id,
                                  const std::vector<int> &unit_indices);
     SubjectProgress get_subject_progress (const std::string &subject_id);
-    void upsert_subject_memory (SubjectMemoryRow &row);
+
+    // ADR-035 write-provenance addition: signed_off_by is required whenever
+    // row.track == "attested" (ignored otherwise, may be passed empty).
+    // On success, row.revision (and, for attested writes, row.signed_off_by/
+    // row.signed_off_at) is updated in place and std::nullopt is returned.
+    // A successful attested write also appends one row to
+    // subject_memory_signoffs, in the SAME transaction as the main write —
+    // either both land or neither does (see with_transaction). On an
+    // unauthorized attested write, NO write occurs at all (not even as a
+    // downgraded "inferred" row, and no signoff audit row is appended) and
+    // SubjectMemoryWriteError::SignOffDenied is returned — same
+    // no-silent-acceptance discipline as ADR-031 §1's capability-format
+    // validation. This is a breaking signature change from the prior
+    // `void upsert_subject_memory(SubjectMemoryRow&)` — every existing
+    // call site (the subject.memory.upsert RPC handler) must be updated
+    // to pass signed_off_by and handle the new return value.
+    [[nodiscard]] std::optional<SubjectMemoryWriteError>
+    upsert_subject_memory (SubjectMemoryRow &row,
+                           const std::string &signed_off_by = "");
+
     std::vector<SubjectMemoryRow>
     query_subject_memory (const std::string &subject_id,
                           const std::optional<std::string> &key_prefix,
                           int limit,
                           const std::optional<std::string> &cursor);
+
+    // ADR-035 write-provenance addition. Full audit history for one
+    // entry_key on one subject — every attested write ever accepted,
+    // oldest first. Not currently wrapped in an RPC method (no concrete
+    // consumer has surfaced yet); a Suite needing "show the certification
+    // history" can be given one once that need is real, per the same
+    // no-speculative-surface posture used elsewhere in this file.
+    std::vector<SubjectMemorySignoffRow>
+    list_subject_memory_signoffs (const std::string &subject_id,
+                                  const std::string &entry_key);
+
+    // ADR-035 write-provenance addition. Idempotent: re-registering an
+    // already-known entry_key_prefix replaces its authorized_signers list
+    // wholesale (not merged) — this mirrors upsert_subject_memory's own
+    // ON CONFLICT...DO UPDATE posture rather than inventing a separate
+    // merge semantic. Expected caller: Suite install time (analogous to
+    // how ADR-033 domains are declared), or a one-off admin action; not
+    // currently wrapped in an RPC method — no concrete need for a
+    // Suite-author-facing protocol call has surfaced yet, so this stays a
+    // local/debug-path method for now, same posture as
+    // load_user_fact_events in ADR-034.
+    //
+    // Returns false on any failure to actually write the row (prepare
+    // failure, step failure) — the caller MUST check this and surface it
+    // as an error rather than reporting success, per the no-silent-
+    // acceptance discipline used throughout this file. A prior version of
+    // this method was void and swallowed failures silently, which masked
+    // exactly this kind of schema-mismatch bug during a column rename.
+    [[nodiscard]] bool upsert_subject_memory_write_policy (
+      const std::string &entry_key_prefix,
+      const std::string &authorized_signers_json);
+
+    // Longest-prefix match against subject_memory_write_policy for a given
+    // entry_key. Returns std::nullopt if no registered prefix matches —
+    // callers must treat that as "no one is authorized," not as
+    // "unrestricted." Exposed separately from upsert_subject_memory (which
+    // calls this internally) for introspection/debugging.
+    std::optional<SubjectMemoryWritePolicyRow>
+    lookup_subject_memory_write_policy (const std::string &entry_key);
 
   private:
     // -- Internal helpers -----------------------------------------------------

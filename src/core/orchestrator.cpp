@@ -94,6 +94,43 @@ namespace agentos
       return std::string (hex, SHA256_DIGEST_LENGTH * 2);
     }
 
+    // bridge_hint.key must be a plain, restricted identifier — this is
+    // used by a bridge to pick a handler, so it should never be treated
+    // as anything richer than a fixed token.
+    bool is_valid_bridge_hint_key (const std::string &key)
+    {
+      if (key.empty () || key.size () > 128)
+        return false;
+      for (char c : key)
+      {
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+          return false;
+      }
+      return true;
+    }
+
+    // True iff `candidate` resolves to a location on or under `base`.
+    // Uses weakly_canonical (resolves symlinks and ".." on whatever
+    // prefix already exists on disk, without requiring the final
+    // component to exist) rather than string prefix comparison — a naive
+    // `candidate.find(base) == 0` check is exactly the kind of thing
+    // "../"-style traversal or a symlink is designed to defeat.
+    bool path_is_within (const fs::path &base, const fs::path &candidate)
+    {
+      std::error_code ec;
+      auto base_c = fs::weakly_canonical (base, ec);
+      if (ec)
+        return false;
+      auto cand_c = fs::weakly_canonical (candidate, ec);
+      if (ec)
+        return false;
+      auto rel = cand_c.lexically_relative (base_c);
+      if (rel.empty ())
+        return false;
+      auto first = rel.begin ();
+      return first != rel.end () && *first != "..";
+    }
+
     // Build a JSON-RPC 2.0 response envelope.
     std::string make_response (const std::string &id,
                                const std::string &result_json)
@@ -294,9 +331,6 @@ namespace agentos
 
   void Orchestrator::init ()
   {
-    // Load access keys cache (ADR-022).
-    load_active_keys ();
-
     // Crash recovery (ADR-005, ADR-016):
     // Mark any worker_runs with status='running' as 'crashed'.
     db_.mark_all_running_as_crashed ();
@@ -482,19 +516,6 @@ namespace agentos
   // Authentication
   // ---------------------------------------------------------------------------
 
-  void Orchestrator::load_active_keys ()
-  {
-    active_keys_.clear ();
-    auto keys = db_.load_active_access_keys ();
-    for (auto &k : keys)
-    {
-      // spdlog::info ("load key: {}", k.key);
-      active_keys_[k.key] = std::move (k);
-    }
-    spdlog::info ("[orchestrator] loaded {} active access keys",
-                  active_keys_.size ());
-  }
-
   std::optional<Database::AccessKey>
   Orchestrator::authenticate (const std::string &key_value) const
   {
@@ -508,10 +529,16 @@ namespace agentos
         return std::nullopt;
     }
 
-    auto it = active_keys_.find (key_value);
-    if (it == active_keys_.end ())
+    // Queried directly against SQLite on every call — replaces the old
+    // active_keys_ in-memory cache, which was populated once via
+    // load_active_keys() at startup and never refreshed. That meant any
+    // key generated (or revoked) after the daemon was already running
+    // silently didn't take effect until a full restart. This is a single
+    // indexed local-SQLite lookup per request, not a meaningful cost.
+    auto found = db_.find_active_access_key (key_value);
+    if (!found)
       return std::nullopt;
-    const auto &ak = it->second;
+    const auto &ak = *found;
     const std::string computed = sha256_hex (key_value, ak.key_salt);
     if (!ct_equal (computed, ak.key_hash))
       return std::nullopt;
@@ -642,6 +669,13 @@ namespace agentos
       {"subject.units.progress",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_progress(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"subject.memory.upsert",     [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"subject.memory.query",      [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_query(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      // ADR-035 write-provenance addition. Deliberately NOT added to
+      // operator_methods/readonly_methods below — same default posture as
+      // worker.register/adviser.register/suite.install (admin-only unless
+      // explicitly whitelisted): deciding who may write "attested" facts
+      // is a security-relevant configuration action, not routine
+      // operation.
+      {"subject.memory.write_policy.upsert", [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_write_policy_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"adviser.list",        [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"adviser.register",    [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"forge.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_forge_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
@@ -937,6 +971,70 @@ namespace agentos
     {
       w.Key ("result_json");
       w.String (steps.back ().result_json.c_str ());
+
+      // bridge_hint (job-level, not step-level): a Worker/Adviser step's
+      // output JSON may carry a reserved "bridge_hint": {"key", "path"}
+      // field alongside its normal (opaque to AgentOS) output. This is
+      // the one field AgentOS itself understands and validates — it
+      // doesn't interpret the file at `path`, only confirms it's safe to
+      // hand the pointer to a bridge. Only the LAST step's output is
+      // checked; a hint produced by an earlier step must be carried
+      // forward via $prev_result by the Suite's own pipeline.md if that
+      // step isn't the final one — AgentOS does not collect hints across
+      // steps itself, to keep job completion a single fixed lookup
+      // rather than accumulated per-job state.
+      rapidjson::Document last_result;
+      if (!last_result.Parse (steps.back ().result_json.c_str ())
+             .HasParseError ()
+          && last_result.IsObject ()
+          && last_result.HasMember ("bridge_hint")
+          && last_result["bridge_hint"].IsObject ())
+      {
+        const auto &hint = last_result["bridge_hint"];
+        if (hint.HasMember ("key") && hint["key"].IsString ()
+            && hint.HasMember ("path") && hint["path"].IsString ())
+        {
+          const std::string hint_key = hint["key"].GetString ();
+          const std::string hint_path = hint["path"].GetString ();
+          const fs::path job_output_dir
+            = agentos_home () / "jobs" / job_id / "output";
+
+          if (!is_valid_bridge_hint_key (hint_key))
+          {
+            spdlog::warn ("[orchestrator] job {}: bridge_hint.key '{}' "
+                          "fails validation — dropping",
+                          job_id, hint_key);
+          }
+          else if (fs::path (hint_path).is_absolute ())
+          {
+            spdlog::warn ("[orchestrator] job {}: bridge_hint.path '{}' "
+                          "is absolute, must be relative to the job's "
+                          "own output dir — dropping",
+                          job_id, hint_path);
+          }
+          else
+          {
+            const fs::path candidate = job_output_dir / hint_path;
+            if (!path_is_within (job_output_dir, candidate))
+            {
+              spdlog::warn ("[orchestrator] job {}: bridge_hint.path '{}' "
+                            "resolves outside the job's own output dir — "
+                            "dropping (possible path traversal attempt)",
+                            job_id, hint_path);
+            }
+            else
+            {
+              w.Key ("bridge_hint");
+              w.StartObject ();
+              w.Key ("key");
+              w.String (hint_key.c_str ());
+              w.Key ("path");
+              w.String (candidate.string ().c_str ());
+              w.EndObject ();
+            }
+          }
+        }
+      }
     }
 
     w.EndObject ();
@@ -2724,7 +2822,42 @@ namespace agentos
     row.source_job_id = params["source_job_id"].GetString ();
     row.created_at = now_unix ();
     row.updated_at = now_unix ();
-    db_.upsert_subject_memory (row);
+
+    // ADR-035 write-provenance addition. track defaults to "inferred" —
+    // the ordinary case for a domain Adviser's incremental analysis
+    // output. signed_off_by identifies which Adviser/Worker is making this
+    // specific write; it is NOT current_caller_key_id_ (that's the access
+    // key/user identity for the connected client, not the identity of a
+    // domain component like "compliance-adviser@v1") — a client's access
+    // key does not by itself authorize an attested write, so this must be
+    // an explicit, separate field.
+    std::string track = "inferred";
+    if (params.HasMember ("track") && params["track"].IsString ())
+      track = params["track"].GetString ();
+    row.track = track;
+
+    std::string signed_off_by;
+    if (params.HasMember ("signed_off_by") && params["signed_off_by"].IsString ())
+      signed_off_by = params["signed_off_by"].GetString ();
+
+    if (track == "attested" && signed_off_by.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "signed_off_by is required when track=\"attested\"");
+      return;
+    }
+
+    if (auto err = db_.upsert_subject_memory (row, signed_off_by))
+    {
+      // Only failure mode currently defined (Database::SubjectMemoryWriteError
+      // has exactly one enumerator) — no silent downgrade to "inferred",
+      // matching the no-silent-acceptance posture used elsewhere (e.g.
+      // ADR-031 §1 capability-format validation).
+      reply_error (identity, request_id, -32032,
+                   "sign-off denied: signed_off_by not authorized for "
+                   "entry_key \"" + row.entry_key + "\"");
+      return;
+    }
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
     w.StartObject ();
@@ -2781,6 +2914,14 @@ namespace agentos
         val.Accept (w);
       else
         w.String (r.entry_value.c_str ());
+      w.Key ("track");
+      w.String (r.track.c_str ());
+      w.Key ("signed_off_by");
+      if (r.signed_off_by) w.String (r.signed_off_by->c_str ());
+      else w.Null ();
+      w.Key ("signed_off_at");
+      if (r.signed_off_at) w.Int64 (*r.signed_off_at);
+      else w.Null ();
       w.Key ("revision");
       w.Int (r.revision);
       w.Key ("updated_at");
@@ -2798,9 +2939,62 @@ namespace agentos
     reply_ok (identity, request_id, buf.GetString ());
   }
 
+  // ADR-035 write-provenance addition. Registers (or replaces) which
+  // adviser/worker identities may write track="attested" for entry_keys
+  // matching a given prefix. Intentionally has NO subject_id — policy is global,
+  // not per-subject, matching the design: "certification:" should mean
+  // the same thing for every subject a Suite registers, not be
+  // re-declared per product/codebase. Idempotent: re-registering an
+  // already-known prefix replaces its authorized_signers list wholesale.
+  void Orchestrator::cmd_subject_memory_write_policy_upsert (
+      const std::string &params_json, const std::string &identity,
+      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("entry_key_prefix")
+        || !params["entry_key_prefix"].IsString ()
+        || !params.HasMember ("authorized_signers")
+        || !params["authorized_signers"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string prefix = params["entry_key_prefix"].GetString ();
+    if (prefix.empty ())
+    {
+      // An empty prefix matches every entry_key (it's a prefix of
+      // anything) — refusing this outright is cheaper and clearer than
+      // letting it silently become "everything is attested-gated by this
+      // one rule," which is almost certainly not what an empty string
+      // was meant to express.
+      reply_error (identity, request_id, -32602,
+                   "entry_key_prefix must not be empty");
+      return;
+    }
+    for (auto &v : params["authorized_signers"].GetArray ())
+    {
+      if (!v.IsString ())
+      {
+        reply_error (identity, request_id, -32602,
+                     "authorized_signers must be an array of strings");
+        return;
+      }
+    }
+    rapidjson::StringBuffer wb;
+    rapidjson::Writer<rapidjson::StringBuffer> ww (wb);
+    params["authorized_signers"].Accept (ww);
+
+    if (!db_.upsert_subject_memory_write_policy (prefix, wb.GetString ()))
+    {
+      reply_error (identity, request_id, -32603,
+                   "Internal error: failed to write policy row");
+      return;
+    }
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
   // ---------------------------------------------------------------------------
   // Command: worker.enable
-  // ---------------------------------------------------------------------------
 
   void Orchestrator::cmd_worker_enable (const std::string &params_json,
                                         const std::string &identity,

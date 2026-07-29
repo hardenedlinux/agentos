@@ -528,8 +528,76 @@ namespace agentos
           updated_at        INTEGER NOT NULL,
           PRIMARY KEY (subject_id, entry_key)
       );
+      -- ADR-035 write-provenance addition: allow-list of entry_key
+      -- prefixes that require an authorized writer to mark as 'attested'.
+      -- A prefix with no row here can never be written as 'attested' by
+      -- anyone (fail closed); 'inferred' writes to the same key are never
+      -- gated by this table either way.
+      CREATE TABLE IF NOT EXISTS subject_memory_write_policy (
+          entry_key_prefix   TEXT PRIMARY KEY,
+          authorized_signers TEXT NOT NULL
+      );
     )";
     if (!exec_ddl (schema_subjects)) return false;
+
+    // ADR-035 write-provenance addition: subject_memory predates the
+    // 'track' column (it originally shipped without a provenance
+    // distinction). Idempotent additive migration, same pattern as the
+    // tasks/jobs/human_reviews/agents migrations above.
+    {
+      auto maybe_add_column = [this] (const char *ddl)
+      {
+        char *err = nullptr;
+        sqlite3_exec (db_, ddl, nullptr, nullptr, &err);
+        if (err)
+        {
+          spdlog::debug ("[database] subject_memory migration '{}': {}", ddl, err);
+          sqlite3_free (err);
+        }
+      };
+      maybe_add_column (
+        "ALTER TABLE subject_memory ADD COLUMN track TEXT NOT NULL DEFAULT 'inferred'");
+      // Renaming caller_ref/authorized_writers -> signed_off_by/
+      // authorized_signers (naming pass, same session): the table may
+      // already exist on disk from before the rename, with the old
+      // column name. RENAME COLUMN is a no-op-safe migration here —
+      // fails harmlessly (swallowed below) if the column was already
+      // renamed, or if the table doesn't exist yet at all on a fresh
+      // install (in which case CREATE TABLE above just created it with
+      // the new name directly).
+      maybe_add_column (
+        "ALTER TABLE subject_memory_write_policy "
+        "RENAME COLUMN authorized_writers TO authorized_signers");
+      // Audit addition: who currently vouches for an attested entry, and
+      // when — denormalized onto the current-view row itself. NULL for
+      // "inferred" rows.
+      maybe_add_column (
+        "ALTER TABLE subject_memory ADD COLUMN signed_off_by TEXT");
+      maybe_add_column (
+        "ALTER TABLE subject_memory ADD COLUMN signed_off_at INTEGER");
+    }
+
+    // Audit addition: append-only history of every accepted attested
+    // write. Deliberately a separate table from subject_memory rather
+    // than extra columns there, because subject_memory itself is
+    // overwrite-in-place (see ADR-035's Consequences) and would lose this
+    // history the moment a value is re-signed by someone else. This is
+    // the exact same split ADR-034 already uses (user_fact_events
+    // append-only log + user_facts current EMA score) — not a new
+    // pattern invented for this table.
+    if (!exec_ddl (
+        "CREATE TABLE IF NOT EXISTS subject_memory_signoffs ("
+        "    id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    subject_id    TEXT    NOT NULL,"
+        "    entry_key     TEXT    NOT NULL,"
+        "    entry_value   TEXT    NOT NULL,"
+        "    signed_off_by TEXT    NOT NULL,"
+        "    source_job_id TEXT    NOT NULL,"
+        "    signed_off_at INTEGER NOT NULL"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_subject_memory_signoffs_lookup "
+        "    ON subject_memory_signoffs(subject_id, entry_key, signed_off_at);"))
+      return false;
 
     // Must run after all migrations above (needs agents.description) and
     // before returning — Registry::init(db) and anything else that reads
@@ -2792,6 +2860,46 @@ namespace agentos
     return keys;
   }
 
+  std::optional<Database::AccessKey>
+  Database::find_active_access_key (const std::string &key_value)
+  {
+    if (!db_)
+      return std::nullopt;
+
+    Stmt stmt (prepare (R"(
+      SELECT id, key, key_hash, key_salt, description, role,
+             created_at, expires_at, last_used_at, revoked_at, revoked_reason
+      FROM access_keys
+      WHERE key = ?
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > unixepoch())
+      LIMIT 1
+  )"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, key_value.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+
+    AccessKey k;
+    k.id = column_text_or_empty (stmt, 0);
+    k.key = column_text_or_empty (stmt, 1);
+    k.key_hash = column_text_or_empty (stmt, 2);
+    k.key_salt = column_text_or_empty (stmt, 3);
+    k.description = column_text_or_empty (stmt, 4);
+    k.role = column_text_or_empty (stmt, 5);
+    k.created_at = sqlite3_column_int64 (stmt, 6);
+    k.expires_at = column_int64_opt (stmt, 7);
+    k.last_used_at = column_int64_opt (stmt, 8);
+    k.revoked_at = column_int64_opt (stmt, 9);
+    auto reason = column_text_or_empty (stmt, 10);
+    if (!reason.empty ())
+      k.revoked_reason = reason;
+    return k;
+  }
+
   // ---------------------------------------------------------------------------
   // timer_tasks table (ADR-023)
   // ---------------------------------------------------------------------------
@@ -3942,31 +4050,179 @@ Database::get_subject_progress (const std::string &subject_id)
     return p;
 }
 
-void Database::upsert_subject_memory (SubjectMemoryRow &row)
+std::optional<Database::SubjectMemoryWritePolicyRow>
+Database::lookup_subject_memory_write_policy (const std::string &entry_key)
 {
-    if (!db_) return;
-    const int64_t ts = now_unix ();
+    if (!db_) return std::nullopt;
+    // Longest-prefix match: among all registered prefixes that are a
+    // prefix of entry_key, the longest one governs. '%' and '_' are SQL
+    // LIKE wildcards — a Suite-registered prefix containing either is an
+    // authoring mistake, not something this query tries to escape for,
+    // consistent with entry_key_prefix being a declared, reviewed value
+    // (Suite install time), not untrusted end-user input.
     Stmt stmt (prepare (
-        "INSERT INTO subject_memory "
-        "(subject_id, entry_key, entry_value, revision, related_asset_ids, "
-        " source_job_id, created_at, updated_at) "
-        "VALUES (?,?,?,1,?,?,?,?) "
-        "ON CONFLICT(subject_id, entry_key) DO UPDATE SET "
-        "entry_value       = excluded.entry_value, "
-        "revision          = subject_memory.revision + 1, "
-        "related_asset_ids = excluded.related_asset_ids, "
-        "source_job_id     = excluded.source_job_id, "
-        "updated_at        = excluded.updated_at"));
-    if (!stmt.s) return;
-    sqlite3_bind_text (stmt, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, row.entry_key.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 3, row.entry_value.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 4, row.related_asset_ids.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 5, row.source_job_id.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64 (stmt, 6, row.created_at ? row.created_at : ts);
-    sqlite3_bind_int64 (stmt, 7, ts);
+        "SELECT entry_key_prefix, authorized_signers "
+        "FROM subject_memory_write_policy "
+        "WHERE ?1 LIKE entry_key_prefix || '%' "
+        "ORDER BY LENGTH(entry_key_prefix) DESC LIMIT 1"));
+    if (!stmt.s) return std::nullopt;
+    sqlite3_bind_text (stmt, 1, entry_key.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW) return std::nullopt;
+    SubjectMemoryWritePolicyRow row;
+    row.entry_key_prefix   = column_text_or_empty (stmt, 0);
+    row.authorized_signers = column_text_or_empty (stmt, 1);
+    return row;
+}
+
+bool Database::upsert_subject_memory_write_policy (
+    const std::string &entry_key_prefix, const std::string &authorized_signers_json)
+{
+    if (!db_) return false;
+    Stmt stmt (prepare (
+        "INSERT INTO subject_memory_write_policy (entry_key_prefix, authorized_signers) "
+        "VALUES (?, ?) "
+        "ON CONFLICT(entry_key_prefix) DO UPDATE SET "
+        "authorized_signers = excluded.authorized_signers"));
+    if (!stmt.s) return false;
+    sqlite3_bind_text (stmt, 1, entry_key_prefix.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, authorized_signers_json.c_str (), -1, SQLITE_TRANSIENT);
     if (sqlite3_step (stmt) != SQLITE_DONE)
-        spdlog::error ("[database] upsert_subject_memory: {}", sqlite3_errmsg (db_));
+    {
+        spdlog::error ("[database] upsert_subject_memory_write_policy: {}",
+                       sqlite3_errmsg (db_));
+        return false;
+    }
+    return true;
+}
+
+std::optional<Database::SubjectMemoryWriteError>
+Database::upsert_subject_memory (SubjectMemoryRow &row, const std::string &signed_off_by)
+{
+    if (!db_) return std::nullopt; // infra no-op, same posture as the rest of this file
+
+    if (row.track.empty ()) row.track = "inferred";
+
+    if (row.track == "attested")
+    {
+        bool authorized = false;
+        if (auto policy = lookup_subject_memory_write_policy (row.entry_key))
+        {
+            rapidjson::Document d;
+            if (!d.Parse (policy->authorized_signers.c_str ()).HasParseError ()
+                && d.IsArray ())
+            {
+                for (auto &v : d.GetArray ())
+                    if (v.IsString () && signed_off_by == v.GetString ())
+                    {
+                        authorized = true;
+                        break;
+                    }
+            }
+        }
+        if (!authorized)
+        {
+            spdlog::warn ("[database] upsert_subject_memory: sign-off for "
+                         "entry_key '{}' denied for signed_off_by '{}'",
+                         row.entry_key, signed_off_by);
+            return SubjectMemoryWriteError::SignOffDenied;
+        }
+    }
+
+    const int64_t ts = now_unix ();
+    const bool is_signed_off = (row.track == "attested"); // authorized == true, checked above
+    if (is_signed_off)
+    {
+        row.signed_off_by = signed_off_by;
+        row.signed_off_at = ts;
+    }
+    else
+    {
+        row.signed_off_by = std::nullopt;
+        row.signed_off_at = std::nullopt;
+    }
+
+    // The main subject_memory upsert and (when applicable) the
+    // subject_memory_signoffs audit insert are one atomic unit: either
+    // both land, or neither does. This replaces an earlier version of
+    // this function that wrote the audit row as a best-effort follow-up
+    // after the main write had already committed — which could produce a
+    // signed_off_by value on the current row with no corresponding audit
+    // trail entry to back it up, exactly the inconsistency an audit
+    // mechanism exists to prevent.
+    auto tx = with_transaction ([&]() -> bool {
+        Stmt stmt (prepare (
+            "INSERT INTO subject_memory "
+            "(subject_id, entry_key, entry_value, track, signed_off_by, signed_off_at, "
+            " revision, related_asset_ids, source_job_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,1,?,?,?,?) "
+            "ON CONFLICT(subject_id, entry_key) DO UPDATE SET "
+            "entry_value       = excluded.entry_value, "
+            "track             = excluded.track, "
+            "signed_off_by     = excluded.signed_off_by, "
+            "signed_off_at     = excluded.signed_off_at, "
+            "revision          = subject_memory.revision + 1, "
+            "related_asset_ids = excluded.related_asset_ids, "
+            "source_job_id     = excluded.source_job_id, "
+            "updated_at        = excluded.updated_at"));
+        if (!stmt.s) return false;
+        sqlite3_bind_text (stmt, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 2, row.entry_key.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 3, row.entry_value.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 4, row.track.c_str (), -1, SQLITE_TRANSIENT);
+        if (row.signed_off_by)
+            sqlite3_bind_text (stmt, 5, row.signed_off_by->c_str (), -1, SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null (stmt, 5);
+        if (row.signed_off_at)
+            sqlite3_bind_int64 (stmt, 6, *row.signed_off_at);
+        else
+            sqlite3_bind_null (stmt, 6);
+        sqlite3_bind_text (stmt, 7, row.related_asset_ids.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 8, row.source_job_id.c_str (), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64 (stmt, 9, row.created_at ? row.created_at : ts);
+        sqlite3_bind_int64 (stmt, 10, ts);
+        if (sqlite3_step (stmt) != SQLITE_DONE)
+        {
+            spdlog::error ("[database] upsert_subject_memory: {}", sqlite3_errmsg (db_));
+            return false;
+        }
+
+        if (is_signed_off)
+        {
+            Stmt audit (prepare (
+                "INSERT INTO subject_memory_signoffs "
+                "(subject_id, entry_key, entry_value, signed_off_by, source_job_id, signed_off_at) "
+                "VALUES (?,?,?,?,?,?)"));
+            if (!audit.s) return false;
+            sqlite3_bind_text (audit, 1, row.subject_id.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (audit, 2, row.entry_key.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (audit, 3, row.entry_value.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (audit, 4, signed_off_by.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (audit, 5, row.source_job_id.c_str (), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64 (audit, 6, ts);
+            if (sqlite3_step (audit) != SQLITE_DONE)
+            {
+                spdlog::error ("[database] upsert_subject_memory: failed to append "
+                              "audit row for entry_key '{}': {}",
+                              row.entry_key, sqlite3_errmsg (db_));
+                return false;
+            }
+        }
+        return true;
+    });
+
+    if (!tx.has_value ())
+    {
+        // Infra/transaction failure — same posture as the rest of this
+        // file (std::nullopt for infra failures; SubjectMemoryWriteError
+        // is reserved for the SignOffDenied business-rule rejection
+        // above, which is decided before this transaction ever starts).
+        // Neither the subject_memory row nor the audit row reflect this
+        // attempted write — the ROLLBACK inside with_transaction already
+        // guaranteed that.
+        return std::nullopt;
+    }
+
     Stmt r (prepare ("SELECT revision FROM subject_memory WHERE subject_id=? AND entry_key=?"));
     if (r.s)
     {
@@ -3975,6 +4231,7 @@ void Database::upsert_subject_memory (SubjectMemoryRow &row)
         if (sqlite3_step (r) == SQLITE_ROW)
             row.revision = sqlite3_column_int (r, 0);
     }
+    return std::nullopt;
 }
 
 std::vector<Database::SubjectMemoryRow>
@@ -3987,9 +4244,9 @@ Database::query_subject_memory (
     std::vector<SubjectMemoryRow> out;
     if (!db_) return out;
 
-    std::string sql = "SELECT subject_id, entry_key, entry_value, revision, "
-                      "related_asset_ids, source_job_id, created_at, "
-                      "updated_at FROM subject_memory WHERE subject_id=?";
+    std::string sql = "SELECT subject_id, entry_key, entry_value, track, signed_off_by, "
+                      "signed_off_at, revision, related_asset_ids, source_job_id, "
+                      "created_at, updated_at FROM subject_memory WHERE subject_id=?";
     if (key_prefix) sql += " AND entry_key LIKE ?";
     if (cursor && !cursor->empty ()) sql += " AND entry_key > ?";
     sql += " ORDER BY entry_key ASC LIMIT ?";
@@ -4013,11 +4270,44 @@ Database::query_subject_memory (
         row.subject_id        = column_text_or_empty (stmt, 0);
         row.entry_key         = column_text_or_empty (stmt, 1);
         row.entry_value       = column_text_or_empty (stmt, 2);
-        row.revision          = sqlite3_column_int (stmt, 3);
-        row.related_asset_ids = column_text_or_empty (stmt, 4);
-        row.source_job_id     = column_text_or_empty (stmt, 5);
-        row.created_at        = sqlite3_column_int64 (stmt, 6);
-        row.updated_at        = sqlite3_column_int64 (stmt, 7);
+        row.track             = column_text_or_empty (stmt, 3);
+        if (sqlite3_column_type (stmt, 4) != SQLITE_NULL)
+            row.signed_off_by = column_text_or_empty (stmt, 4);
+        if (sqlite3_column_type (stmt, 5) != SQLITE_NULL)
+            row.signed_off_at = sqlite3_column_int64 (stmt, 5);
+        row.revision          = sqlite3_column_int (stmt, 6);
+        row.related_asset_ids = column_text_or_empty (stmt, 7);
+        row.source_job_id     = column_text_or_empty (stmt, 8);
+        row.created_at        = sqlite3_column_int64 (stmt, 9);
+        row.updated_at        = sqlite3_column_int64 (stmt, 10);
+        out.push_back (std::move (row));
+    }
+    return out;
+}
+
+std::vector<Database::SubjectMemorySignoffRow>
+Database::list_subject_memory_signoffs (const std::string &subject_id,
+                                        const std::string &entry_key)
+{
+    std::vector<SubjectMemorySignoffRow> out;
+    if (!db_) return out;
+    Stmt stmt (prepare (
+        "SELECT id, subject_id, entry_key, entry_value, signed_off_by, "
+        "source_job_id, signed_off_at FROM subject_memory_signoffs "
+        "WHERE subject_id=? AND entry_key=? ORDER BY signed_off_at ASC"));
+    if (!stmt.s) return out;
+    sqlite3_bind_text (stmt, 1, subject_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, entry_key.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+        SubjectMemorySignoffRow row;
+        row.id            = sqlite3_column_int64 (stmt, 0);
+        row.subject_id     = column_text_or_empty (stmt, 1);
+        row.entry_key      = column_text_or_empty (stmt, 2);
+        row.entry_value    = column_text_or_empty (stmt, 3);
+        row.signed_off_by  = column_text_or_empty (stmt, 4);
+        row.source_job_id  = column_text_or_empty (stmt, 5);
+        row.signed_off_at  = sqlite3_column_int64 (stmt, 6);
         out.push_back (std::move (row));
     }
     return out;

@@ -131,7 +131,10 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
                                            std::move(cfg_mc));
             }
 
-            // validate algorithm names
+            // validate algorithm names (ADR-036 fail-fast: confirmed
+            // working via a debug session — an unregistered algorithm
+            // name correctly returns nullopt here, which main.cpp's
+            // `if (!config) die(...)` correctly refuses to start on).
             for (const auto& [fact_type, mc_cfg] : cfg.memory_curve) {
                 auto algo = MemoryCurveRegistry::instance().resolve(mc_cfg.algorithm);
                 if (!algo) {

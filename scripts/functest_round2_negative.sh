@@ -74,6 +74,22 @@ new_home() {
   printf '%s' "$h"
 }
 
+# kill -0 <pid> succeeds even for a zombie (exited but not yet reaped by
+# `wait`) — it only tells you the PID still exists in the process table,
+# not that the process is actually still running. A daemon that dies
+# almost instantly (e.g. config-load fail-fast) can easily still be a
+# zombie the first few times this loop checks, making a genuinely-dead
+# process look "alive" and masking an early exit. Read /proc/<pid>/stat's
+# state field instead — 'Z' (zombie) or a missing /proc entry both count
+# as "not really running".
+is_process_alive() {
+  local pid="$1"
+  [[ -d "/proc/$pid" ]] || return 1
+  local state
+  state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+  [[ -n "$state" && "$state" != "Z" ]]
+}
+
 # Same fix as Round 1: extract the real JSON line by actually validating
 # each line with jq, since spdlog output can land before OR after the
 # payload and "[HH:MM:SS] ..." log lines false-match a naive
@@ -95,13 +111,21 @@ json_line() {
 #   2 = still running but never bound within the timeout (possibly hung)
 start_daemon() {
   local home="$1"
-  AGENTOS_HOME="$home" "$AGENTOS_BIN" run >"$home/daemon.log" 2>&1 &
+  # Don't rely on the daemon's own initialise_home() stale-socket cleanup
+  # having already run by the time we start polling — if a previous
+  # daemon against this same home left a socket file behind and this new
+  # daemon dies (e.g. config fail-fast) before Gateway::start() ever
+  # re-binds it, a leftover file from the OLD process could make our -S
+  # check below report "bound" when nothing new actually bound anything.
+  rm -f "$home/run/agentos.sock" 2>/dev/null
+
+  AGENTOS_HOME="$home" stdbuf -oL -eL "$AGENTOS_BIN" run >"$home/daemon.log" 2>&1 &
   DAEMON_PID=$!
   SOCK="$home/run/agentos.sock"
   local i
   for i in $(seq 1 50); do
     [[ -S "$SOCK" ]] && return 0
-    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    if ! is_process_alive "$DAEMON_PID"; then
       wait "$DAEMON_PID" 2>/dev/null
       return 1
     fi
@@ -191,6 +215,8 @@ if [[ $RC -eq 1 ]]; then
   fi
 elif [[ $RC -eq 0 ]]; then
   bad "daemon STARTED SUCCESSFULLY despite a bad algorithm name — ADR-036's fail-fast validation is not actually enforced at config load (this matches the handoff doc's worry that this check might still be a stubbed TODO). Not a script bug — a real gap to confirm with Roy."
+  info "daemon.log (now line-buffered, should reflect reality):"
+  cat "$HOME1/daemon.log"
   stop_daemon
 else
   bad "daemon neither bound the socket nor exited within 5s (RC=2) — possibly hung on the bad config. Check $HOME1/daemon.log"

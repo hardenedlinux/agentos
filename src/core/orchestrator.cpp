@@ -3661,14 +3661,35 @@ namespace agentos
       // (excluding this one) so a Plan-authoring Adviser can target
       // target_type: "adviser" steps for judgment-requiring work. Fresh at
       // every spawn, same no-caching policy as the capability list above.
+      //
+      // Also excludes any candidate whose own manifest.toml declares
+      // entry_only = true — this is the actual fix for a mistake observed
+      // in both directions this session (User Intent's Plan targeted
+      // Gap-Mining; Gap-Mining's Plan targeted User Intent). An entry_only
+      // adviser's description is written to tell the BRIDGE when to
+      // invoke it (e.g. gap-mining's own: "...to gently explore what the
+      // user actually wants...") — read out of that context by another
+      // Plan-authoring Adviser, it looks like a perfectly good reason to
+      // delegate to it. The model wasn't malfunctioning; it made a locally
+      // reasonable call on a description written for the wrong audience.
+      // plan_ready's entry_only rejection guard still exists as a
+      // backstop, but removing the temptation at the source — never
+      // showing it as an option at all — is the real fix, same principle
+      // as can_produce_plan=false skipping this injection entirely above.
       std::string adviser_list_str;
       if (adviser_can_produce_plan)
       {
         auto agents = db_.load_enabled_agents ();
         std::vector<Database::AgentRow> other_advisers;
         for (const auto &a : agents)
-          if (a.role == "adviser" && a.id != adviser_id)
-            other_advisers.push_back (a);
+        {
+          if (a.role != "adviser" || a.id == adviser_id)
+            continue;
+          auto candidate_reg = registry_.find_adviser_by_id (a.id);
+          if (candidate_reg && candidate_reg->entry_only)
+            continue;
+          other_advisers.push_back (a);
+        }
 
         if (other_advisers.empty ())
         {
@@ -4368,6 +4389,68 @@ namespace agentos
         }
       }
 
+      // Entry-only enforcement: the INVERSE of the allowed_advisers check
+      // above — that one asks "is the authoring Adviser permitted to
+      // target this?"; this one asks "does the TARGET Adviser refuse to
+      // ever be targeted internally at all?", regardless of who's asking.
+      // Runs even when the authoring Adviser has no allowed_advisers
+      // restriction of its own (every existing product Suite today) —
+      // this guard is about the target's own declared preference, not the
+      // author's. Discovered in practice, both directions, same session:
+      // User Intent's own Plan targeted Gap-Mining as an internal step,
+      // and separately Gap-Mining's own Plan targeted User Intent — each
+      // is a front-door/bridge-triggered entry point, never meant to be
+      // another Adviser's pipeline component.
+      if (doc.HasMember ("steps") && doc["steps"].IsArray ())
+      {
+        for (const auto &s : doc["steps"].GetArray ())
+        {
+          const std::string target_type
+            = (s.HasMember ("target_type") && s["target_type"].IsString ())
+                ? s["target_type"].GetString ()
+                : "";
+          if (target_type != "adviser")
+            continue;
+          const std::string command
+            = (s.HasMember ("command") && s["command"].IsString ())
+                ? s["command"].GetString ()
+                : "";
+          auto target_adviser = registry_.find_adviser_by_id (command);
+          if (target_adviser && target_adviser->entry_only)
+          {
+            spdlog::error (
+              "[orchestrator] job {} rejected: adviser {} produced a Plan "
+              "step targeting adviser '{}', which declares "
+              "[capabilities] entry_only = true — it may only be entered "
+              "via explicit top-level routing, never as another "
+              "adviser's internal Plan step — entire Plan rejected, not "
+              "dispatched",
+              job_id, originating_adviser_id.empty () ? "(unknown)"
+                                                       : originating_adviser_id,
+              command);
+            if (should_retry_plan_rejection (
+                  job_id,
+                  originating_adviser_id.empty () ? "(unknown)"
+                                                   : originating_adviser_id,
+                  "entry_only violation, targeted '" + command + "'")
+                && !originating_adviser_id.empty ())
+            {
+              OrchestratorEvent retry_ev;
+              retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+              retry_ev.job_id = job_id;
+              retry_ev.payload_json = build_spawn_adviser_payload (
+                job_id, originating_adviser_id, originating_goal);
+              enqueue (std::move (retry_ev));
+              return;
+            }
+            finish_job (job_id, false,
+                       "Plan step targeted entry-only adviser '" + command
+                         + "'");
+            return;
+          }
+        }
+      }
+
       // Both rejection guards passed (or never applied) — this job's Plan
       // is clean. Drop any retry-count entry now; leaving it would grow
       // g_plan_rejection_retry_count unboundedly over the daemon's
@@ -4880,6 +4963,13 @@ namespace agentos
         = (agentos_home () / "jobs" / job.job_id / "assets").string ();
       const std::string job_output_dir
         = (agentos_home () / "jobs" / job.job_id / "output").string ();
+      // Fixed, cross-job shared location — unlike the two placeholders
+      // above, this is NOT per-job. Currently the only consumer is
+      // product.feedback.submit (Gap-Mining Suite's convergence sink),
+      // which deliberately writes to one shared directory across every
+      // job/user rather than an isolated per-job output dir.
+      const std::string product_feedback_dir
+        = (agentos_home () / "product_feedback").string ();
       std::error_code ec;
       fs::create_directories (job_assets_dir, ec); // may not exist yet if
                                                     // this job had zero
@@ -4890,6 +4980,11 @@ namespace agentos
       if (ec)
         spdlog::warn ("[orchestrator] cannot create output dir {}: {}",
                      job_output_dir, ec.message ());
+      fs::create_directories (product_feedback_dir, ec);
+      if (ec)
+        spdlog::warn ("[orchestrator] cannot create product feedback dir "
+                     "{}: {}",
+                     product_feedback_dir, ec.message ());
 
       auto substitute = [&] (const std::string &path)
       {
@@ -4897,6 +4992,8 @@ namespace agentos
           return job_assets_dir;
         if (path == "__JOB_OUTPUT_DIR__")
           return job_output_dir;
+        if (path == "__PRODUCT_FEEDBACK_DIR__")
+          return product_feedback_dir;
         return path; // not a placeholder — pass through as declared
       };
 

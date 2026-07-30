@@ -141,6 +141,7 @@ namespace agentos
       }
       out_adviser.can_produce_plan
         = caps_node["can_produce_plan"].value_or (true);
+      out_adviser.entry_only = caps_node["entry_only"].value_or (false);
     }
 
     return true;

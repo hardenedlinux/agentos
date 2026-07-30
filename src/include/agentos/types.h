@@ -140,6 +140,27 @@ namespace agentos
     // enough guard for this on their own.
     std::optional<std::vector<std::string>> allowed_advisers;
 
+    // Inverse of allowed_advisers: some advisers must never be targeted as
+    // an internal Plan step BY ANY OTHER adviser — only ever entered via
+    // explicit top-level routing (job.submit's adviser_id, domain
+    // selection, or continuation_id). allowed_advisers alone doesn't
+    // protect against this — it only constrains what an adviser can
+    // itself target, not who's allowed to target IT. Discovered in
+    // practice: User Intent and Gap-Mining each spontaneously targeted the
+    // OTHER as a target_type:"adviser" step in their own Plan, in both
+    // directions — each is designed to be a front door / bridge-triggered
+    // entry point, never an internal pipeline component another Adviser
+    // delegates to. Defaults to false (every existing pipeline-component
+    // Adviser — glossary-adviser, translate-adviser, edit-review-adviser —
+    // legitimately needs to stay targetable by translation-pipeline's own
+    // Plan; "planning" also stays targetable, since it's deliberately used
+    // as a safe universal fallback/convergence target by other Advisers).
+    // Enforced in orchestrator.cpp's plan_ready handler at the same point
+    // allowed_advisers is checked: for every target_type:"adviser" step,
+    // the TARGET's own entry_only flag is checked, regardless of which
+    // adviser authored the Plan.
+    bool entry_only = false;
+
     // Optional: can this adviser ever legitimately produce a Plan
     // (Shape 1, {"steps": [...]}) at all? Defaults to true (unrestricted —
     // every existing product Suite needs this). Some advisers (e.g. a

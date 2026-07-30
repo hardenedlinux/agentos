@@ -57,8 +57,17 @@ void register_adviser_commands (CLI::App &app)
   // ---- adviser register ----
   {
     auto *reg = adviser->add_subcommand ("register", "Register an adviser");
-    std::string path;
-    reg->add_option ("--path", path)->required ();
+    // shared_ptr, not a plain local std::string — CLI11 stores a reference
+    // to this variable internally to write the parsed value into at
+    // parse() time, which happens later in main(), well after this block
+    // (and a plain local's scope) has ended. A plain std::string here is
+    // exactly the dangling-reference UB pattern already fixed in
+    // worker/suite/asset/job commands this project — this file was the
+    // one left over. The shared_ptr's lifetime is kept alive by being
+    // captured (by value) into the callback lambda below, which CLI11
+    // itself holds onto for the lifetime of the App tree.
+    auto path = std::make_shared<std::string> ();
+    reg->add_option ("--path", *path)->required ();
     reg->callback (
       [timeout_ms, socket_path, json_flag, path]
       {
@@ -71,7 +80,7 @@ void register_adviser_commands (CLI::App &app)
           // resolves against ITS cwd, not the caller's. Resolve to
           // absolute before sending, same as worker/suite/asset/job
           // commands.
-          auto abs_path = std::filesystem::absolute (path).string ();
+          auto abs_path = std::filesystem::absolute (*path).string ();
           auto params = agentos::cli::build_adviser_register_params (abs_path);
           auto result = client.send ("adviser.register", std::move (params));
           if (*json_flag)

@@ -2784,6 +2784,35 @@ namespace agentos
     return out;
   }
 
+  std::optional<std::string>
+  Database::peek_continuation_owner (const std::string &continuation_id,
+                                     const std::string &user_id)
+  {
+    if (!db_)
+      return std::nullopt;
+
+    // Read-only — no transaction, no UPDATE. adviser_id is deliberately
+    // excluded from the WHERE clause here (unlike read_and_consume_
+    // continuation): it's exactly what the caller is trying to determine,
+    // not something it already knows to match against.
+    Stmt sel (prepare (R"(
+      SELECT adviser_id
+      FROM interaction_continuations
+      WHERE continuation_id = ? AND user_id = ?
+        AND consumed_at IS NULL
+    )"));
+    if (!sel.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (sel, 1, continuation_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (sel, 2, user_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (sel) != SQLITE_ROW)
+      return std::nullopt; // not found, already consumed, or wrong user_id
+
+    return column_text_or_empty (sel, 0);
+  }
+
   void Database::revoke_worker (const std::string &worker_id)
   {
     if (!db_)

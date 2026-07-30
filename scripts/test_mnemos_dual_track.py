@@ -17,9 +17,9 @@ import os
 import sys
 import uuid
 import zmq
+import os
 
-#ADMIN_KEY = "PUT-YOUR-ADMIN-ACCESS-KEY-HERE"
-ADMIN_KEY = "c9a9a2e8dd3a3ae5c1760aeb795d62594b7cff3055d3c1dd3f5ca29d1f7d57ba"
+ADMIN_KEY = os.environ.get("AGENTOS_ACCESS_KEY", "")  # ADR-020: top-level "key" field on every JSON-RPC request, not inside params
 
 home = os.environ.get("AGENTOS_HOME", os.path.expanduser("~/.agentos"))
 SOCKET_PATH = f"ipc://{home}/run/agentos.sock"

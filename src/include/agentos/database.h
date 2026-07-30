@@ -284,6 +284,28 @@ namespace agentos
                                    const std::string &user_id,
                                    const std::string &adviser_id);
 
+    /// Read-only lookup of which adviser_id an unconsumed continuation_id
+    /// belongs to (matching continuation_id + user_id only — adviser_id is
+    /// exactly what the caller is trying to determine, so it can't be part
+    /// of the match here). Does NOT mark the row consumed — the real
+    /// consume-and-inject still happens exactly once, later, via
+    /// read_and_consume_continuation at ADR-038's usual dispatch-time spot.
+    /// Used by Master to route a job.submit straight to the continuation's
+    /// owning adviser, bypassing domain-token selection entirely, when the
+    /// caller already knows which conversation it's continuing (Suite-ADR-001
+    /// §B: goal text on a continuation follow-up may be a fragment with no
+    /// reliable domain signal of its own — re-deriving the adviser via
+    /// keyword/LLM matching on that fragment is not just redundant but can
+    /// silently misroute, which read_and_consume_continuation's own
+    /// adviser_id-matching would then reject as "mismatched", silently
+    /// dropping whatever context the continuation carried).
+    /// Returns std::nullopt when not found, already consumed, or mismatched
+    /// user_id — same "no distinction, just absent" posture as the existing
+    /// consume method.
+    [[nodiscard]] std::optional<std::string>
+    peek_continuation_owner (const std::string &continuation_id,
+                             const std::string &user_id);
+
     // Soft-delete a worker: sets enabled = -1 (revoked).
     // Revoked workers are excluded from load_enabled_agents() and are never
     // dispatched. The row is retained for audit purposes.

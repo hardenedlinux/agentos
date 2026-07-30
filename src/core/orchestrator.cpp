@@ -865,6 +865,30 @@ namespace agentos
     // goal containing `","malicious_key":"x` would inject an extra field
     // into what Master parses on the other end. job.status/job.list already
     // do this correctly (w.Key/w.String below); this call site didn't.
+    // ADR-038 + continuation-aware routing: if this job.submit is a
+    // continuation follow-up, resolve which adviser it belongs to HERE
+    // (Orchestrator already owns db_ and all continuation read/write
+    // logic) rather than handing Master the raw continuation_id — Master
+    // has no Database dependency and shouldn't gain one just for this.
+    // peek_continuation_owner does NOT consume the row; the real
+    // consume-and-inject still happens once, later, at its existing
+    // ADR-038 spot. A goal-text fragment on a continuation follow-up may
+    // carry no reliable domain signal of its own, so when we already know
+    // which adviser this conversation belongs to, Master should skip
+    // domain-token/LLM selection entirely rather than risk misrouting and
+    // silently losing the continuation's context (Suite-ADR-001 §B).
+    std::string known_adviser_id;
+    if (!continuation_id.empty ())
+    {
+      if (auto owner = db_.peek_continuation_owner (continuation_id, user_id))
+        known_adviser_id = *owner;
+      else
+        spdlog::warn ("[orchestrator] job {} carries continuation_id {} but "
+                     "no unconsumed owner was found — falling back to "
+                     "normal domain selection",
+                     job_id, continuation_id);
+    }
+
     MasterEvent me;
     me.kind = MasterEvent::Kind::JobSubmit;
     me.job_id = job_id;
@@ -878,6 +902,13 @@ namespace agentos
       w.String (goal.c_str ());
       w.Key ("type");
       w.String (type.c_str ());
+      w.Key ("user_id");
+      w.String (user_id.c_str ());
+      if (!known_adviser_id.empty ())
+      {
+        w.Key ("known_adviser_id");
+        w.String (known_adviser_id.c_str ());
+      }
       w.EndObject ();
       me.payload_json = buf.GetString ();
     }

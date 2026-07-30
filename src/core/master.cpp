@@ -107,12 +107,20 @@ namespace agentos
   {
     const std::string job_id = msg.job_id;
 
-    // Parse goal from payload.
+    // Parse goal (and, if present, a known_adviser_id already resolved by
+    // Orchestrator via continuation lookup — see cmd_job_submit) from
+    // payload.
     rapidjson::Document doc;
     std::string goal;
-    if (!doc.Parse (msg.payload_json.c_str ()).HasParseError ()
-        && doc.HasMember ("goal") && doc["goal"].IsString ())
-      goal = doc["goal"].GetString ();
+    std::string known_adviser_id;
+    if (!doc.Parse (msg.payload_json.c_str ()).HasParseError ())
+    {
+      if (doc.HasMember ("goal") && doc["goal"].IsString ())
+        goal = doc["goal"].GetString ();
+      if (doc.HasMember ("known_adviser_id")
+          && doc["known_adviser_id"].IsString ())
+        known_adviser_id = doc["known_adviser_id"].GetString ();
+    }
 
     if (goal.empty ())
     {
@@ -125,6 +133,51 @@ namespace agentos
       send_to_orchestrator_ (std::move (ev));
       return;
     }
+
+    // Continuation-aware routing (Suite-ADR-001 §B): Orchestrator already
+    // knows which adviser this job belongs to, so skip domain-token
+    // matching and the Step-2 LLM disambiguation call entirely — no thread
+    // to detach, no LLM round-trip, just hand the known answer straight to
+    // the same internal event handle_adviser_selected already expects.
+    // Still validated against the Registry first: a continuation row can
+    // outlive its adviser (revoked/removed between the row's creation and
+    // this follow-up) — handle_adviser_selected itself only checks for an
+    // empty adviser_id, not whether it's still actually registered, so an
+    // unvalidated forward here would hand Orchestrator a dead id instead
+    // of falling back to normal selection the way a stale/mismatched
+    // continuation already degrades gracefully elsewhere.
+    if (!known_adviser_id.empty ()
+        && registry_.find_adviser_by_id (known_adviser_id))
+    {
+      spdlog::info ("[master] job {} routed via known continuation owner "
+                   "'{}', skipping domain selection",
+                   job_id, known_adviser_id);
+
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("_internal");
+      w.String ("adviser_selected");
+      w.Key ("job_id");
+      w.String (job_id.c_str ());
+      w.Key ("adviser_id");
+      w.String (known_adviser_id.c_str ());
+      w.Key ("goal");
+      w.String (goal.c_str ());
+      w.EndObject ();
+
+      MasterEvent result;
+      result.kind = MasterEvent::Kind::ScheduledTask;
+      result.job_id = job_id;
+      result.payload_json = buf.GetString ();
+      enqueue (std::move (result));
+      return;
+    }
+    if (!known_adviser_id.empty ())
+      spdlog::warn ("[master] job {} carried known_adviser_id '{}' but it "
+                   "is no longer registered — falling back to normal "
+                   "domain selection",
+                   job_id, known_adviser_id);
 
     spdlog::info ("[master] job {} submitted, selecting adviser", job_id);
 

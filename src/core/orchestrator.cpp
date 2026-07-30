@@ -77,6 +77,74 @@ namespace agentos
       return diff == 0;
     }
 
+    // Retry counters for the can_produce_plan / allowed_advisers rejection
+    // guards in plan_ready (see below) — a bad Plan there is far more
+    // likely to be the LLM's own output instability than a real, repeated
+    // policy violation (observed directly this session: three separate
+    // rejections, three completely different hallucinated contents, same
+    // underlying adviser+goal). Retrying a few times before giving up
+    // mirrors Forge's own retry-before-escalate posture for exactly the
+    // same reason — a single bad completion shouldn't fail the whole job
+    // when a fresh attempt is cheap and often just works.
+    //
+    // Deliberately a file-scope map, not an Orchestrator member — avoids
+    // an orchestrator.h change for what's a small, self-contained concern.
+    // Safe without a mutex: only ever touched from plan_ready, which is
+    // MasterDecision-event handling and therefore always runs on the
+    // Orchestrator's single event-loop thread, never concurrently with
+    // itself.
+    std::unordered_map<std::string, int> g_plan_rejection_retry_count;
+    constexpr int kMaxPlanRejectionRetries = 3;
+
+    // Builds the payload_json for a spawn_adviser MasterDecision event —
+    // shared by both plan-rejection retry call sites below (identical
+    // shape to what cmd_job_submit's Master routing already produces).
+    std::string build_spawn_adviser_payload (const std::string &job_id,
+                                             const std::string &adviser_id,
+                                             const std::string &goal)
+    {
+      rapidjson::Document doc;
+      doc.SetObject ();
+      auto &alloc = doc.GetAllocator ();
+      doc.AddMember ("type", rapidjson::Value ("spawn_adviser", alloc),
+                    alloc);
+      doc.AddMember (
+        "job_id", rapidjson::Value (job_id.c_str (), alloc), alloc);
+      doc.AddMember ("adviser_id",
+                    rapidjson::Value (adviser_id.c_str (), alloc), alloc);
+      doc.AddMember ("goal", rapidjson::Value (goal.c_str (), alloc), alloc);
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc.Accept (w);
+      return buf.GetString ();
+    }
+
+    // Returns true if under the retry limit (and increments the count) —
+    // caller should re-enqueue a spawn_adviser event and return without
+    // calling finish_job. Returns false once retries are exhausted —
+    // caller should proceed to finish_job(false, ...) as before.
+    bool should_retry_plan_rejection (const std::string &job_id,
+                                      const std::string &adviser_id,
+                                      const std::string &reason)
+    {
+      int &count = g_plan_rejection_retry_count[job_id];
+      ++count;
+      if (count > kMaxPlanRejectionRetries)
+      {
+        spdlog::error (
+          "[orchestrator] job {} adviser {}: exhausted {} retries after "
+          "repeated Plan rejections ({}) — failing job",
+          job_id, adviser_id, kMaxPlanRejectionRetries, reason);
+        g_plan_rejection_retry_count.erase (job_id);
+        return false;
+      }
+      spdlog::warn (
+        "[orchestrator] job {} adviser {}: Plan rejected ({}), retrying "
+        "(attempt {}/{})",
+        job_id, adviser_id, reason, count, kMaxPlanRejectionRetries);
+      return true;
+    }
+
     // SHA-256(key || salt) → hex string (ADR-020).
     std::string sha256_hex (const std::string &key, const std::string &salt)
     {
@@ -678,6 +746,7 @@ namespace agentos
       {"subject.memory.write_policy.upsert", [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_write_policy_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"adviser.list",        [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"adviser.register",    [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.revoke",      [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"forge.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_forge_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"forge.status",        [this](auto&& p,auto&& id,auto&& ri){cmd_forge_status(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"cred.submit",         [this](auto&& p,auto&& id,auto&& ri){cmd_cred_submit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
@@ -878,7 +947,19 @@ namespace agentos
     // domain-token/LLM selection entirely rather than risk misrouting and
     // silently losing the continuation's context (Suite-ADR-001 §B).
     std::string known_adviser_id;
-    if (!continuation_id.empty ())
+    // Explicit override: the caller already knows exactly which adviser
+    // this job belongs to — not inferred from a raw user-typed goal, but
+    // a system-initiated interaction (e.g. Suite-ADR-00X Gap-Mining's own
+    // first hop, which CMS deliberately targets rather than trusting
+    // domain-token matching to land on a Suite that never competes well
+    // on organic user phrasing). Reuses exactly the same known_adviser_id
+    // short-circuit Master already validates (registry_.find_adviser_by_id)
+    // for the continuation-peek case below — Master doesn't need to know
+    // or care which source resolved it.
+    if (params.HasMember ("adviser_id") && params["adviser_id"].IsString ())
+      known_adviser_id = params["adviser_id"].GetString ();
+
+    if (known_adviser_id.empty () && !continuation_id.empty ())
     {
       if (auto owner = db_.peek_continuation_owner (continuation_id, user_id))
         known_adviser_id = *owner;
@@ -958,6 +1039,11 @@ namespace agentos
       w.Key ("error");
       w.String (job->error->c_str ());
     }
+    if (job->adviser_id)
+    {
+      w.Key ("adviser_id");
+      w.String (job->adviser_id->c_str ());
+    }
     w.Key ("steps");
     w.StartArray ();
     for (const auto &s : steps)
@@ -971,6 +1057,12 @@ namespace agentos
       w.String (s.description.c_str ());
       w.Key ("status");
       w.String (s.status.c_str ());
+      w.Key ("command");
+      w.String (s.command.c_str ());
+      w.Key ("target_type");
+      w.String (s.target_type.c_str ());
+      w.Key ("needs_forge");
+      w.Bool (s.needs_forge);
       w.Key ("queued_at");
       if (s.queued_at)
         w.Int64 (*s.queued_at);
@@ -1338,10 +1430,13 @@ namespace agentos
       w.String (a.binary_path.c_str ());
       w.Key ("domains");
       w.StartArray ();
-      if (auto reg_adviser = registry_.find_adviser_by_id (a.id))
+      auto reg_adviser = registry_.find_adviser_by_id (a.id);
+      if (reg_adviser)
         for (const auto &d : reg_adviser->domains)
           w.String (d.c_str ());
       w.EndArray ();
+      w.Key ("version");
+      w.String (reg_adviser ? reg_adviser->version.c_str () : "");
       w.Key ("model");
       w.String ("");
       w.Key ("active");
@@ -1770,7 +1865,40 @@ namespace agentos
   }
 
   // ---------------------------------------------------------------------------
-  // Command: suite.list / suite.show / suite.install / suite.remove
+  // Command: adviser.revoke
+  //
+  // Unlike worker.revoke, there is no active-runs/PID/SIGTERM concern here —
+  // an Adviser's completion is a detached LLM call (ADR-018), never a
+  // sandboxed subprocess tracked by WorkerRun, so there's nothing to kill.
+  // Just a straightforward permanent disable (enabled=-1). Reuses
+  // Database::revoke_worker() despite the name — it's role-agnostic
+  // (already relied on for suite removal's adviser components; see
+  // cmd_suite_remove above). Does not touch the filesystem — skill.md/
+  // manifest.toml on disk are left alone, matching worker.revoke's
+  // filesystem-untouched contract.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_adviser_revoke (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("adviser_id")
+        || !params["adviser_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string adviser_id = params["adviser_id"].GetString ();
+
+    db_.revoke_worker (adviser_id);
+    registry_.init (db_);
+    spdlog::warn ("[orchestrator] adviser {} revoked", adviser_id);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+
   //
   // ADR-030 Capability Suite package format. This round: local install only
   // (params.path points at an already-unpacked Suite directory on disk —
@@ -3454,6 +3582,7 @@ namespace agentos
 
       spdlog::info ("[orchestrator] spawning adviser {} for job {}", adviser_id,
                     job_id);
+      db_.set_job_adviser_id (job_id, adviser_id);
 
       // Read skill.md as system prompt (ADR-018).
       auto home = agentos_home ();
@@ -3472,10 +3601,29 @@ namespace agentos
             adviser_id);
       }
 
+      // Skip injecting capability/adviser lists entirely for an adviser
+      // that structurally can never produce a Plan (manifest.toml
+      // [capabilities] can_produce_plan = false) — it could never
+      // legitimately use this information, and its presence (formatted
+      // identically to how a real Plan-authoring adviser's prompt looks)
+      // is a plausible contributor to exactly the failure this flag exists
+      // to guard against: the model pattern-completing into producing a
+      // Plan anyway, especially on later turns of a conversation, rather
+      // than literally re-checking the system prompt's "always respond
+      // this way" instruction every time. Removing the temptation at the
+      // source is a stronger fix than only catching the violation after
+      // the fact in plan_ready.
+      const bool adviser_can_produce_plan = [&]
+      {
+        auto reg = registry_.find_adviser_by_id (adviser_id);
+        return !reg || reg->can_produce_plan;
+      } ();
+
       // Query Registry for current enabled capabilities — inject at spawn time
       // so the Planning Adviser selects from actual registered methods
       // (ADR-031). This is dynamic data; it must NOT live in skill.md.
       std::string capability_list_str;
+      if (adviser_can_produce_plan)
       {
         auto caps = db_.load_capabilities ();
         if (caps.empty ())
@@ -3514,6 +3662,7 @@ namespace agentos
       // target_type: "adviser" steps for judgment-requiring work. Fresh at
       // every spawn, same no-caching policy as the capability list above.
       std::string adviser_list_str;
+      if (adviser_can_produce_plan)
       {
         auto agents = db_.load_enabled_agents ();
         std::vector<Database::AgentRow> other_advisers;
@@ -3838,27 +3987,41 @@ namespace agentos
                                  out_doc.GetAllocator ());
             }
 
-            // ADR-038 post-completion: write a continuation row if this
-            // Adviser opted in and produced updated_context — same logic
-            // as the Plan-shape branch below, against `resp` instead of a
-            // parsed Plan. Unlike the Plan-shape branch (which never
-            // attaches bridge_hint, since Planning is never itself the
-            // final step of a job), this response IS the job's terminal
-            // output — there is no pipeline to run afterward — so we DO
-            // attach bridge_hint here, mirroring handle_adviser_done's
-            // final_step==true branch.
-            if (resp.HasMember ("updated_context"))
+            // ADR-038 post-completion: whether a continuation gets created
+            // is a structural decision — this adviser declared
+            // supports_continuation in its own manifest, and this response
+            // IS a needs_clarification turn — not something the model's
+            // response should be able to accidentally suppress by omitting
+            // updated_context. That field's *content* is genuinely optional
+            // (the adviser may have nothing worth carrying forward this
+            // turn), but its *absence* must not silently disable
+            // continuation entirely — that previously made whether a
+            // conversation could continue depend on LLM output variance,
+            // which is exactly backwards: continuability is the sender
+            // side's capability, not the model's to decide turn by turn.
+            // Unlike the Plan-shape branch below (which never attaches
+            // bridge_hint, since Planning is never itself the final step of
+            // a job), this response IS the job's terminal output — there is
+            // no pipeline to run afterward — so we DO attach bridge_hint
+            // here, mirroring handle_adviser_done's final_step==true branch.
             {
               auto reg_adviser = registry_.find_adviser_by_id (adviser_id);
               if (reg_adviser && reg_adviser->supports_continuation)
               {
-                std::string updated_ctx;
+                std::string updated_ctx = "{}";
+                if (resp.HasMember ("updated_context"))
                 {
                   rapidjson::StringBuffer ctx_buf;
                   rapidjson::Writer<rapidjson::StringBuffer> ctw (ctx_buf);
                   resp["updated_context"].Accept (ctw);
                   updated_ctx = ctx_buf.GetString ();
                 }
+                else
+                  spdlog::info ("[orchestrator] adviser {} (job {}) omitted "
+                               "updated_context on a needs_clarification "
+                               "response — continuation still created with "
+                               "an empty context payload",
+                               adviser_id, job_id);
 
                 Database::InteractionContinuationRow row;
                 row.continuation_id = new_uuid ();
@@ -4080,15 +4243,137 @@ namespace agentos
                    : "oneshot";
 
       // ADR-029 + ADR-038: store the owning user for later use (continuation reads/writes).
+      std::string originating_adviser_id;
+      std::string originating_goal;
       if (auto j = db_.load_job (job_id); j)
       {
         job.user_id = j->user_id;
+        originating_goal = j->goal;
+        if (j->adviser_id)
+          originating_adviser_id = *j->adviser_id;
       }
       else
       {
         spdlog::warn ("[orchestrator] plan_ready: job {} not found in DB "
                       "while building active_job", job_id);
       }
+
+      // can_produce_plan enforcement: checked BEFORE allowed_advisers,
+      // and independent of target_type — an adviser whose manifest.toml
+      // declares [capabilities] can_produce_plan = false must never emit
+      // Shape 1 at all, regardless of what target_type/command a
+      // hallucinated step uses. This exists because allowed_advisers alone
+      // only constrains target_type:"adviser" steps — a hallucinated
+      // target_type:"worker" step sidesteps that check entirely, which was
+      // observed in practice (a test-only adviser whose contract is
+      // "always Shape 2, never a Plan" still produced a worker-target
+      // step referencing an unrelated, already-registered worker).
+      if (!originating_adviser_id.empty () && doc.HasMember ("steps")
+          && doc["steps"].IsArray () && !doc["steps"].Empty ())
+      {
+        auto reg_adviser = registry_.find_adviser_by_id (originating_adviser_id);
+        if (reg_adviser && !reg_adviser->can_produce_plan)
+        {
+          rapidjson::StringBuffer steps_buf;
+          rapidjson::Writer<rapidjson::StringBuffer> steps_w (steps_buf);
+          doc["steps"].Accept (steps_w);
+          const std::string reason
+            = "can_produce_plan=false, offending steps: "
+              + std::string (steps_buf.GetString ());
+          spdlog::error (
+            "[orchestrator] job {} rejected: adviser {} produced a Plan, "
+            "but its manifest.toml declares can_produce_plan = false — "
+            "entire Plan rejected, not dispatched. Offending steps: {}",
+            job_id, originating_adviser_id, steps_buf.GetString ());
+          if (should_retry_plan_rejection (job_id, originating_adviser_id,
+                                           reason))
+          {
+            OrchestratorEvent retry_ev;
+            retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+            retry_ev.job_id = job_id;
+            retry_ev.payload_json = build_spawn_adviser_payload (
+              job_id, originating_adviser_id, originating_goal);
+            enqueue (std::move (retry_ev));
+            return;
+          }
+          finish_job (job_id, false,
+                     "Adviser '" + originating_adviser_id
+                       + "' is not permitted to produce a Plan");
+          return;
+        }
+      }
+
+      // Peer-adviser allow-list enforcement: the originating Adviser's own
+      // manifest.toml may declare [capabilities] allowed_advisers — if it
+      // does, every target_type:"adviser" step in this Plan must target
+      // something in that list, checked as a pre-pass BEFORE any step gets
+      // persisted or dispatched, and rejecting the WHOLE Plan atomically if
+      // any step violates it (same "no partial, fail outright" posture as
+      // ADR-031 §1's capability-format validation — a Plan that's half
+      // trustworthy is not something to dispatch part of). Advisers that
+      // never declared this restriction (every existing product Suite
+      // today) are completely unaffected. This exists because a Plan-
+      // producing Adviser's own completion can hallucinate a step
+      // targeting some other real, already-registered adviser it was never
+      // meant to invoke — this has been observed in practice, not a
+      // hypothetical concern, and prompt-level "never reference X"
+      // instructions alone were not a reliable enough guard.
+      if (!originating_adviser_id.empty () && doc.HasMember ("steps")
+          && doc["steps"].IsArray ())
+      {
+        auto reg_adviser = registry_.find_adviser_by_id (originating_adviser_id);
+        if (reg_adviser && reg_adviser->allowed_advisers)
+        {
+          const auto &allowed = *reg_adviser->allowed_advisers;
+          for (const auto &s : doc["steps"].GetArray ())
+          {
+            const std::string target_type
+              = (s.HasMember ("target_type") && s["target_type"].IsString ())
+                  ? s["target_type"].GetString ()
+                  : "";
+            if (target_type != "adviser")
+              continue;
+            const std::string command
+              = (s.HasMember ("command") && s["command"].IsString ())
+                  ? s["command"].GetString ()
+                  : "";
+            if (std::find (allowed.begin (), allowed.end (), command)
+                == allowed.end ())
+            {
+              spdlog::error (
+                "[orchestrator] job {} rejected: adviser {} produced a "
+                "Plan step targeting adviser '{}', which is not in its "
+                "declared allowed_advisers list — entire Plan rejected, "
+                "not dispatched",
+                job_id, originating_adviser_id, command);
+              if (should_retry_plan_rejection (
+                    job_id, originating_adviser_id,
+                    "allowed_advisers violation, targeted '" + command
+                      + "'"))
+              {
+                OrchestratorEvent retry_ev;
+                retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+                retry_ev.job_id = job_id;
+                retry_ev.payload_json = build_spawn_adviser_payload (
+                  job_id, originating_adviser_id, originating_goal);
+                enqueue (std::move (retry_ev));
+                return;
+              }
+              finish_job (job_id, false,
+                         "Plan step targeted disallowed adviser '" + command
+                           + "'");
+              return;
+            }
+          }
+        }
+      }
+
+      // Both rejection guards passed (or never applied) — this job's Plan
+      // is clean. Drop any retry-count entry now; leaving it would grow
+      // g_plan_rejection_retry_count unboundedly over the daemon's
+      // lifetime for every job that was ever retried at least once, even
+      // successfully.
+      g_plan_rejection_retry_count.erase (job_id);
 
       if (doc.HasMember ("steps") && doc["steps"].IsArray ())
       {

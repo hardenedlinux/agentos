@@ -131,45 +131,84 @@ void register_adviser_commands (CLI::App &app)
             const auto &advisers = result["advisers"];
             struct Row
             {
-              std::string id, model, active, desc;
+              std::string id, version, model, active, desc;
             };
             std::vector<Row> rows;
             for (const auto &adv : advisers.GetArray ())
             {
               std::string id = f::str (adv, "id");
+              std::string version = f::str (adv, "version");
               std::string model = f::str (adv, "model");
+              if (model.empty ())
+                model = "auto";
               bool act = (adv.HasMember ("active") && adv["active"].IsBool ())
                            ? adv["active"].GetBool ()
                            : false;
               std::string active = act ? "true" : "false";
               std::string desc = f::str (adv, "description");
-              rows.push_back ({id, model, active, desc});
+              rows.push_back ({id, version, model, active, desc});
             }
 
-            size_t w_id = 2, w_model = 5, w_active = 6, w_desc = 11;
+            size_t w_id = 2, w_version = 7, w_model = 5, w_active = 6;
             for (const auto &r : rows)
             {
               w_id = std::max (w_id, r.id.size ());
+              w_version = std::max (w_version, r.version.size ());
               w_model = std::max (w_model, r.model.size ());
               w_active = std::max (w_active, r.active.size ());
-              w_desc = std::max (w_desc, r.desc.size ());
             }
+            size_t header_w = w_id + w_version + w_model + w_active + 6;
 
-            size_t total_w = w_id + w_model + w_active + w_desc + 6;
+            // Description no longer shares the row — it overflows any
+            // fixed column width and word-wraps raw across the terminal,
+            // breaking alignment with every other row. Print it on its
+            // own indented, word-wrapped block below the compact fields
+            // instead, closer to how a real table renders a long text
+            // column.
+            constexpr size_t desc_wrap_width = 78;
+            constexpr size_t desc_indent = 2;
+            auto print_wrapped_desc = [] (const std::string &text)
+            {
+              size_t pos = 0;
+              while (pos < text.size ())
+              {
+                size_t take = desc_wrap_width;
+                if (pos + take >= text.size ())
+                {
+                  take = text.size () - pos;
+                }
+                else
+                {
+                  // Back up to the last space within this chunk so words
+                  // aren't split mid-word.
+                  size_t last_space = text.rfind (' ', pos + take);
+                  if (last_space != std::string::npos && last_space > pos)
+                    take = last_space - pos;
+                }
+                std::cout << std::string (desc_indent, ' ')
+                          << text.substr (pos, take) << "\n";
+                pos += take;
+                while (pos < text.size () && text[pos] == ' ')
+                  ++pos;
+              }
+            };
 
             std::cout << bold (f::col ("ID", w_id))
+                      << bold (f::col ("VERSION", w_version))
                       << bold (f::col ("MODEL", w_model))
-                      << bold (f::col ("ACTIVE", w_active))
-                      << bold (f::col ("DESCRIPTION", w_desc)) << "\n";
-            std::cout << f::separator (total_w) << "\n";
+                      << bold (f::col ("ACTIVE", w_active)) << "\n";
+            std::cout << f::separator (header_w) << "\n";
 
             for (const auto &r : rows)
             {
               std::string actColored
                 = (r.active == "true") ? green ("true") : grey ("false");
-              std::cout << f::col (r.id, w_id) << f::col (r.model, w_model)
+              std::cout << f::col (r.id, w_id) << f::col (r.version, w_version)
+                        << f::col (r.model, w_model)
                         << f::col_colored (actColored, r.active, w_active)
-                        << r.desc << "\n";
+                        << "\n";
+              print_wrapped_desc (r.desc);
+              std::cout << "\n";
             }
           }
         }

@@ -176,6 +176,10 @@ namespace agentos
                                const std::string &identity,
                                const std::string &request_id);
 
+    void cmd_adviser_revoke (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+
     void cmd_forge_list (const std::string &params_json,
                          const std::string &identity,
                          const std::string &request_id);

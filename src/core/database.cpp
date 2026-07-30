@@ -380,6 +380,8 @@ namespace agentos
       // ADR-029: add user_id to jobs
       maybe_add_column (
         "ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
+      // Suite-ADR-001 §B follow-up: which adviser this job was routed to.
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN adviser_id TEXT");
     }
 
     // ADR‑025: extend human_reviews with type / job_id
@@ -862,6 +864,13 @@ namespace agentos
         && sqlite3_column_type (stmt, 20) != SQLITE_NULL)
       j.user_id = column_text_or_empty (stmt, 20);
 
+    // adviser_id (column 21) — present only when SELECTed (load_job); other
+    // call sites don't include it, so this stays unset (nullopt) for them,
+    // same conditional-column pattern as user_id above.
+    if (sqlite3_column_count (stmt) > 21
+        && sqlite3_column_type (stmt, 21) != SQLITE_NULL)
+      j.adviser_id = column_text_or_empty (stmt, 21);
+
     return j;
   }
 
@@ -882,6 +891,17 @@ namespace agentos
       s.result_json = column_text_or_empty (stmt, 9);
     s.tokens_prompt = sqlite3_column_int (stmt, 10);
     s.tokens_completion = sqlite3_column_int (stmt, 11);
+    // command/target_type/needs_forge (columns 12-14) — appended at the
+    // end so this stays backward-compatible with any call site that
+    // doesn't SELECT them (none currently, but matches the conditional
+    // pattern used for Job.user_id/adviser_id rather than assuming every
+    // caller was updated in lockstep).
+    if (sqlite3_column_count (stmt) > 12)
+      s.command = column_text_or_empty (stmt, 12);
+    if (sqlite3_column_count (stmt) > 13)
+      s.target_type = column_text_or_empty (stmt, 13);
+    if (sqlite3_column_count (stmt) > 14)
+      s.needs_forge = sqlite3_column_int (stmt, 14) != 0;
     return s;
   }
 
@@ -1089,7 +1109,8 @@ namespace agentos
              max_iterations, current_iteration,
              max_repairs, current_repairs,
              reviewer_id, acceptance_criteria, last_feedback,
-             timer_id, interval_s, starts_at, last_run_at, next_run_at
+             timer_id, interval_s, starts_at, last_run_at, next_run_at,
+             user_id, adviser_id
       FROM jobs WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1320,7 +1341,8 @@ namespace agentos
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
              queued_at, started_at, completed_at, error, result,
-             tokens_prompt, tokens_completion
+             tokens_prompt, tokens_completion,
+             method, target_type, needs_forge
       FROM tasks WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1342,7 +1364,8 @@ namespace agentos
     Stmt stmt (prepare (R"(
       SELECT id, job_id, step_order, description, status,
              queued_at, started_at, completed_at, error, result,
-             tokens_prompt, tokens_completion
+             tokens_prompt, tokens_completion,
+             method, target_type, needs_forge
       FROM tasks WHERE job_id = ? ORDER BY step_order ASC
     )"));
     if (!stmt.s)
@@ -1542,7 +1565,8 @@ namespace agentos
     std::string sql
       = std::string ("SELECT id, job_id, step_order, description, status, "
                      "queued_at, started_at, completed_at, error, result, "
-                     "tokens_prompt, tokens_completion "
+                     "tokens_prompt, tokens_completion, "
+                     "method, target_type, needs_forge "
                      "FROM tasks WHERE job_id IN (")
         + placeholders + ") AND status != ? ORDER BY step_order ASC";
 
@@ -1629,6 +1653,23 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] update_job_phase: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::set_job_adviser_id (const std::string &job_id,
+                                     const std::string &adviser_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE jobs SET adviser_id = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, adviser_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_job_adviser_id: {}",
+                     sqlite3_errmsg (db_));
   }
 
   // NOTE: this used to be backed by an update_job_plan()/load_plan_json()

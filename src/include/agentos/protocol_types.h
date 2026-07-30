@@ -50,6 +50,11 @@ namespace agentos
     int64_t updated_at = 0;
     std::optional<std::string> error; // failure reason
 
+    // Which adviser Master routed this job to at entry (set once, at
+    // spawn_adviser time — see Orchestrator's handle_master_decision).
+    // Absent for jobs that failed before an adviser was ever selected.
+    std::optional<std::string> adviser_id;
+
     // Embedded entity for type=scheduled (std::nullopt otherwise)
     std::optional<Schedule> schedule;
     // Embedded entity for type=loop (std::nullopt otherwise)
@@ -72,7 +77,18 @@ namespace agentos
     std::string result_json;          // ADR-016 result payload, set on done
     int tokens_prompt     = 0;        // LLM input tokens for this step
     int tokens_completion = 0;        // LLM output tokens for this step
+
+    // ADR-031: capability method name (target_type "worker") or adviser id
+    // (target_type "adviser") this step invokes. Stored as `method` in the
+    // tasks table from the start, but never previously read back out by
+    // load_steps_for_job/load_step — job.status had no way to show which
+    // capability a step actually used, or which steps were gaps
+    // (needs_forge) versus already-available.
+    std::string command;
+    std::string target_type; // "worker" | "adviser"
+    bool needs_forge = false;
   };
+
 
   // --- Worker (Executor) ---
 

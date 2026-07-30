@@ -123,6 +123,26 @@ namespace agentos
       supports_cont = cont_node["supports"].value_or (false);
     out_adviser.supports_continuation = supports_cont;
 
+    // Optional [capabilities] allowed_advisers — absent entirely means
+    // unrestricted (std::nullopt); present (even as an empty array) means
+    // the orchestrator enforces this allow-list at Plan-validation time
+    // (see RegisteredAdviser::allowed_advisers in types.h for why this
+    // exists — a Plan-producing Adviser's own hallucination, not just a
+    // malicious one, is the threat model here).
+    if (auto caps_node = tbl["capabilities"]; caps_node.is_table ())
+    {
+      if (auto allowed_arr = caps_node["allowed_advisers"].as_array ())
+      {
+        std::vector<std::string> allowed;
+        for (auto &&a : *allowed_arr)
+          if (auto s = a.value<std::string> ())
+            allowed.push_back (*s);
+        out_adviser.allowed_advisers = std::move (allowed);
+      }
+      out_adviser.can_produce_plan
+        = caps_node["can_produce_plan"].value_or (true);
+    }
+
     return true;
   }
 

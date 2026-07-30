@@ -172,6 +172,13 @@ namespace agentos
     void update_job_phase (const std::string &id, std::string_view old_phase,
                            std::string_view new_phase);
     void update_job_error (const std::string &id, const std::string &error);
+    // Suite-ADR-001 §B follow-up: records which adviser this job was
+    // routed to at spawn_adviser time — job.status had no way to expose
+    // this before (only the daemon log did). Called once, when the entry
+    // adviser is spawned; never for per-step adviser-target dispatches
+    // within an already-selected pipeline.
+    void set_job_adviser_id (const std::string &job_id,
+                             const std::string &adviser_id);
     std::optional<Job> load_job (const std::string &id);
     std::vector<Job> load_jobs (std::optional<std::string_view> type_filter,
                                 std::optional<std::string_view> phase_filter,

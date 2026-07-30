@@ -122,6 +122,38 @@ namespace agentos
     // adding to it. Optional; empty if the manifest omits it.
     std::string description;
     bool supports_continuation = false; // ADR-038
+
+    // Optional allow-list of adviser ids this adviser's own Plans may
+    // target with a target_type:"adviser" step. std::nullopt (the
+    // manifest didn't declare [capabilities] allowed_advisers at all) means
+    // unrestricted — every existing product Suite (translation-pipeline,
+    // user-intent, gap-mining) legitimately needs open access to whatever's
+    // in "Available advisers" and gets no new restriction. A declared list
+    // (even an empty one) is enforced at Plan-validation time in
+    // orchestrator.cpp's plan_ready handler: any target_type:"adviser" step
+    // whose command isn't in this list gets the whole Plan rejected
+    // atomically, the same "no partial, fail outright" posture already used
+    // for ADR-031 §1 capability-format validation. Exists because an
+    // Adviser's own LLM completion can hallucinate a Plan step that invokes
+    // some other real, already-registered adviser it was never meant to —
+    // prompt-level instructions ("never reference X") are not a reliable
+    // enough guard for this on their own.
+    std::optional<std::vector<std::string>> allowed_advisers;
+
+    // Optional: can this adviser ever legitimately produce a Plan
+    // (Shape 1, {"steps": [...]}) at all? Defaults to true (unrestricted —
+    // every existing product Suite needs this). Some advisers (e.g. a
+    // test-only one whose contract is "always respond with a fixed Shape 2,
+    // never a Plan, under any circumstances") should never be allowed to
+    // emit Shape 1 regardless of what target_type/command a hallucinated
+    // step might use — allowed_advisers alone doesn't cover this, since it
+    // only constrains target_type:"adviser" steps, not target_type:"worker"
+    // ones (a hallucinated worker-target step sidesteps that check
+    // entirely, as observed in practice). Enforced in orchestrator.cpp's
+    // plan_ready handler, before allowed_advisers is even checked: if
+    // false, ANY non-empty "steps" array in this adviser's response gets
+    // the whole Plan rejected outright.
+    bool can_produce_plan = true;
   };
 
   struct RegisteredExecutor

@@ -70,7 +70,7 @@ public:
   Master &operator= (const Master &) = delete;
 
   // Allow unit tests to invoke private select_adviser() and to inject a
-  // fake LLM response function (llm_fn_, ADR-033 Step 2 disambiguation)
+  // fake LLM response function (llm_fn_, used by run_digest_pass — ADR-012)
   // before any detached LLM thread is started. No public setter is
   // exposed for llm_fn_; this friend struct is the sole access point.
   friend struct MasterSelectInvoker;
@@ -117,10 +117,29 @@ private:
   // LLM helpers (called inside detached threads)
   // ---------------------------------------------------------------------------
 
-  // Use LLM to select the best Adviser for a job goal.
-  // Returns adviser_id or empty string on failure.
-  std::string select_adviser (const std::string &job_id,
-                              const std::string &goal);
+  // Bundles the deterministic adviser_id decision together with this
+  // job's mandatory Digest Pass output (ADR-012). Both come out of the
+  // same detached-thread pass (ADR-033 Amendment Note 3) — never two
+  // separate LLM round-trips.
+  struct SelectionResult
+  {
+    std::string adviser_id; // final decision; empty only on hard failure
+                            // (e.g. no domain match and no 'planning'
+                            // adviser registered — mirrors prior behavior)
+    DigestResult digest;    // digested_problem/deliverable_kind always
+                            // populated; digest.adviser_id_suggestion must
+                            // NOT be read by callers — adviser_id above is
+                            // already the final, validated decision
+  };
+
+  // ADR-033 (Steps 0-3) + ADR-012 (Digest Pass, Amendment Note 3): resolve
+  // this job's Adviser and run its mandatory Digest Pass in one detached
+  // thread. `known_adviser_id` is Step 0's input (already resolved by
+  // Orchestrator from an explicit job.submit adviser_id or a continuation
+  // owner lookup, ADR-038) — empty if neither source produced a value.
+  SelectionResult select_adviser (const std::string &job_id,
+                                  const std::string &goal,
+                                  const std::string &known_adviser_id);
 
   // Use LLM to review a plan.
   // Returns empty string on approval, rejection reason otherwise.
@@ -135,13 +154,19 @@ private:
   // Build adviser list context for LLM prompt.
   std::string build_adviser_context () const;
 
-  // ADR-033: disambiguate among multiple domain candidates (Step 2)
-  std::string llm_disambiguate_adviser (
-      const std::string &goal,
+  // ADR-012 (amended) + ADR-033 Amendment Note 3: the mandatory Digest
+  // Pass — exactly one LLM call, always issued. `candidates` is non-empty
+  // ONLY when Step 1 yielded more than one candidate and the caller needs
+  // adviser_id_suggestion to be meaningful; pass an empty vector in every
+  // other case (Step 0 resolved; Step 1 yielded 0 or 1 candidates) — the
+  // response's adviser_id_suggestion field will still be present but must
+  // not be consulted by the caller in that case.
+  DigestResult run_digest_pass (
+      const std::string &job_id, const std::string &goal,
       const std::vector<RegisteredAdviser> &candidates) const;
 
   // Test seam – allow injection of a fake LLM response for disambiguation.
-  // If set, llm_disambiguate_adviser uses this instead of llm_.complete().
+  // If set, run_digest_pass uses this instead of llm_.complete().
   // Private, and reachable only through MasterSelectInvoker (see friend
   // declaration above) — matches the existing access pattern used for
   // invoking select_adviser() from tests. No public setter is exposed:

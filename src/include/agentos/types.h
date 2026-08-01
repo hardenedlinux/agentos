@@ -302,6 +302,19 @@ namespace agentos
     std::optional<std::string> revoked_reason;
   };
 
+  // ADR-012 (amended) — Master's Digest Pass output. Always populated
+  // once per job.submit, regardless of Step 0/1 outcome (ADR-033
+  // Amendment Note 3). `adviser_id_suggestion` is only meaningful — and
+  // must only be read — when the caller did not already have a known
+  // adviser_id from Step 0; a caller that already knows the adviser must
+  // not parse this field at all, not merely prefer the known value.
+  struct DigestResult
+  {
+    std::string digested_problem;    // rewritten goal for downstream Advisers
+    std::string deliverable_kind = "result"; // "artifact" | "result"
+    std::string adviser_id_suggestion;       // conditionally read — see above
+  };
+
   // ADR-022 — Pipeline Plan (Master‑generated, serial steps)
   struct PipelinePlanStep
   {

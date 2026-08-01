@@ -179,6 +179,12 @@ namespace agentos
     // within an already-selected pipeline.
     void set_job_adviser_id (const std::string &job_id,
                              const std::string &adviser_id);
+    // ADR-012 (amended): records this job's Digest Pass classification —
+    // "artifact" | "result" — consumed by Orchestrator's post-Forge-
+    // promotion dispatch decision (ADR-031 §12). Set once, at the same
+    // spawn_adviser point set_job_adviser_id already fires from.
+    void set_job_deliverable_kind (const std::string &job_id,
+                                   const std::string &deliverable_kind);
     std::optional<Job> load_job (const std::string &id);
     std::vector<Job> load_jobs (std::optional<std::string_view> type_filter,
                                 std::optional<std::string_view> phase_filter,

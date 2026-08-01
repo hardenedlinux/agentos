@@ -382,6 +382,12 @@ namespace agentos
         "ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT '0'");
       // Suite-ADR-001 §B follow-up: which adviser this job was routed to.
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN adviser_id TEXT");
+      // ADR-012 (amended): Master's Digest Pass classification for this
+      // job — "artifact" | "result". NULL/absent is treated as "result"
+      // by every reader (row_to_job, cmd_job_status), matching
+      // DigestResult's own default — this keeps existing rows and any
+      // reader that doesn't SELECT this column behaviorally unchanged.
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN deliverable_kind TEXT");
     }
 
     // ADR‑025: extend human_reviews with type / job_id
@@ -871,6 +877,14 @@ namespace agentos
         && sqlite3_column_type (stmt, 21) != SQLITE_NULL)
       j.adviser_id = column_text_or_empty (stmt, 21);
 
+    // deliverable_kind (column 22) — present only when SELECTed (load_job),
+    // same conditional pattern as adviser_id above. NULL/absent stays
+    // unset (nullopt); callers (cmd_job_status, forge_complete handling)
+    // treat nullopt as "result", matching DigestResult's own default.
+    if (sqlite3_column_count (stmt) > 22
+        && sqlite3_column_type (stmt, 22) != SQLITE_NULL)
+      j.deliverable_kind = column_text_or_empty (stmt, 22);
+
     return j;
   }
 
@@ -1110,7 +1124,7 @@ namespace agentos
              max_repairs, current_repairs,
              reviewer_id, acceptance_criteria, last_feedback,
              timer_id, interval_s, starts_at, last_run_at, next_run_at,
-             user_id, adviser_id
+             user_id, adviser_id, deliverable_kind
       FROM jobs WHERE id = ?
     )"));
     if (!stmt.s)
@@ -1669,6 +1683,24 @@ namespace agentos
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] set_job_adviser_id: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  void Database::set_job_deliverable_kind (const std::string &job_id,
+                                           const std::string &deliverable_kind)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE jobs SET deliverable_kind = ? WHERE id = ?"));
+    if (!stmt.s)
+      return;
+
+    sqlite3_bind_text (stmt, 1, deliverable_kind.c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_job_deliverable_kind: {}",
                      sqlite3_errmsg (db_));
   }
 

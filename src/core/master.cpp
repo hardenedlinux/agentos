@@ -108,8 +108,8 @@ namespace agentos
     const std::string job_id = msg.job_id;
 
     // Parse goal (and, if present, a known_adviser_id already resolved by
-    // Orchestrator via continuation lookup — see cmd_job_submit) from
-    // payload.
+    // Orchestrator via explicit adviser_id or continuation lookup — see
+    // cmd_job_submit) from payload.
     rapidjson::Document doc;
     std::string goal;
     std::string known_adviser_id;
@@ -134,58 +134,23 @@ namespace agentos
       return;
     }
 
-    // Continuation-aware routing (Suite-ADR-001 §B): Orchestrator already
-    // knows which adviser this job belongs to, so skip domain-token
-    // matching and the Step-2 LLM disambiguation call entirely — no thread
-    // to detach, no LLM round-trip, just hand the known answer straight to
-    // the same internal event handle_adviser_selected already expects.
-    // Still validated against the Registry first: a continuation row can
-    // outlive its adviser (revoked/removed between the row's creation and
-    // this follow-up) — handle_adviser_selected itself only checks for an
-    // empty adviser_id, not whether it's still actually registered, so an
-    // unvalidated forward here would hand Orchestrator a dead id instead
-    // of falling back to normal selection the way a stale/mismatched
-    // continuation already degrades gracefully elsewhere.
-    if (!known_adviser_id.empty ()
-        && registry_.find_adviser_by_id (known_adviser_id))
-    {
-      spdlog::info ("[master] job {} routed via known continuation owner "
-                   "'{}', skipping domain selection",
-                   job_id, known_adviser_id);
+    spdlog::info ("[master] job {} submitted, running Digest Pass", job_id);
 
-      rapidjson::StringBuffer buf;
-      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
-      w.StartObject ();
-      w.Key ("_internal");
-      w.String ("adviser_selected");
-      w.Key ("job_id");
-      w.String (job_id.c_str ());
-      w.Key ("adviser_id");
-      w.String (known_adviser_id.c_str ());
-      w.Key ("goal");
-      w.String (goal.c_str ());
-      w.EndObject ();
-
-      MasterEvent result;
-      result.kind = MasterEvent::Kind::ScheduledTask;
-      result.job_id = job_id;
-      result.payload_json = buf.GetString ();
-      enqueue (std::move (result));
-      return;
-    }
-    if (!known_adviser_id.empty ())
-      spdlog::warn ("[master] job {} carried known_adviser_id '{}' but it "
-                   "is no longer registered — falling back to normal "
-                   "domain selection",
-                   job_id, known_adviser_id);
-
-    spdlog::info ("[master] job {} submitted, selecting adviser", job_id);
-
-    // Detach LLM thread — result enqueued back to Master via ScheduledTask.
+    // ADR-012 (amended): the Digest Pass always runs — exactly one
+    // detached-thread LLM call per job, regardless of whether
+    // known_adviser_id is already resolved. This is deliberate: Master's
+    // own skill/prompt is expected to be iterated on repeatedly, and every
+    // job must exercise the same code path so prompt changes are validated
+    // against the full traffic mix, not just whatever happens not to
+    // short-circuit around it. select_adviser() below owns Steps 0-3
+    // (ADR-033) AND the mandatory Digest Pass call (ADR-012, folding in
+    // the former Step 2 disambiguation per Amendment Note 3) as a single
+    // unit — there is exactly one thread, one LLM round-trip, regardless
+    // of which branch is taken internally.
     std::thread (
-      [this, job_id, goal] ()
+      [this, job_id, goal, known_adviser_id] ()
       {
-        const std::string adviser_id = select_adviser (job_id, goal);
+        SelectionResult sel = select_adviser (job_id, goal, known_adviser_id);
 
         // Build internal result payload.
         rapidjson::StringBuffer buf;
@@ -196,9 +161,13 @@ namespace agentos
         w.Key ("job_id");
         w.String (job_id.c_str ());
         w.Key ("adviser_id");
-        w.String (adviser_id.c_str ());
+        w.String (sel.adviser_id.c_str ());
         w.Key ("goal");
         w.String (goal.c_str ());
+        w.Key ("digested_problem");
+        w.String (sel.digest.digested_problem.c_str ());
+        w.Key ("deliverable_kind");
+        w.String (sel.digest.deliverable_kind.c_str ());
         w.EndObject ();
 
         MasterEvent result;
@@ -231,6 +200,17 @@ namespace agentos
     const std::string goal = doc.HasMember ("goal") && doc["goal"].IsString ()
                                ? doc["goal"].GetString ()
                                : "";
+    // ADR-012: Digest Pass output, always present on this internal event
+    // now (handle_job_submit builds it unconditionally). Defaults mirror
+    // DigestResult's own defaults in case of any malformed payload.
+    const std::string digested_problem
+      = doc.HasMember ("digested_problem") && doc["digested_problem"].IsString ()
+          ? doc["digested_problem"].GetString ()
+          : goal;
+    const std::string deliverable_kind
+      = doc.HasMember ("deliverable_kind") && doc["deliverable_kind"].IsString ()
+          ? doc["deliverable_kind"].GetString ()
+          : "result";
 
     if (adviser_id.empty ())
     {
@@ -244,7 +224,8 @@ namespace agentos
       return;
     }
 
-    spdlog::info ("[master] job {} → adviser {}", job_id, adviser_id);
+    spdlog::info ("[master] job {} → adviser {} (deliverable_kind={})",
+                 job_id, adviser_id, deliverable_kind);
 
     // Tell Orchestrator to spawn this Adviser.
     OrchestratorEvent ev;
@@ -261,6 +242,10 @@ namespace agentos
     w.String (adviser_id.c_str ());
     w.Key ("goal");
     w.String (goal.c_str ());
+    w.Key ("digested_problem");
+    w.String (digested_problem.c_str ());
+    w.Key ("deliverable_kind");
+    w.String (deliverable_kind.c_str ());
     w.EndObject ();
     ev.payload_json = buf.GetString ();
     send_to_orchestrator_ (std::move (ev));
@@ -495,9 +480,34 @@ namespace agentos
   // LLM helpers
   // ---------------------------------------------------------------------------
 
-  std::string Master::select_adviser (const std::string &job_id,
-                                      const std::string &goal)
+  Master::SelectionResult
+  Master::select_adviser (const std::string &job_id, const std::string &goal,
+                          const std::string &known_adviser_id)
   {
+    // Step 0 — known_adviser_id short-circuit (ADR-033 §1 Step 0).
+    // Still validated against the Registry first: a continuation row (or
+    // an explicit job.submit adviser_id) can outlive its adviser
+    // (revoked/removed) — an unvalidated forward would hand Orchestrator a
+    // dead id instead of falling back to normal selection the way a
+    // stale/mismatched continuation already degrades gracefully elsewhere.
+    if (!known_adviser_id.empty ()
+        && registry_.find_adviser_by_id (known_adviser_id))
+    {
+      spdlog::info ("[master] job {} routed via known adviser/continuation "
+                    "owner '{}', skipping domain selection",
+                    job_id, known_adviser_id);
+      // ADR-012 Amendment: Digest Pass still runs — no candidates, since
+      // selection is already decided; its adviser_id_suggestion (if any)
+      // must not be read here.
+      DigestResult digest = run_digest_pass (job_id, goal, {});
+      return SelectionResult{known_adviser_id, std::move (digest)};
+    }
+    if (!known_adviser_id.empty ())
+      spdlog::warn ("[master] job {} carried known_adviser_id '{}' but it "
+                   "is no longer registered — falling back to normal "
+                   "domain selection",
+                   job_id, known_adviser_id);
+
     // Step 1: tokenize goal (lowercase alpha‑numeric tokens)
     std::vector<std::string> tokens;
     {
@@ -527,42 +537,58 @@ namespace agentos
         // Fallback to built-in planning — but only if it actually exists in
         // the Registry. ADR-033 assumes 'planning' is always seeded
         // (ADR-018 seed_if_absent), but that assumption doesn't hold in a
-        // deployment/test with an empty Registry. Blindly returning the
-        // literal "planning" here would make handle_adviser_selected treat
-        // selection as successful (it only checks for an empty string) even
-        // though no such adviser is registered, silently skipping the
-        // job_failed path this exact scenario is supposed to take.
+        // deployment/test with an empty Registry.
         const auto all = registry_.all_advisers ();
         const bool planning_exists
           = std::any_of (all.begin (), all.end (),
                           [] (const RegisteredAdviser &a)
                           { return a.id.value () == "planning"; });
 
+        // ADR-012 Amendment: Digest Pass still runs even on this
+        // deterministic-fallback/failure path — no candidates to
+        // disambiguate, but digestion/deliverable_kind must exist for
+        // every job regardless of outcome.
+        DigestResult digest = run_digest_pass (job_id, goal, {});
+
         if (!planning_exists)
           {
             spdlog::error ("[master] job {} no domain match and no "
                            "'planning' adviser registered",
                            job_id);
-            return "";
+            return SelectionResult{"", std::move (digest)};
           }
 
         spdlog::info ("[master] job {} no domain match, selecting 'planning'", job_id);
-        return "planning";
+        return SelectionResult{"planning", std::move (digest)};
       }
 
     if (candidates.size () == 1)
-      return candidates[0].id.value ();
+    {
+      DigestResult digest = run_digest_pass (job_id, goal, {});
+      return SelectionResult{candidates[0].id.value (), std::move (digest)};
+    }
 
-    // Step 2 — bounded LLM disambiguation
-    std::string llm_choice = llm_disambiguate_adviser (goal, candidates);
-    if (!llm_choice.empty ())
-      return llm_choice;
+    // Step 2 (folded into the mandatory Digest Pass, ADR-033 Amendment
+    // Note 3) — bounded LLM disambiguation, one output field of the same
+    // call that also produces digested_problem/deliverable_kind.
+    DigestResult digest = run_digest_pass (job_id, goal, candidates);
+
+    if (!digest.adviser_id_suggestion.empty ())
+    {
+      for (const auto &c : candidates)
+        if (c.id.value () == digest.adviser_id_suggestion)
+          return SelectionResult{digest.adviser_id_suggestion,
+                                 std::move (digest)};
+      spdlog::warn ("[master] Digest Pass adviser_id_suggestion '{}' is "
+                    "not in the candidate set — ignoring",
+                    digest.adviser_id_suggestion);
+    }
 
     // Step 3 — deterministic fallback (candidates already sorted)
-    spdlog::warn ("[master] job {} LLM disambiguation failed, "
+    spdlog::warn ("[master] job {} disambiguation unresolved, "
                    "fallback to {} (priority desc, id asc)",
                    job_id, candidates[0].id.value ());
-    return candidates[0].id.value ();
+    return SelectionResult{candidates[0].id.value (), std::move (digest)};
   }
 
   std::string Master::review_plan (const std::string &job_id,
@@ -692,48 +718,80 @@ namespace agentos
     return buf.GetString ();
   }
 
-  // ADR-033: bounded LLM disambiguation (Step 2) — returns empty on failure
-  std::string Master::llm_disambiguate_adviser (
-      const std::string &goal, const std::vector<RegisteredAdviser> &candidates) const
+  // ADR-012 (amended) + ADR-033 Amendment Note 3: the mandatory Digest
+  // Pass. Always issues exactly one LLM call. `candidates` non-empty only
+  // when the caller wants adviser_id_suggestion to be meaningful (Step 1
+  // yielded >1 candidates and Step 0 did not resolve); empty otherwise —
+  // the response's adviser_id_suggestion field is still populated by the
+  // model but the caller must not consult it in that case.
+  DigestResult Master::run_digest_pass (
+      const std::string &job_id, const std::string &goal,
+      const std::vector<RegisteredAdviser> &candidates) const
   {
-    // Build user message as per ADR‑033
-    std::string user_msg = "Goal: " + goal + "\n\nCandidates:\n";
-    for (const auto &c : candidates)
+    std::string user_msg = "Goal: " + goal;
+    if (!candidates.empty ())
     {
-      user_msg += "- " + c.id.value () + ": ";
-      // Prefer the manifest's natural-language description — this is the
-      // actual signal ADR-033 intends for disambiguation. `name` is just
-      // meta.id repeated (see parse_adviser_manifest_toml), so it adds
-      // nothing beyond what the classifier already has in the id itself.
-      if (!c.description.empty ())
-        user_msg += c.description;
-      else if (!c.name.empty ())
-        user_msg += c.name;
-      if (!c.domains.empty ())
-        {
-          user_msg += " (domains: ";
-          for (size_t i = 0; i < c.domains.size (); ++i)
-            {
-              if (i)
-                user_msg += ", ";
-              user_msg += c.domains[i];
-            }
-          user_msg += ")";
-        }
-      user_msg += "\n";
+      user_msg += "\n\nCandidates:\n";
+      for (const auto &c : candidates)
+      {
+        user_msg += "- " + c.id.value () + ": ";
+        // Prefer the manifest's natural-language description — this is
+        // the actual signal ADR-033 intends for disambiguation. `name` is
+        // just meta.id repeated (see parse_adviser_manifest_toml), so it
+        // adds nothing beyond what the classifier already has in the id
+        // itself.
+        if (!c.description.empty ())
+          user_msg += c.description;
+        else if (!c.name.empty ())
+          user_msg += c.name;
+        if (!c.domains.empty ())
+          {
+            user_msg += " (domains: ";
+            for (size_t i = 0; i < c.domains.size (); ++i)
+              {
+                if (i)
+                  user_msg += ", ";
+                user_msg += c.domains[i];
+              }
+            user_msg += ")";
+          }
+        user_msg += "\n";
+      }
     }
 
     LlmRequest req;
     req.system_prompt
-      = "You select exactly one adviser id from a candidate list.\n"
-        "Respond with only a JSON object: {\"selected\": \"<adviser_id>\"}.\n"
+      = "You are Master's Digest Pass for an agent orchestration system. "
+        "For every job you must: "
+        "1) produce a concise restatement of the user's goal that a "
+        "downstream agent can act on directly (\"digested_problem\"); "
+        "2) classify \"deliverable_kind\" as exactly \"artifact\" (the "
+        "user wants a generated artifact itself — e.g. source code, a "
+        "document, an image — not the result of running it against real "
+        "input) or \"result\" (the user wants the output of running some "
+        "capability against real input); "
+        "3) if a Candidates list is provided below, select exactly one "
+        "adviser id from it as \"adviser_id_suggestion\"; if no Candidates "
+        "list is provided, set \"adviser_id_suggestion\" to an empty "
+        "string.\n"
+        "Respond with only a JSON object: {\"digested_problem\": \"...\", "
+        "\"deliverable_kind\": \"artifact\"|\"result\", "
+        "\"adviser_id_suggestion\": \"...\"}. "
         "No explanation, no markdown, no other text.";
     req.user_prompt = user_msg;
-    req.max_tokens = 30;
+    req.max_tokens = 300;
 
-    auto result = llm_fn_ ? llm_fn_(req) : llm_.complete (req);
+    DigestResult digest; // deliverable_kind defaults to "result" (fail-open)
+
+    auto result = llm_fn_ ? llm_fn_ (req) : llm_.complete (req);
     if (!result.ok)
-      return {};
+    {
+      spdlog::warn ("[master] Digest Pass LLM call failed for job {}, "
+                    "using raw goal and default classification",
+                    job_id);
+      digest.digested_problem = goal;
+      return digest;
+    }
 
     // Strip markdown fence if present
     std::string content = result.value.content;
@@ -752,22 +810,37 @@ namespace agentos
       }
 
     rapidjson::Document doc;
-    if (doc.Parse (content.c_str ()).HasParseError ()
-        || !doc.IsObject ()
-        || !doc.HasMember ("selected")
-        || !doc["selected"].IsString ())
-      return {};
+    if (doc.Parse (content.c_str ()).HasParseError () || !doc.IsObject ())
+    {
+      spdlog::warn ("[master] Digest Pass returned unparseable response "
+                    "for job {}, using raw goal and default classification",
+                    job_id);
+      digest.digested_problem = goal;
+      return digest;
+    }
 
-    const std::string sel = doc["selected"].GetString ();
-    for (const auto &c : candidates)
-      if (c.id.value () == sel)
-        return sel;
+    digest.digested_problem
+      = (doc.HasMember ("digested_problem") && doc["digested_problem"].IsString ())
+          ? doc["digested_problem"].GetString ()
+          : goal;
 
-    // LLM returned an adviser_id not in the candidate set → fallback
-    spdlog::warn ("[master] LLM disambiguation returned '{}' which is not "
-                  "in the candidate set — ignoring",
-                  sel);
-    return {};
+    if (doc.HasMember ("deliverable_kind") && doc["deliverable_kind"].IsString ())
+    {
+      const std::string dk = doc["deliverable_kind"].GetString ();
+      if (dk == "artifact" || dk == "result")
+        digest.deliverable_kind = dk;
+      else
+        spdlog::warn ("[master] Digest Pass returned unrecognized "
+                      "deliverable_kind '{}' for job {}, defaulting to "
+                      "'result'",
+                      dk, job_id);
+    }
+
+    if (doc.HasMember ("adviser_id_suggestion")
+        && doc["adviser_id_suggestion"].IsString ())
+      digest.adviser_id_suggestion = doc["adviser_id_suggestion"].GetString ();
+
+    return digest;
   }
 
 } // namespace agentos

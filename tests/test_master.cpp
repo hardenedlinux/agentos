@@ -25,7 +25,9 @@
  *
  * Non-LLM coverage (MasterTest):
  *   - JobSubmit with no advisers registered → job_failed
- *   - JobSubmit with exactly one adviser → select_adviser skips LLM,
+ *   - JobSubmit with exactly one adviser → select_adviser skips the
+ *     selection sub-task's LLM disambiguation branch (still runs the
+ *     mandatory Digest Pass, ADR-012 — see MasterSelectInvoker below),
  *     directly forwards spawn_adviser
  *   - JobSubmit with missing goal → job_failed immediately (no thread)
  *   - AdviserFailed → job_failed
@@ -53,6 +55,61 @@
 
 namespace fs = std::filesystem;
 using namespace agentos;
+
+namespace agentos
+{
+  // MasterSelectInvoker — test-only friend access point (declared as a
+  // friend in master.h; defined here since no test currently needed it
+  // before ADR-012's mandatory Digest Pass made Master::llm_fn_ injection
+  // necessary for tests that must not depend on real network I/O).
+  //
+  // MUST live in namespace agentos: an unqualified `friend struct X;`
+  // inside a class that is itself inside namespace agentos injects X as
+  // agentos::X (not ::X) if no matching declaration is already visible
+  // at that point. Defining this struct at file/global scope instead —
+  // an earlier version of this file did — silently creates a distinct,
+  // unrelated ::MasterSelectInvoker with no actual friendship, which
+  // compiles fine right up until it tries to touch anything private and
+  // fails with "is private within this context" on every member.
+  //
+  // Exposes exactly two things test code needs and production code must
+  // never be able to reach through a public API:
+  //   - install_fake_llm(): inject a synchronous, instant fake for llm_fn_
+  //     so a test doesn't pay for (or depend on) a real LLM round-trip.
+  //   - call_select_adviser(): invoke the private select_adviser() directly,
+  //     for tests that want to assert on SelectionResult without going
+  //     through the full Actor message-queue/thread-detach path.
+  struct MasterSelectInvoker
+  {
+    static void install_fake_llm (
+        Master &m, std::function<Result<LlmResponse> (const LlmRequest &)> fn)
+    {
+      m.llm_fn_ = std::move (fn);
+    }
+
+    static Master::SelectionResult
+    call_select_adviser (Master &m, const std::string &job_id,
+                         const std::string &goal,
+                         const std::string &known_adviser_id)
+    {
+      return m.select_adviser (job_id, goal, known_adviser_id);
+    }
+  };
+} // namespace agentos
+
+// A fixed, instant fake Digest Pass response — never touches the network.
+// Used by tests that only care about non-LLM behavior (adviser routing,
+// job_failed paths) and would otherwise be at the mercy of a real
+// LlmProxy's timeout/retry timing now that Master::select_adviser()
+// always issues a Digest Pass call regardless of branch (ADR-012).
+static Result<LlmResponse>
+fake_digest_response (const LlmRequest &)
+{
+  LlmResponse resp;
+  resp.content
+    = R"({"digested_problem":"test","deliverable_kind":"result","adviser_id_suggestion":""})";
+  return Result<LlmResponse> (resp);
+}
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -87,7 +144,16 @@ protected:
   }
 
   // Construct registry/llm/master after any DB seeding is done by the test.
-  void start_master ()
+  // fake_llm defaults to the instant, no-network Digest Pass stub above —
+  // ADR-012 made every select_adviser() call issue a Digest Pass
+  // unconditionally, so any non-LLM-focused test that used to reach zero
+  // or one candidate and skip the LLM entirely now needs this seam or it
+  // pays for (and depends on the timing of) a real network round-trip.
+  // Pass nullptr explicitly to opt out (MasterLlmTest does, to exercise
+  // the real LlmClient/LlmProxy path end-to-end).
+  void start_master (
+      std::function<Result<LlmResponse> (const LlmRequest &)> fake_llm
+      = fake_digest_response)
   {
     registry_ = std::make_unique<Registry> ();
     registry_->init (*db_);
@@ -102,6 +168,9 @@ protected:
                                     orch_events_.push_back (std::move (ev));
                                     cv_.notify_all ();
                                   });
+
+    if (fake_llm)
+      MasterSelectInvoker::install_fake_llm (*master_, std::move (fake_llm));
 
     master_->start ();
   }
@@ -185,7 +254,11 @@ TEST_F (MasterTest, JobSubmit_MissingGoal_JobFailedImmediately)
 }
 
 // ---------------------------------------------------------------------------
-// JobSubmit, exactly one adviser → select_adviser skips LLM, spawn_adviser
+// JobSubmit, exactly one adviser → deterministic selection, spawn_adviser.
+// The mandatory Digest Pass (ADR-012) still fires — via the injected fake
+// so the assertion below stays about routing, not LLM timing — but its
+// adviser_id_suggestion is never consulted, since Step 1 already resolved
+// to a single candidate.
 // ---------------------------------------------------------------------------
 
 TEST_F (MasterTest, JobSubmit_SingleAdviser_SkipsLlmAndSpawns)
@@ -250,12 +323,22 @@ TEST_F (MasterTest, AdviserFailed_JobFailed)
 // ---------------------------------------------------------------------------
 // on_message never blocks — multiple JobSubmits processed promptly even
 // while detached LLM threads are (would be) in flight.
+//
+// Uses the fake Digest Pass installed by start_master()'s default — with
+// zero candidates (all advisers disabled) this still exercises
+// select_adviser()'s zero-candidate branch, which per ADR-012 now issues
+// a Digest Pass call same as every other branch; the fake makes that call
+// instant and network-free so 5 concurrent jobs aren't serialized through
+// LlmProxy's single worker thread waiting on a real (or really-timing-out)
+// HTTP round-trip.
 // ---------------------------------------------------------------------------
 
 TEST_F (MasterTest, OnMessage_DoesNotBlock_ProcessesMultipleQuickly)
 {
-  disable_builtin_advisers (); // 0 advisers → each JobSubmit fails fast,
-                               // no LLM thread
+  disable_builtin_advisers (); // 0 advisers → each JobSubmit still runs one
+                               // Digest Pass call (ADR-012), but the fake
+                               // installed by start_master() makes it
+                               // instant and network-free
   start_master ();
 
   for (int i = 0; i < 5; ++i)
@@ -270,6 +353,73 @@ TEST_F (MasterTest, OnMessage_DoesNotBlock_ProcessesMultipleQuickly)
   ASSERT_TRUE (wait_orch (5, 2000));
   std::lock_guard<std::mutex> lk (mtx_);
   EXPECT_EQ (orch_events_.size (), 5u);
+}
+
+// ---------------------------------------------------------------------------
+// select_adviser() direct-call coverage (ADR-012): the Digest Pass always
+// runs, and its adviser_id_suggestion must never be consulted once the
+// adviser is already known — verified here by installing a fake that
+// deliberately misbehaves and suggests an out-of-set/irrelevant adviser
+// id, then asserting the known_adviser_id still wins outright.
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, SelectAdviser_KnownAdviserId_IgnoresMisbehavingSuggestion)
+{
+  disable_builtin_advisers ();
+
+  db_->insert_agent ("adviser-a", "adviser", "", R"(
+[meta]
+id = "adviser-a"
+domains = ["alpha"]
+)");
+  db_->insert_agent ("adviser-b", "adviser", "", R"(
+[meta]
+id = "adviser-b"
+domains = ["beta"]
+)");
+
+  registry_ = std::make_unique<Registry> ();
+  registry_->init (*db_);
+  llm_proxy_ = std::make_unique<LlmProxy> (1, 5);
+  llm_client_ = std::make_unique<LlmClient> (*llm_proxy_, config_.llm);
+  master_ = std::make_unique<Master> (
+      *llm_client_, *registry_, [this] (OrchestratorEvent ev)
+      {
+        std::lock_guard<std::mutex> lk (mtx_);
+        orch_events_.push_back (std::move (ev));
+        cv_.notify_all ();
+      });
+
+  // Deliberately misbehaving fake: known_adviser_id below will be
+  // "adviser-a", but this fake suggests "adviser-b" anyway. A correct
+  // implementation must not even parse this field once known_adviser_id
+  // resolved — this test would still pass with a naive "read but prefer
+  // known value" implementation, but is the closest black-box check
+  // available without a code-path-level instrumentation hook.
+  MasterSelectInvoker::install_fake_llm (
+      *master_, [] (const LlmRequest &) -> Result<LlmResponse>
+      {
+        LlmResponse resp;
+        resp.content = R"({"digested_problem":"x","deliverable_kind":)"
+                       R"("result","adviser_id_suggestion":"adviser-b"})";
+        return Result<LlmResponse> (resp);
+      });
+  // start() even though this test never enqueue()s through the Actor
+  // queue — TearDown() unconditionally calls stop(), and matching every
+  // other fixture's start/stop lifecycle avoids relying on stop()'s
+  // behavior when start() was never called.
+  master_->start ();
+
+  // Note: `auto`, not `Master::SelectionResult` — friendship isn't
+  // transitive. MasterSelectInvoker (a friend of Master) can return the
+  // type, but this test body is not itself a friend and cannot spell out
+  // the private nested type name directly to declare a variable of it.
+  auto sel = MasterSelectInvoker::call_select_adviser (
+      *master_, "job-known", "irrelevant text matching neither domain",
+      "adviser-a");
+
+  EXPECT_EQ (sel.adviser_id, "adviser-a");
+  EXPECT_EQ (sel.digest.deliverable_kind, "result");
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +448,10 @@ protected:
     unsetenv ("AGENTOS_ADVISER_API_KEY");
     MasterTest::TearDown ();
   }
+
+  // Opts out of MasterTest's default fake Digest Pass — these tests
+  // exercise the real LlmClient/LlmProxy path end-to-end deliberately.
+  void start_master_real_llm () { MasterTest::start_master (nullptr); }
 };
 
 // Two advisers registered → LLM must pick one of the two valid ids.
@@ -305,8 +459,8 @@ TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
 {
   // Both advisers share the "code" domain tag so the goal below produces
   // exactly two candidates (ADR-033 §1 Step 1), forcing selection into
-  // Step 2's bounded LLM disambiguation rather than short-circuiting on a
-  // single candidate or falling back to zero-candidate 'planning'.
+  // the Digest Pass's disambiguation sub-task rather than short-circuiting
+  // on a single candidate or falling back to zero-candidate 'planning'.
   disable_builtin_advisers ();
 
   // Advisers ship manifest.toml, not manifest.json (ADR-018) —
@@ -325,7 +479,7 @@ id = "code-writer-test"
 domains = ["code"]
 )");
 
-  start_master ();
+  start_master_real_llm ();
   ASSERT_EQ (registry_->all_advisers ().size (), 2u);
 
   MasterEvent ev;
@@ -356,7 +510,7 @@ domains = ["code"]
 // never a hard crash / empty payload.
 TEST_F (MasterLlmTest, WorkerExhausted_ProducesForgeDecisionOrFailure)
 {
-  start_master ();
+  start_master_real_llm ();
 
   MasterEvent ev;
   ev.kind = MasterEvent::Kind::WorkerExhausted;

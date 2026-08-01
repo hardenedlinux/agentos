@@ -55,6 +55,14 @@ namespace agentos
     // Absent for jobs that failed before an adviser was ever selected.
     std::optional<std::string> adviser_id;
 
+    // ADR-012 (amended): Master's Digest Pass classification for this job
+    // — "artifact" | "result". Set once, at the same spawn_adviser point
+    // adviser_id above is set (Database::set_job_deliverable_kind).
+    // Absent for jobs that failed before Digest Pass ran, or predating
+    // this field; every reader treats absence as "result" (matching
+    // DigestResult's own default), so this stays backward-compatible.
+    std::optional<std::string> deliverable_kind;
+
     // Embedded entity for type=scheduled (std::nullopt otherwise)
     std::optional<Schedule> schedule;
     // Embedded entity for type=loop (std::nullopt otherwise)

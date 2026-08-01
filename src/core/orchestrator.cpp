@@ -1044,6 +1044,14 @@ namespace agentos
       w.Key ("adviser_id");
       w.String (job->adviser_id->c_str ());
     }
+    // ADR-012 (amended) + ADR-039 §B: always present, defaults to
+    // "result" for jobs predating this field (matches DigestResult's own
+    // default and ActiveJob::deliverable_kind's default).
+    {
+      w.Key ("deliverable_kind");
+      w.String (job->deliverable_kind ? job->deliverable_kind->c_str ()
+                                       : "result");
+    }
     w.Key ("steps");
     w.StartArray ();
     for (const auto &s : steps)
@@ -1135,6 +1143,24 @@ namespace agentos
             spdlog::warn ("[orchestrator] job {}: bridge_hint.key '{}' "
                           "fails validation — dropping",
                           job_id, hint_key);
+          }
+          // ADR-037 amendment: "generated_code" is a daemon-authored
+          // reserved key (ADR-031 §12), not a step-declared one — it
+          // points at a promoted Worker's stable, shared source location
+          // (agentos_home()/workers/<agent_id>/worker_impl.py), which is
+          // deliberately outside this job's own output directory since
+          // the Worker may be reused by future jobs. It is therefore
+          // exempt from the absolute-path and containment checks below,
+          // which exist to constrain untrusted, step-declared paths.
+          else if (hint_key == "generated_code")
+          {
+            w.Key ("bridge_hint");
+            w.StartObject ();
+            w.Key ("key");
+            w.String (hint_key.c_str ());
+            w.Key ("path");
+            w.String (hint_path.c_str ());
+            w.EndObject ();
           }
           else if (fs::path (hint_path).is_absolute ())
           {
@@ -3572,6 +3598,21 @@ namespace agentos
       const std::string goal = doc.HasMember ("goal") && doc["goal"].IsString ()
                                  ? doc["goal"].GetString ()
                                  : "";
+      // ADR-012 (amended): Master's Digest Pass output, riding alongside
+      // the raw goal on this event. digested_problem is the primary input
+      // handed to the spawned Adviser below; goal remains available as a
+      // fallback (see the detached-thread user-prompt construction further
+      // down). deliverable_kind is persisted once here — the only place a
+      // job's entry Adviser is spawned — and consumed later by the
+      // forge_complete handler (ADR-031 §12).
+      const std::string digested_problem
+        = doc.HasMember ("digested_problem") && doc["digested_problem"].IsString ()
+            ? doc["digested_problem"].GetString ()
+            : goal;
+      const std::string deliverable_kind
+        = doc.HasMember ("deliverable_kind") && doc["deliverable_kind"].IsString ()
+            ? doc["deliverable_kind"].GetString ()
+            : "result";
 
       if (job_id.empty () || adviser_id.empty ())
       {
@@ -3583,6 +3624,7 @@ namespace agentos
       spdlog::info ("[orchestrator] spawning adviser {} for job {}", adviser_id,
                     job_id);
       db_.set_job_adviser_id (job_id, adviser_id);
+      db_.set_job_deliverable_kind (job_id, deliverable_kind);
 
       // Read skill.md as system prompt (ADR-018).
       auto home = agentos_home ();
@@ -3800,7 +3842,8 @@ namespace agentos
       // Detach LLM thread — never blocks Orchestrator event loop.
       // Captures by value; `this` is safe (Orchestrator outlives all threads).
       std::thread (
-        [this, job_id, goal, system_prompt = std::move (system_prompt),
+        [this, job_id, goal, digested_problem,
+         system_prompt = std::move (system_prompt),
          capability_list_str = std::move (capability_list_str),
          adviser_list_str = std::move (adviser_list_str),
          attached_assets_str = std::move (attached_assets_str),
@@ -3844,7 +3887,17 @@ namespace agentos
           if (has_consumed_continuation && !context_payload_consumed.empty ())
             user = "Context from previous interaction:\n"
                    + context_payload_consumed + "\n\n";
-          user += "Goal: " + goal + "\n\n";
+          // ADR-012 (amended): digested_problem is Master's Digest Pass
+          // rewrite of the goal and is the primary input; the original
+          // goal rides alongside it as a fallback field, not a
+          // replacement — if a given Digest Pass prompt version produces
+          // a poor digestion, the raw goal remains available to the
+          // Adviser (and to a human reviewing the job later) rather than
+          // being fully occluded by Master's rewritten version.
+          user += "Goal: " + digested_problem + "\n\n";
+          if (digested_problem != goal)
+            user += "Original user goal (verbatim, for reference): " + goal
+                   + "\n\n";
           user += capability_list_str + "\n";
           user += adviser_list_str + "\n";
           if (!attached_assets_str.empty ())
@@ -4272,6 +4325,13 @@ namespace agentos
         originating_goal = j->goal;
         if (j->adviser_id)
           originating_adviser_id = *j->adviser_id;
+        // ADR-012 (amended) + ADR-031 §12: carry this job's Digest Pass
+        // classification into the in-memory ActiveJob so the
+        // forge_complete handler can consult it without another DB round
+        // trip. job.deliverable_kind already defaults to "result", so a
+        // NULL column (job predates this field) is a no-op here.
+        if (j->deliverable_kind)
+          job.deliverable_kind = *j->deliverable_kind;
       }
       else
       {
@@ -4654,9 +4714,66 @@ namespace agentos
         auto it = active_jobs_.find (task_id);
         if (it != active_jobs_.end ())
         {
-          spdlog::info ("[orchestrator] forge_complete: resuming job {}",
-                        task_id);
-          dispatch_next_step (it->second);
+          ActiveJob &job = it->second;
+
+          // ADR-031 §12: a job whose Digest Pass (ADR-012) classified
+          // deliverable_kind as "artifact" wants the generated source
+          // itself, not the output of running it against invented input.
+          // Skip the normal "promote then execute" continuation and
+          // complete this step directly with a marker result plus the
+          // reserved generated_code bridge_hint instead.
+          if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ())
+          {
+            const std::string step_id = job.pending_steps.front ().step.id;
+
+            rapidjson::Document out_doc;
+            out_doc.SetObject ();
+            auto &alloc = out_doc.GetAllocator ();
+            out_doc.AddMember ("forge_generated", true, alloc);
+            out_doc.AddMember (
+              "agent_id", rapidjson::Value (worker_id.c_str (), alloc),
+              alloc);
+
+            const fs::path source_path
+              = agentos_home () / "workers" / worker_id / "worker_impl.py";
+            rapidjson::Value hint_obj (rapidjson::kObjectType);
+            hint_obj.AddMember (
+              "key", rapidjson::Value ("generated_code", alloc), alloc);
+            hint_obj.AddMember (
+              "path",
+              rapidjson::Value (source_path.string ().c_str (), alloc),
+              alloc);
+            out_doc.AddMember ("bridge_hint", std::move (hint_obj), alloc);
+
+            rapidjson::StringBuffer out_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
+            out_doc.Accept (out_w);
+            const std::string result_json = out_buf.GetString ();
+
+            spdlog::info (
+              "[orchestrator] forge_complete: job {} deliverable_kind="
+              "artifact, skipping execution of promoted worker {} — "
+              "returning generated_code hint instead",
+              task_id, worker_id);
+
+            db_.update_step_result (step_id, result_json);
+            job.last_step_result = result_json;
+            job.pending_steps.pop_front ();
+
+            notify ("job.step_changed",
+                    R"({"job_id":")" + task_id + R"(","status":"done"})");
+
+            if (job.pending_steps.empty ())
+              finish_job (task_id, /*success=*/true);
+            else
+              dispatch_next_step (job);
+          }
+          else
+          {
+            spdlog::info ("[orchestrator] forge_complete: resuming job {}",
+                          task_id);
+            dispatch_next_step (job);
+          }
         }
         else
         {

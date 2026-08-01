@@ -65,6 +65,12 @@ namespace agentos
                                           // injected as $prev_result into the next step
     int current_iteration = 0;            // loop jobs
     int current_repairs = 0;             // loop jobs
+    // ADR-012 (amended) + ADR-031 §12: this job's Digest Pass
+    // classification — "artifact" | "result". Loaded from
+    // db_.load_job()->deliverable_kind at plan_ready time; defaults to
+    // "result" so a job predating this field (or any load_job() miss)
+    // behaves exactly as before this change.
+    std::string deliverable_kind = "result";
   };
 
   // ---------------------------------------------------------------------------

@@ -4719,54 +4719,12 @@ namespace agentos
           // ADR-031 §12: a job whose Digest Pass (ADR-012) classified
           // deliverable_kind as "artifact" wants the generated source
           // itself, not the output of running it against invented input.
-          // Skip the normal "promote then execute" continuation and
-          // complete this step directly with a marker result plus the
-          // reserved generated_code bridge_hint instead.
+          // Skip the normal "promote then execute" continuation — same
+          // helper dispatch_next_step's already-registered-worker branch
+          // uses, so both code paths behave identically.
           if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ())
           {
-            const std::string step_id = job.pending_steps.front ().step.id;
-
-            rapidjson::Document out_doc;
-            out_doc.SetObject ();
-            auto &alloc = out_doc.GetAllocator ();
-            out_doc.AddMember ("forge_generated", true, alloc);
-            out_doc.AddMember (
-              "agent_id", rapidjson::Value (worker_id.c_str (), alloc),
-              alloc);
-
-            const fs::path source_path
-              = agentos_home () / "workers" / worker_id / "worker_impl.py";
-            rapidjson::Value hint_obj (rapidjson::kObjectType);
-            hint_obj.AddMember (
-              "key", rapidjson::Value ("generated_code", alloc), alloc);
-            hint_obj.AddMember (
-              "path",
-              rapidjson::Value (source_path.string ().c_str (), alloc),
-              alloc);
-            out_doc.AddMember ("bridge_hint", std::move (hint_obj), alloc);
-
-            rapidjson::StringBuffer out_buf;
-            rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
-            out_doc.Accept (out_w);
-            const std::string result_json = out_buf.GetString ();
-
-            spdlog::info (
-              "[orchestrator] forge_complete: job {} deliverable_kind="
-              "artifact, skipping execution of promoted worker {} — "
-              "returning generated_code hint instead",
-              task_id, worker_id);
-
-            db_.update_step_result (step_id, result_json);
-            job.last_step_result = result_json;
-            job.pending_steps.pop_front ();
-
-            notify ("job.step_changed",
-                    R"({"job_id":")" + task_id + R"(","status":"done"})");
-
-            if (job.pending_steps.empty ())
-              finish_job (task_id, /*success=*/true);
-            else
-              dispatch_next_step (job);
+            complete_step_as_generated_code (job, worker_id);
           }
           else
           {
@@ -4980,6 +4938,58 @@ namespace agentos
     return resolved;
   }
 
+  // ADR-031 §12: shared by forge_complete's promoted branch and
+  // dispatch_next_step's already-registered-worker branch — see
+  // orchestrator.h for why this must be one function, not two copies.
+  void Orchestrator::complete_step_as_generated_code (
+      ActiveJob &job, const std::string &agent_id)
+  {
+    if (job.pending_steps.empty ())
+      return;
+
+    const std::string step_id = job.pending_steps.front ().step.id;
+
+    rapidjson::Document out_doc;
+    out_doc.SetObject ();
+    auto &alloc = out_doc.GetAllocator ();
+    out_doc.AddMember ("forge_generated", true, alloc);
+    out_doc.AddMember (
+      "agent_id", rapidjson::Value (agent_id.c_str (), alloc), alloc);
+
+    const fs::path source_path
+      = agentos_home () / "workers" / agent_id / "worker_impl.py";
+    rapidjson::Value hint_obj (rapidjson::kObjectType);
+    hint_obj.AddMember (
+      "key", rapidjson::Value ("generated_code", alloc), alloc);
+    hint_obj.AddMember (
+      "path", rapidjson::Value (source_path.string ().c_str (), alloc),
+      alloc);
+    out_doc.AddMember ("bridge_hint", std::move (hint_obj), alloc);
+
+    rapidjson::StringBuffer out_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
+    out_doc.Accept (out_w);
+    const std::string result_json = out_buf.GetString ();
+
+    spdlog::info (
+      "[orchestrator] job {} deliverable_kind=artifact, skipping "
+      "execution of worker {} for step {} — returning generated_code "
+      "hint instead",
+      job.job_id, agent_id, step_id);
+
+    db_.update_step_result (step_id, result_json);
+    job.last_step_result = result_json;
+    job.pending_steps.pop_front ();
+
+    notify ("job.step_changed",
+            R"({"job_id":")" + job.job_id + R"(","status":"done"})");
+
+    // Handles both "more steps remain" (dispatches the next one) and
+    // "this was the last step" (job.pending_steps.empty() → finish_job)
+    // uniformly — no separate branch needed here.
+    dispatch_next_step (job);
+  }
+
   void Orchestrator::dispatch_next_step (ActiveJob &job)
   {
     if (job.pending_steps.empty ())
@@ -5056,6 +5066,21 @@ namespace agentos
                           + step.step.description + R"("})";
         send_to_master_ (std::move (me));
       }
+      return;
+    }
+
+    // ADR-031 §12: this job's Digest Pass (ADR-012) classified
+    // deliverable_kind as "artifact" — the user wants this capability's
+    // source code itself, not the output of running it against invented
+    // input. This applies regardless of whether `worker` was just
+    // promoted by Forge moments ago (that case is also handled in
+    // handle_master_decision's forge_complete branch, via the same
+    // complete_step_as_generated_code helper) or is an already-registered
+    // Worker reused from a prior job — deliverable_kind's effect must not
+    // depend on which of the two brought this Worker into existence.
+    if (job.deliverable_kind == "artifact")
+    {
+      complete_step_as_generated_code (job, worker->id.value ());
       return;
     }
 

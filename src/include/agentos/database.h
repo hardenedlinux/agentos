@@ -243,6 +243,16 @@ namespace agentos
     load_forge_pipeline_jobs (std::optional<ForgeStatus> status_filter
                               = std::nullopt,
                               int limit = 100);
+    // Amendment (forge progress surfaced to job.status): the most
+    // recently created forge_pipeline_jobs row for a given task_id (==
+    // job_id — ForgePipelineJob has no step_id column; a job's steps
+    // dispatch serially, so at most one is ever in flight at a time,
+    // making "most recent by created_at" the currently-relevant one
+    // regardless of how many earlier steps of this same job each had
+    // their own, now-terminal, Forge episode). Returns nullopt if this
+    // job has never triggered Forge.
+    std::optional<ForgePipelineJob>
+    load_latest_forge_pipeline_job_for_task (const std::string &task_id);
 
     // -- Agent / Capability tables --------------------------------------------
 

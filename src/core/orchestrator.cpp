@@ -1100,6 +1100,33 @@ namespace agentos
       w.Int (s.tokens_prompt);
       w.Key ("tokens_completion");
       w.Int (s.tokens_completion);
+
+      // Amendment (forge progress, for CMS/Bridge to render its own
+      // localized "working on it" copy — AgentOS itself never produces
+      // user-facing text here, only this coarse status label + counts).
+      // Only meaningful while the step itself hasn't reached a terminal
+      // status yet — once s.status is done/failed, the step's own
+      // result_json/error already tell the full story, and querying here
+      // would only turn up whatever this job's LAST Forge episode was
+      // (possibly from an earlier, unrelated step — see
+      // load_latest_forge_pipeline_job_for_task's docstring).
+      if (s.needs_forge && s.status != "done" && s.status != "failed")
+      {
+        auto forge_job = db_.load_latest_forge_pipeline_job_for_task (job_id);
+        if (forge_job)
+        {
+          w.Key ("forge_status");
+          w.StartObject ();
+          w.Key ("phase");
+          w.String (forge_status_to_phase (forge_job->status).c_str ());
+          w.Key ("attempt");
+          w.Int (forge_job->attempt);
+          w.Key ("max_attempts");
+          w.Int (forge_job->max_attempts);
+          w.EndObject ();
+        }
+      }
+
       w.EndObject ();
     }
     w.EndArray ();
@@ -3431,6 +3458,8 @@ namespace agentos
 
       rapidjson::Document doc;
       std::string result_json = "{}";
+      int step_tokens_prompt = 0;
+      int step_tokens_completion = 0;
       if (!doc.Parse (ev.payload_json.c_str ()).HasParseError ()
           && doc.IsObject () && doc.HasMember ("result"))
       {
@@ -3438,6 +3467,16 @@ namespace agentos
         rapidjson::Writer<rapidjson::StringBuffer> w (buf);
         doc["result"].Accept (w);
         result_json = buf.GetString ();
+
+        // Amendment: this step's own LLM token usage, set by
+        // dispatch_adviser_step — previously computed but discarded,
+        // leaving every target_type:"adviser" step's tokens permanently
+        // 0 in job.status's steps[] (ADR-039 §B).
+        if (doc.HasMember ("tokens_prompt") && doc["tokens_prompt"].IsInt ())
+          step_tokens_prompt = doc["tokens_prompt"].GetInt ();
+        if (doc.HasMember ("tokens_completion")
+            && doc["tokens_completion"].IsInt ())
+          step_tokens_completion = doc["tokens_completion"].GetInt ();
       }
 
       // ADR-038 post‑completion: check for "updated_context" in the
@@ -3526,6 +3565,8 @@ namespace agentos
       }
 
       db_.update_step_result (job.pending_steps.front ().step.id, result_json);
+      db_.update_step_tokens (job.pending_steps.front ().step.id,
+                              step_tokens_prompt, step_tokens_completion);
       job.last_step_result = result_json;
       job.pending_steps.pop_front ();
 
@@ -4722,9 +4763,12 @@ namespace agentos
           // Skip the normal "promote then execute" continuation — same
           // helper dispatch_next_step's already-registered-worker branch
           // uses, so both code paths behave identically.
-          if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ())
+          if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ()
+              && complete_step_as_generated_code (job, worker_id))
           {
-            complete_step_as_generated_code (job, worker_id);
+            // handled inside complete_step_as_generated_code, which
+            // already advanced the pipeline (dispatch_next_step or
+            // finish_job) — nothing further to do here.
           }
           else
           {
@@ -4941,11 +4985,31 @@ namespace agentos
   // ADR-031 §12: shared by forge_complete's promoted branch and
   // dispatch_next_step's already-registered-worker branch — see
   // orchestrator.h for why this must be one function, not two copies.
-  void Orchestrator::complete_step_as_generated_code (
+  bool Orchestrator::complete_step_as_generated_code (
       ActiveJob &job, const std::string &agent_id)
   {
     if (job.pending_steps.empty ())
-      return;
+      return false;
+
+    const fs::path source_path
+      = agentos_home () / "workers" / agent_id / "worker_impl.py";
+
+    // Not a reliable "was this Forge-generated" check via metadata (see
+    // orchestrator.h) — checking the file itself is the only signal that
+    // actually reflects reality. A hand-authored/Suite-bundled Worker
+    // (e.g. translation-pipeline's translate-reassemble) will not have
+    // this file, and has no sensible "here's the source" interpretation
+    // regardless of this job's deliverable_kind.
+    if (!fs::exists (source_path))
+    {
+      spdlog::info (
+        "[orchestrator] job {} deliverable_kind=artifact but worker {} "
+        "has no worker_impl.py at the expected Forge-promoted location "
+        "({}) — not a Forge-generated capability, falling back to normal "
+        "execution",
+        job.job_id, agent_id, source_path.string ());
+      return false;
+    }
 
     const std::string step_id = job.pending_steps.front ().step.id;
 
@@ -4956,8 +5020,6 @@ namespace agentos
     out_doc.AddMember (
       "agent_id", rapidjson::Value (agent_id.c_str (), alloc), alloc);
 
-    const fs::path source_path
-      = agentos_home () / "workers" / agent_id / "worker_impl.py";
     rapidjson::Value hint_obj (rapidjson::kObjectType);
     hint_obj.AddMember (
       "key", rapidjson::Value ("generated_code", alloc), alloc);
@@ -4988,6 +5050,7 @@ namespace agentos
     // "this was the last step" (job.pending_steps.empty() → finish_job)
     // uniformly — no separate branch needed here.
     dispatch_next_step (job);
+    return true;
   }
 
   void Orchestrator::dispatch_next_step (ActiveJob &job)
@@ -5080,8 +5143,11 @@ namespace agentos
     // depend on which of the two brought this Worker into existence.
     if (job.deliverable_kind == "artifact")
     {
-      complete_step_as_generated_code (job, worker->id.value ());
-      return;
+      if (complete_step_as_generated_code (job, worker->id.value ()))
+        return;
+      // else: not actually a Forge-generated capability (see
+      // complete_step_as_generated_code) — fall through to normal
+      // execution below, exactly as if deliverable_kind were "result".
     }
 
     // Generate run_id and build DispatchRequest.
@@ -5457,6 +5523,22 @@ namespace agentos
           w.String (job_id.c_str ());
           w.Key ("step_id");
           w.String (step_id.c_str ());
+          // Amendment: this step's own LLM usage — previously computed
+          // here (result.value.*) but discarded, leaving every
+          // target_type:"adviser" step's tokens_prompt/tokens_completion
+          // permanently 0 while the unrelated Planning-Adviser call that
+          // produced this job's Plan got its usage misattributed onto
+          // whichever step happened to be first in the Plan (see
+          // handle_master_decision's plan_ready handling, which stores
+          // planning_tokens_prompt/completion on job.pending_steps.front()
+          // at Plan-creation time — a Worker-target step, if the Plan's
+          // first step is one, showing nonzero tokens despite being
+          // deterministic non-LLM execution is that same pre-existing
+          // misattribution, not a bug introduced here).
+          w.Key ("tokens_prompt");
+          w.Int (result.value.prompt_tokens);
+          w.Key ("tokens_completion");
+          w.Int (result.value.completion_tokens);
           w.Key ("result");
           doc.Accept (w); // re-serialize the validated document, not the
                           // raw completion text — Parse() only guarantees
@@ -5610,11 +5692,61 @@ namespace agentos
   void Orchestrator::notify (const std::string &method,
                              const std::string &params_json)
   {
+    const std::string message = make_notification (method, params_json);
+
     GatewayEvent ev;
     ev.kind = GatewayEvent::Kind::Outbound;
     ev.outbound.identity = ""; // broadcast
-    ev.outbound.message = make_notification (method, params_json);
+    ev.outbound.message = message;
     send_to_gateway_ (std::move (ev));
+
+    // Amendment (Bridge event mailbox): also persist this same
+    // notification as a small JSON file under agentos_home()/events/.
+    // This is a true mailbox, not durable storage — low frequency
+    // (job.phase_changed/job.step_changed only), read-then-deleted by a
+    // single Bridge consumer, never read back by AgentOS itself. It
+    // exists purely so a Bridge that wasn't connected at the exact
+    // moment of the live broadcast above (or missed it to a network
+    // blip) can still catch up by draining this directory — triggered by
+    // any live notification it DID receive, or by the periodic heartbeat
+    // as a safety net against a silently-lost broadcast. job.status
+    // remains the sole source of truth for current state; a file here is
+    // only ever a "something changed, go look" signal, never treated as
+    // authoritative content by anything that reads it.
+    //
+    // Same content as the live broadcast (not re-derived) so a Bridge
+    // parses both paths identically. Filename is
+    // <epoch_ms>_<uuid>.json — the millisecond prefix keeps a plain
+    // lexicographic directory listing in chronological order, which
+    // matters for a consumer replaying job.phase_changed/job.step_changed
+    // for the same job in the order they actually happened.
+    {
+      std::error_code ec;
+      const fs::path events_dir = agentos_home () / "events";
+      fs::create_directories (events_dir, ec);
+      if (ec)
+      {
+        spdlog::warn ("[orchestrator] cannot create events dir {}: {}",
+                      events_dir.string (), ec.message ());
+        return;
+      }
+
+      const auto now_ms
+        = std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::system_clock::now ().time_since_epoch ())
+            .count ();
+      const fs::path event_path
+        = events_dir / (std::to_string (now_ms) + "_" + new_uuid () + ".json");
+
+      std::ofstream f (event_path, std::ios::trunc);
+      if (!f)
+      {
+        spdlog::warn ("[orchestrator] cannot write event file {}",
+                      event_path.string ());
+        return;
+      }
+      f << message;
+    }
   }
 
   std::string Orchestrator::new_uuid ()

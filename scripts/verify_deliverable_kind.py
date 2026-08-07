@@ -105,6 +105,34 @@ def parse_result_json(raw_result_json):
         return {}
 
 
+def clean_events_dir():
+    """Delete leftover event-mailbox files under agentos_home()/events/.
+
+    This mailbox (job.phase_changed/job.step_changed, persisted alongside
+    the live broadcast) is meant to be drained and deleted by a real
+    Bridge. This script has no Bridge running behind it, so nothing ever
+    consumes these files when testing AgentOS standalone — they just pile
+    up and can make it confusing to reason about "did THIS run actually
+    fire a notification" once several runs' leftovers are mixed together.
+    Not an AgentOS concern; purely test hygiene for this script.
+    """
+    home = os.path.expanduser(os.environ.get("AGENTOS_HOME", "~/.agentos"))
+    events_dir = os.path.join(home, "events")
+    if not os.path.isdir(events_dir):
+        return
+    removed = 0
+    for name in os.listdir(events_dir):
+        path = os.path.join(events_dir, name)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        info(f"cleaned {removed} leftover event file(s) from {events_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--goal", default=DEFAULT_GOAL,
@@ -113,11 +141,18 @@ def main():
     parser.add_argument("--poll-timeout", type=float, default=180.0,
                          help="max seconds to wait for the job to finish "
                               "(Forge generation can be slow — default 180s)")
+    parser.add_argument("--no-clean-events", action="store_true",
+                         help="skip clearing agentos_home()/events/ before "
+                              "running (default: clear it, since nothing "
+                              "else consumes it in this standalone script)")
     args = parser.parse_args()
 
     if not ACCESS_KEY:
         fail("AGENTOS_ACCESS_KEY is not set. Run `agentos key generate` "
              "and export it first.")
+
+    if not args.no_clean_events:
+        clean_events_dir()
 
     print(f"Submitting goal: {args.goal!r}")
     print(f"Socket: {SOCKET_PATH}\n")

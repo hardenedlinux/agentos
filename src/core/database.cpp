@@ -2163,6 +2163,30 @@ namespace agentos
     return std::nullopt;
   }
 
+  std::optional<ForgePipelineJob>
+  Database::load_latest_forge_pipeline_job_for_task (
+      const std::string &task_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare (R"(
+      SELECT id, task_id, status, requirement_json,
+             writer_output_json, reviewer_verdict_json,
+             feedback, attempt, max_attempts,
+             last_code_path, created_at, updated_at
+      FROM forge_pipeline_jobs WHERE task_id = ?
+      ORDER BY created_at DESC LIMIT 1
+  )"));
+    if (!stmt.s)
+      return std::nullopt;
+
+    sqlite3_bind_text (stmt, 1, task_id.c_str (), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      return row_to_forge_job (stmt);
+    return std::nullopt;
+  }
+
   std::vector<ForgePipelineJob> Database::load_in_flight_forge_pipeline_jobs ()
   {
     std::vector<ForgePipelineJob> jobs;

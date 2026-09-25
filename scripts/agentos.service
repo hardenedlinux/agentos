@@ -1,0 +1,6 @@
+# /usr/lib/systemd/system/agentos.service
+[Service]
+User=agentos
+Group=agentos
+RuntimeDirectory=agentos        # systemd creates /run/agentos/ owned by agentos:agentos
+RuntimeDirectoryMode=0750

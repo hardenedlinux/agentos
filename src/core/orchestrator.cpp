@@ -1,0 +1,6391 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * agentos/orchestrator.cpp
+ *
+ * ADR-022: Orchestrator — authentication, pipeline execution, coordination.
+ * ADR-005: Persist before act.
+ * ADR-009: No LLM calls; all logic is deterministic.
+ */
+
+#include "agentos/orchestrator.h"
+#include "agentos/cred_vault.h"
+#include "agentos/home_init.h"
+#include "agentos/time_utils.h"
+#include "agentos/memory_curve.h"
+#include "agentos/user_facts.h"
+#include "agentos/user_manager.h"
+#include "agentos/uuid.h"
+
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <spdlog/spdlog.h>
+
+#include <chrono>
+#include <csignal>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <openssl/evp.h>
+#include <regex>
+#include <string_view>
+#include <toml.hpp>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+#include <iostream>
+#include <iterator>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <thread>
+#include <unordered_set>
+
+namespace agentos
+{
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  namespace
+  {
+    // Constant-time comparison to prevent timing attacks on key verification.
+    bool ct_equal (std::string_view a, std::string_view b)
+    {
+      if (a.size () != b.size ())
+        return false;
+      volatile int diff = 0;
+      for (size_t i = 0; i < a.size (); ++i)
+        diff |= (static_cast<unsigned char> (a[i])
+                 ^ static_cast<unsigned char> (b[i]));
+      return diff == 0;
+    }
+
+    // Retry counters for the can_produce_plan / allowed_advisers rejection
+    // guards in plan_ready (see below) — a bad Plan there is far more
+    // likely to be the LLM's own output instability than a real, repeated
+    // policy violation (observed directly this session: three separate
+    // rejections, three completely different hallucinated contents, same
+    // underlying adviser+goal). Retrying a few times before giving up
+    // mirrors Forge's own retry-before-escalate posture for exactly the
+    // same reason — a single bad completion shouldn't fail the whole job
+    // when a fresh attempt is cheap and often just works.
+    //
+    // Deliberately a file-scope map, not an Orchestrator member — avoids
+    // an orchestrator.h change for what's a small, self-contained concern.
+    // Safe without a mutex: only ever touched from plan_ready, which is
+    // MasterDecision-event handling and therefore always runs on the
+    // Orchestrator's single event-loop thread, never concurrently with
+    // itself.
+    std::unordered_map<std::string, int> g_plan_rejection_retry_count;
+    constexpr int kMaxPlanRejectionRetries = 3;
+
+    // Builds the payload_json for a spawn_adviser MasterDecision event —
+    // shared by both plan-rejection retry call sites below (identical
+    // shape to what cmd_job_submit's Master routing already produces).
+    std::string build_spawn_adviser_payload (const std::string &job_id,
+                                             const std::string &adviser_id,
+                                             const std::string &goal)
+    {
+      rapidjson::Document doc;
+      doc.SetObject ();
+      auto &alloc = doc.GetAllocator ();
+      doc.AddMember ("type", rapidjson::Value ("spawn_adviser", alloc),
+                    alloc);
+      doc.AddMember (
+        "job_id", rapidjson::Value (job_id.c_str (), alloc), alloc);
+      doc.AddMember ("adviser_id",
+                    rapidjson::Value (adviser_id.c_str (), alloc), alloc);
+      doc.AddMember ("goal", rapidjson::Value (goal.c_str (), alloc), alloc);
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc.Accept (w);
+      return buf.GetString ();
+    }
+
+    // Returns true if under the retry limit (and increments the count) —
+    // caller should re-enqueue a spawn_adviser event and return without
+    // calling finish_job. Returns false once retries are exhausted —
+    // caller should proceed to finish_job(false, ...) as before.
+    bool should_retry_plan_rejection (const std::string &job_id,
+                                      const std::string &adviser_id,
+                                      const std::string &reason)
+    {
+      int &count = g_plan_rejection_retry_count[job_id];
+      ++count;
+      if (count > kMaxPlanRejectionRetries)
+      {
+        spdlog::error (
+          "[orchestrator] job {} adviser {}: exhausted {} retries after "
+          "repeated Plan rejections ({}) — failing job",
+          job_id, adviser_id, kMaxPlanRejectionRetries, reason);
+        g_plan_rejection_retry_count.erase (job_id);
+        return false;
+      }
+      spdlog::warn (
+        "[orchestrator] job {} adviser {}: Plan rejected ({}), retrying "
+        "(attempt {}/{})",
+        job_id, adviser_id, reason, count, kMaxPlanRejectionRetries);
+      return true;
+    }
+
+    // SHA-256(key || salt) → hex string (ADR-020).
+    std::string sha256_hex (const std::string &key, const std::string &salt)
+    {
+      const std::string data = key + salt;
+      unsigned char hash[SHA256_DIGEST_LENGTH];
+      EVP_MD_CTX *ctx = EVP_MD_CTX_new ();
+      EVP_DigestInit_ex (ctx, EVP_sha256 (), nullptr);
+      EVP_DigestUpdate (ctx, data.data (), data.size ());
+      EVP_DigestFinal_ex (ctx, hash, nullptr);
+      EVP_MD_CTX_free (ctx);
+
+      char hex[SHA256_DIGEST_LENGTH * 2 + 1];
+      for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i)
+        snprintf (hex + i * 2, 3, "%02x", hash[i]);
+      return std::string (hex, SHA256_DIGEST_LENGTH * 2);
+    }
+
+    // bridge_hint.key must be a plain, restricted identifier — this is
+    // used by a bridge to pick a handler, so it should never be treated
+    // as anything richer than a fixed token.
+    bool is_valid_bridge_hint_key (const std::string &key)
+    {
+      if (key.empty () || key.size () > 128)
+        return false;
+      for (char c : key)
+      {
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+          return false;
+      }
+      return true;
+    }
+
+    // True iff `candidate` resolves to a location on or under `base`.
+    // Uses weakly_canonical (resolves symlinks and ".." on whatever
+    // prefix already exists on disk, without requiring the final
+    // component to exist) rather than string prefix comparison — a naive
+    // `candidate.find(base) == 0` check is exactly the kind of thing
+    // "../"-style traversal or a symlink is designed to defeat.
+    bool path_is_within (const fs::path &base, const fs::path &candidate)
+    {
+      std::error_code ec;
+      auto base_c = fs::weakly_canonical (base, ec);
+      if (ec)
+        return false;
+      auto cand_c = fs::weakly_canonical (candidate, ec);
+      if (ec)
+        return false;
+      auto rel = cand_c.lexically_relative (base_c);
+      if (rel.empty ())
+        return false;
+      auto first = rel.begin ();
+      return first != rel.end () && *first != "..";
+    }
+
+    // Build a JSON-RPC 2.0 response envelope.
+    std::string make_response (const std::string &id,
+                               const std::string &result_json)
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("jsonrpc");
+      w.String ("2.0");
+      w.Key ("id");
+      w.String (id.c_str ());
+      w.Key ("result");
+      w.RawValue (result_json.c_str (), result_json.size (),
+                  rapidjson::kObjectType);
+      w.EndObject ();
+      return buf.GetString ();
+    }
+
+    std::string make_error_response (const std::string &id, int code,
+                                     const std::string &message)
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("jsonrpc");
+      w.String ("2.0");
+      w.Key ("id");
+      w.String (id.c_str ());
+      w.Key ("error");
+      w.StartObject ();
+      w.Key ("code");
+      w.Int (code);
+      w.Key ("message");
+      w.String (message.c_str ());
+      w.EndObject ();
+      w.EndObject ();
+      return buf.GetString ();
+    }
+
+    std::string make_notification (const std::string &method,
+                                   const std::string &params_json)
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("jsonrpc");
+      w.String ("2.0");
+      w.Key ("method");
+      w.String (method.c_str ());
+      w.Key ("params");
+      w.RawValue (params_json.c_str (), params_json.size (),
+                  rapidjson::kObjectType);
+      w.EndObject ();
+      return buf.GetString ();
+    }
+
+    // Role permission matrix (ADR-025).
+    bool role_permitted (const std::string &role, const std::string &method)
+    {
+      if (role == "admin")
+        return true; // admin can do everything
+      if (role == "operator")
+      {
+        static const std::unordered_set<std::string> operator_methods = {
+          "job.submit",
+          "job.status",
+          "job.list",
+          "job.cancel",
+          "worker.list",
+          "adviser.list",
+          "review.list",
+          "review.show",
+          "review.approve",
+          "review.reject",
+          "forge.list",
+          "forge.status",
+          // ADR-028: operators can manage credentials
+          "cred.submit",
+          "cred.revoke",
+          "cred.list",
+          "cred.audit",
+        };
+        return operator_methods.count (method) > 0;
+      }
+      if (role == "readonly")
+      {
+        static const std::unordered_set<std::string> readonly_methods = {
+          "job.status",  "job.list",    "worker.list", "adviser.list",
+          "review.list", "review.show", "forge.list",  "forge.status",
+        };
+        return readonly_methods.count (method) > 0;
+      }
+      return false;
+    }
+
+    // ADR-025: ForgeJob.phase is a string; forge_pipeline_jobs.status is the
+    // INTEGER ForgeStatus enum. Enum ordinal order matches the ADR-025 phase
+    // list exactly: drafting=0, reviewing=1, promoted=2, rejected=3,
+    // human_review=4 (see Database::load_in_flight_forge_pipeline_jobs'
+    // `WHERE status NOT IN (2,3,4)` — the three terminal phases).
+    std::string forge_status_to_phase (ForgeStatus status)
+    {
+      switch (status)
+      {
+      case ForgeStatus::drafting:
+        return "drafting";
+      case ForgeStatus::reviewing:
+        return "reviewing";
+      case ForgeStatus::promoted:
+        return "promoted";
+      case ForgeStatus::rejected:
+        return "rejected";
+      case ForgeStatus::human_review:
+        return "human_review";
+      }
+      return "unknown";
+    }
+
+    std::optional<ForgeStatus> phase_to_forge_status (const std::string &phase)
+    {
+      if (phase == "drafting")
+        return ForgeStatus::drafting;
+      if (phase == "reviewing")
+        return ForgeStatus::reviewing;
+      if (phase == "promoted")
+        return ForgeStatus::promoted;
+      if (phase == "rejected")
+        return ForgeStatus::rejected;
+      if (phase == "human_review")
+        return ForgeStatus::human_review;
+      return std::nullopt;
+    }
+
+    // requirement_json is stored as the full Forge task spec
+    // ({"description": ..., "input_schema": ..., "output_schema": ...},
+    // ADR-031 Section 6). ADR-025's ForgeJob.requirement is the
+    // human-readable description string, not the raw JSON blob.
+    std::string forge_requirement_summary (const std::string &requirement_json)
+    {
+      rapidjson::Document doc;
+      if (!doc.Parse (requirement_json.c_str ()).HasParseError ()
+          && doc.IsObject () && doc.HasMember ("description")
+          && doc["description"].IsString ())
+        return doc["description"].GetString ();
+      return requirement_json; // fallback if shape is unexpected
+    }
+
+    // Shared ForgeJob entity serializer (ADR-025) used by both forge.list
+    // and forge.status so the two methods stay structurally identical.
+    void write_forge_job (rapidjson::Writer<rapidjson::StringBuffer> &w,
+                          const ForgePipelineJob &fj)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (fj.id.c_str ());
+      w.Key ("requirement");
+      w.String (forge_requirement_summary (fj.requirement_json).c_str ());
+      w.Key ("phase");
+      w.String (forge_status_to_phase (fj.status).c_str ());
+      w.Key ("attempt");
+      w.Int (fj.attempt);
+      w.Key ("max_attempts");
+      w.Int (fj.max_attempts);
+      if (!fj.feedback.empty ())
+      {
+        w.Key ("last_feedback");
+        w.String (fj.feedback.c_str ());
+      }
+      w.Key ("created_at");
+      w.Int64 (fj.created_at);
+      w.Key ("updated_at");
+      w.Int64 (fj.updated_at);
+      w.EndObject ();
+    }
+
+  } // anonymous namespace
+
+  // ---------------------------------------------------------------------------
+  // Construction
+  // ---------------------------------------------------------------------------
+
+  Orchestrator::Orchestrator (Database &db, LlmProxy &llm, Registry &registry,
+                              Dispatcher &dispatcher,
+                              forge::ForgeCoordinator &forge,
+                              const Config &config, CredVault &cred_vault,
+                              SendToMaster send_to_master,
+                              SendToGateway send_to_gateway)
+    : db_ (db), llm_ (llm), registry_ (registry), dispatcher_ (dispatcher),
+      forge_ (forge), config_ (config), cred_vault_ (cred_vault),
+      send_to_master_ (std::move (send_to_master)),
+      send_to_gateway_ (std::move (send_to_gateway)), user_manager_ (db)
+  {
+  }
+
+  // ---------------------------------------------------------------------------
+  // init — called before start()
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::init ()
+  {
+    // Crash recovery (ADR-005, ADR-016):
+    // Mark any worker_runs with status='running' as 'crashed'.
+    db_.mark_all_running_as_crashed ();
+
+    // Reconstruct in-memory job index from DB (ADR-005/ADR-022/ADR-031).
+    //
+    // Previously this only set job_id and a hardcoded type, leaving
+    // pending_steps empty — every in-flight job silently stalled forever
+    // after a restart, regardless of target_type. Now steps are re-loaded
+    // from the tasks table (the actual source of truth for
+    // command/params/target_type/needs_forge; jobs.plan was never written,
+    // see resume_in_flight) and re-queued for dispatch below.
+    auto in_flight = db_.resume_in_flight ();
+    for (const auto &rec : in_flight)
+    {
+      ActiveJob job;
+      job.job_id = rec.job_id.value ();
+      job.type = "oneshot";
+
+      if (auto j = db_.load_job (job.job_id); j)
+      {
+        if (!j->type.empty ())
+          job.type = j->type;
+        job.goal = j->goal;
+        if (j->loop)
+        {
+          job.current_iteration = j->loop->current_iteration;
+          job.current_repairs = j->loop->current_repairs;
+        }
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] resume: no jobs row for in-flight job "
+                      "{}, using defaults",
+                      job.job_id);
+      }
+
+      auto steps = db_.load_pipeline_steps_for_job (job.job_id);
+      for (auto &ss : steps)
+      {
+        // A step still marked 'running' means the daemon crashed
+        // mid-dispatch — the worker process cannot have survived
+        // (mark_all_running_as_crashed above only touches worker_runs,
+        // not tasks.status). Reset it so dispatch_next_step starts a
+        // fresh attempt instead of waiting on a run_id that will never
+        // report back. worker_attempt is intentionally not persisted
+        // per-step (ADR-031 §11 max_step_retries is in-memory only), so a
+        // step that had already failed some attempts before the crash
+        // gets a fresh retry budget on resume — a known, accepted
+        // leniency rather than a correctness bug.
+        if (ss.status == StepStatus::running)
+          db_.update_step_status (ss.step.id, db::step_status::pending);
+
+        ActiveStep as;
+        as.step = std::move (ss.step);
+        job.pending_steps.push_back (std::move (as));
+      }
+
+      const std::string recovered_job_id = job.job_id;
+      const std::string recovered_type = job.type;
+      const size_t recovered_step_count = job.pending_steps.size ();
+      active_jobs_[recovered_job_id] = std::move (job);
+      spdlog::info (
+        "[orchestrator] recovered in-flight job {} ({}) with {} pending "
+        "step(s)",
+        recovered_job_id, recovered_type, recovered_step_count);
+    }
+
+    // Kick off dispatch for every recovered job that still has work queued.
+    // dispatch_next_step is a plain synchronous call — it's invoked the
+    // same way from the live plan_ready path (not through the event
+    // queue), and by this point in init() the Database/Registry/Dispatcher
+    // this Orchestrator holds references to are already fully constructed.
+    // Worth confirming under the kill/restart test alongside everything
+    // else here: this assumes it's safe to fork/exec Workers this early in
+    // startup (before Gateway is accepting connections), which matches
+    // "resume automatically, no user action needed" but is a real behavior
+    // change from today's silent no-op.
+    for (auto &[job_id, job] : active_jobs_)
+    {
+      if (!job.pending_steps.empty ())
+        dispatch_next_step (job);
+    }
+
+    // Register Dispatcher reap callback — fires on the PeriodicExecutor thread.
+    // Enqueues OrchestratorEvent which is consumed on the Orchestrator thread.
+    dispatcher_.set_reap_callback (
+      [this] (WorkerExited ev)
+      {
+        const int exit_code = ev.exit_code;
+        if (exit_code == 0)
+        {
+          OrchestratorEvent oe;
+          oe.kind = OrchestratorEvent::Kind::WorkerDone;
+          oe.job_id = ev.job_id;
+          oe.payload_json = R"({"job_id":")" + ev.job_id + R"(","run_id":")"
+                            + ev.run_id + R"(","step_id":")" + ev.step_id
+                            + R"(","exit_code":0,"job_dir":")"
+                            + ev.job_dir + R"(","run_dir":")" + ev.run_dir
+                            + R"("})";
+          enqueue (std::move (oe));
+        }
+        else
+        {
+          OrchestratorEvent oe;
+          oe.kind = OrchestratorEvent::Kind::WorkerFailed;
+          oe.job_id = ev.job_id;
+          oe.payload_json = R"({"job_id":")" + ev.job_id + R"(","run_id":")"
+                            + ev.run_id + R"(","step_id":")" + ev.step_id
+                            + R"(","exit_code":)" + std::to_string (exit_code)
+                            + R"(,"job_dir":")" + ev.job_dir
+                            + R"(","run_dir":")" + ev.run_dir + R"("})";
+          enqueue (std::move (oe));
+        }
+      });
+
+    // Register ForgeCoordinator completion callback.
+    forge_.set_completion_callback (
+      [this] (forge::ForgeResult result)
+      {
+        OrchestratorEvent oe;
+        oe.kind = OrchestratorEvent::Kind::MasterDecision;
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        w.StartObject ();
+        w.Key ("type");
+        w.String ("forge_complete");
+        w.Key ("forge_job_id");
+        w.String (result.forge_job_id.c_str ());
+        w.Key ("task_id");
+        w.String (result.task_id.c_str ());
+        w.Key ("outcome");
+        w.Int (static_cast<int> (result.outcome));
+        w.Key ("worker_id");
+        w.String (result.worker_id.c_str ());
+        w.Key ("review_id");
+        w.String (result.review_id.c_str ());
+        w.Key ("error");
+        w.String (result.error.c_str ());
+        w.EndObject ();
+        oe.payload_json = buf.GetString ();
+        enqueue (std::move (oe));
+      });
+
+    spdlog::info ("[orchestrator] initialised");
+
+    // ADR-029: seed default user_id="0" for single-user CLI deployments.
+    if (auto res = user_manager_.register_user ("0"); !res)
+      spdlog::warn ("[orchestrator] failed to seed default user: {}",
+                    res.error ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Actor: on_message — serial dispatch
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::on_message (OrchestratorEvent msg)
+  {
+    switch (msg.kind)
+    {
+    case OrchestratorEvent::Kind::GatewayInbound:
+      handle_gateway_inbound (msg);
+      break;
+    case OrchestratorEvent::Kind::WorkerDone:
+      handle_worker_done (msg);
+      break;
+    case OrchestratorEvent::Kind::WorkerFailed:
+      handle_worker_failed (msg);
+      break;
+    case OrchestratorEvent::Kind::AdviserDone:
+      handle_adviser_done (msg);
+      break;
+    case OrchestratorEvent::Kind::AdviserFailed:
+      handle_adviser_failed (msg);
+      break;
+    case OrchestratorEvent::Kind::MasterDecision:
+      handle_master_decision (msg);
+      break;
+    case OrchestratorEvent::Kind::TimerFired:
+      handle_timer_fired (msg);
+      break;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Authentication
+  // ---------------------------------------------------------------------------
+
+  std::optional<Database::AccessKey>
+  Orchestrator::authenticate (const std::string &key_value) const
+  {
+    // Reject malformed keys before any processing.
+    // Hex-encoded 32 bytes = exactly 64 chars, [0-9a-f] only.
+    if (key_value.size () != 64)
+      return std::nullopt;
+    for (char c : key_value)
+    {
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+        return std::nullopt;
+    }
+
+    // Queried directly against SQLite on every call — replaces the old
+    // active_keys_ in-memory cache, which was populated once via
+    // load_active_keys() at startup and never refreshed. That meant any
+    // key generated (or revoked) after the daemon was already running
+    // silently didn't take effect until a full restart. This is a single
+    // indexed local-SQLite lookup per request, not a meaningful cost.
+    auto found = db_.find_active_access_key (key_value);
+    if (!found)
+      return std::nullopt;
+    const auto &ak = *found;
+    const std::string computed = sha256_hex (key_value, ak.key_salt);
+    if (!ct_equal (computed, ak.key_hash))
+      return std::nullopt;
+    return ak;
+  }
+
+  bool Orchestrator::is_permitted (const std::string &role,
+                                   const std::string &method) const
+  {
+    return role_permitted (role, method);
+  }
+
+  // ---------------------------------------------------------------------------
+  // GatewayInbound — parse JSON-RPC, authenticate, route
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_gateway_inbound (const OrchestratorEvent &ev)
+  {
+    spdlog::info ("[orchestrator] inbound method");
+
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
+    {
+      // Can't even extract identity/id — log and drop.
+      spdlog::warn ("[orchestrator] parse error on inbound message");
+      return;
+    }
+
+    // identity comes from the ZMQ identity frame, attached to the event by
+    // Central's forward_fn. It is not present in the JSON payload — the
+    // previous "_identity" lookup was a no-op that left every response
+    // unroutable.
+    const std::string identity = ev.identity;
+    const std::string request_id = doc.HasMember ("id") && doc["id"].IsString ()
+                                     ? doc["id"].GetString ()
+                                     : "";
+    const std::string method
+      = doc.HasMember ("method") && doc["method"].IsString ()
+          ? doc["method"].GetString ()
+          : "";
+    const std::string key_value
+      = doc.HasMember ("key") && doc["key"].IsString ()
+          ? doc["key"].GetString ()
+          : "";
+
+    // 1. Missing key.
+    if (key_value.empty ())
+    {
+      reply_error (identity, request_id, -32010, "Missing key, unauthorized");
+      return;
+    }
+
+    // 2. Authenticate.
+    auto ak = authenticate (key_value);
+    if (!ak)
+    {
+      reply_error (identity, request_id, -32010, "Failed to authorize");
+      return;
+    }
+
+    // 3. Update last_used_at asynchronously (fire and forget — DB write,
+    //    acceptable to do synchronously here since Orchestrator is the sole
+    //    writer).
+    db_.touch_access_key (ak->id);
+
+    // 4. Permission check.
+    if (!is_permitted (ak->role, method))
+    {
+      reply_error (identity, request_id, -32011, "Forbidden");
+      return;
+    }
+
+    // Remember the authenticated key's id for per‑user scoping (used by
+    // cmd_user_facts_* / cmd_subject_* below to resolve the real caller
+    // instead of trusting a client-supplied user_id/subject ownership).
+    //
+    // This is safe ONLY because Orchestrator::on_message dispatches one
+    // event at a time ("serial dispatch") and every cmd_* handler reads
+    // this member synchronously, within the same call, before this function
+    // returns. If dispatch is ever made concurrent, or a cmd_* handler ever
+    // spawns work that reads current_caller_key_id_ after this function has
+    // returned, this becomes a cross-request identity leak — the fix at
+    // that point is to thread the resolved id through as an explicit
+    // parameter to each cmd_* handler instead of via this member.
+    current_caller_key_id_ = ak->id;
+
+    // 5. Extract params.
+    std::string params_json = "{}";
+    if (doc.HasMember ("params"))
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc["params"].Accept (w);
+      params_json = buf.GetString ();
+    }
+
+    // 6. Route to command handler — table lookup, no hashing
+    using Handler = std::function<void(const std::string&,
+                                       const std::string&,
+                                       const std::string&)>;
+    static const std::unordered_map<std::string, Handler> sDispatch = {
+      {"job.submit",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_submit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.status",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_status(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.list",            [this](auto&& p,auto&& id,auto&& ri){cmd_job_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"job.cancel",          [this](auto&& p,auto&& id,auto&& ri){cmd_job_cancel(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"review.approve",      [this](auto&& p,auto&& id,auto&& ri){cmd_review_approve(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"review.reject",       [this](auto&& p,auto&& id,auto&& ri){cmd_review_reject(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.register",     [this](auto&& p,auto&& id,auto&& ri){cmd_worker_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.list",         [this](auto&& p,auto&& id,auto&& ri){cmd_worker_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.enable",       [this](auto&& p,auto&& id,auto&& ri){cmd_worker_enable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.disable",      [this](auto&& p,auto&& id,auto&& ri){cmd_worker_disable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"worker.revoke",       [this](auto&& p,auto&& id,auto&& ri){cmd_worker_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_suite_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.show",          [this](auto&& p,auto&& id,auto&& ri){cmd_suite_show(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.install",       [this](auto&& p,auto&& id,auto&& ri){cmd_suite_install(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"suite.remove",        [this](auto&& p,auto&& id,auto&& ri){cmd_suite_remove(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.register",      [this](auto&& p,auto&& id,auto&& ri){cmd_asset_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.show",          [this](auto&& p,auto&& id,auto&& ri){cmd_asset_show(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_asset_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.revoke",        [this](auto&& p,auto&& id,auto&& ri){cmd_asset_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.revoke_by_user",[this](auto&& p,auto&& id,auto&& ri){cmd_asset_revoke_by_user(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"asset.extract",       [this](auto&& p,auto&& id,auto&& ri){cmd_asset_extract(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.facts.record",   [this](auto&& p,auto&& id,auto&& ri){cmd_user_facts_record(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.facts.get",      [this](auto&& p,auto&& id,auto&& ri){cmd_user_facts_get(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.register",          [this](auto&& p,auto&& id,auto&& ri){cmd_subject_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.populate",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_populate(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.next",        [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_next(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.complete",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_complete(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.units.progress",    [this](auto&& p,auto&& id,auto&& ri){cmd_subject_units_progress(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.memory.upsert",     [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"subject.memory.query",      [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_query(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      // ADR-035 write-provenance addition. Deliberately NOT added to
+      // operator_methods/readonly_methods below — same default posture as
+      // worker.register/adviser.register/suite.install (admin-only unless
+      // explicitly whitelisted): deciding who may write "attested" facts
+      // is a security-relevant configuration action, not routine
+      // operation.
+      {"subject.memory.write_policy.upsert", [this](auto&& p,auto&& id,auto&& ri){cmd_subject_memory_write_policy_upsert(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.list",        [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.register",    [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"adviser.revoke",      [this](auto&& p,auto&& id,auto&& ri){cmd_adviser_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"forge.list",          [this](auto&& p,auto&& id,auto&& ri){cmd_forge_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"forge.status",        [this](auto&& p,auto&& id,auto&& ri){cmd_forge_status(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.submit",         [this](auto&& p,auto&& id,auto&& ri){cmd_cred_submit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.revoke",         [this](auto&& p,auto&& id,auto&& ri){cmd_cred_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.grant",          [this](auto&& p,auto&& id,auto&& ri){cmd_cred_grant(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.revoke_grant",   [this](auto&& p,auto&& id,auto&& ri){cmd_cred_revoke_grant(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.list",           [this](auto&& p,auto&& id,auto&& ri){cmd_cred_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"cred.audit",          [this](auto&& p,auto&& id,auto&& ri){cmd_cred_audit(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"vault.rekey",         [this](auto&& p,auto&& id,auto&& ri){cmd_vault_rekey(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.register",       [this](auto&& p,auto&& id,auto&& ri){cmd_user_register(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.list",           [this](auto&& p,auto&& id,auto&& ri){cmd_user_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.enable",         [this](auto&& p,auto&& id,auto&& ri){cmd_user_enable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.disable",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_disable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.profile",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_profile(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+    };
+
+    auto it = sDispatch.find(method);
+    if (it != sDispatch.end())
+        it->second(params_json, identity, request_id);
+    else
+        reply_error(identity, request_id, -32601, "Method not found");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: job.submit
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_job_submit (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("goal") || !params["goal"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: missing goal");
+      return;
+    }
+
+    // ADR-029: user_id is REQUIRED. It is the multi-tenant isolation key
+    // (credentials, assets, user facts, continuations, outbox), so the
+    // daemon must see it explicitly on every submission. A missing or
+    // non-string value is a caller bug and is rejected -- never silently
+    // defaulted to "0", which would run the job inside user 0's namespace
+    // (its credentials, assets and facts). Single-user/CLI convenience is
+    // the CLI layer's job: it injects user_id="0" itself (same split as
+    // cmd_asset_list). An empty string is likewise an error.
+    if (!params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    const std::string user_id = params["user_id"].GetString ();
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: user_id must not be empty");
+      return;
+    }
+
+    // Validate user — absent and disabled both return -32020 (ADR-029).
+    if (auto v = user_manager_.validate_user (user_id); !v)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
+    const std::string goal = params["goal"].GetString ();
+    const std::string type
+      = (params.HasMember ("type") && params["type"].IsString ())
+          ? params["type"].GetString ()
+          : "oneshot";
+    const std::string job_id = new_uuid ();
+
+    // ADR-038: optional continuation_id from job.submit params
+    std::string continuation_id;
+    if (params.HasMember ("continuation_id") && params["continuation_id"].IsString ())
+      continuation_id = params["continuation_id"].GetString ();
+
+    if (!continuation_id.empty ())
+      pending_continuation_ids_[job_id] = continuation_id;
+
+    // Assets are referenced inline in `goal` text as literal
+    // "[asset: <asset_id>]" tokens — not a separate `assets` parameter.
+    // Core understands exactly one format; bridge/CLI layers differ only
+    // in how a token gets into the goal text (auto-upload-then-insert, or
+    // the caller directly writes a token for an asset_id they already
+    // have — e.g. previously registered, or referencing someone else's
+    // asset). Every token found is validated and materialized BEFORE the
+    // job itself is persisted — if any asset_id is unknown or doesn't
+    // belong to this user_id, the whole job.submit is rejected atomically
+    // rather than creating a job that will fail later at dispatch time.
+    // This is the one and only place asset_id -> materialized-path binding
+    // happens for this job — static for the rest of the job's life
+    // (ADR-031 discussion: no re-resolution at dispatch time, no TOCTOU
+    // window). The token stays in `goal` untouched afterward — the
+    // Plan-authoring Adviser reads it in context and is expected to carry
+    // the same asset_id forward as $asset:<id> in a step's input (see the
+    // "Attached assets" prompt injection, which lists exactly the ids
+    // found here).
+    std::vector<std::pair<std::string, std::string>>
+      job_assets; // (asset_id, sanitized filename)
+    {
+      static const std::string kOpenTag = "[asset:";
+      size_t pos = 0;
+      while ((pos = goal.find (kOpenTag, pos)) != std::string::npos)
+      {
+        const size_t close = goal.find (']', pos);
+        if (close == std::string::npos)
+          break; // unterminated tag — nothing more to find past this point
+
+        std::string asset_id
+          = goal.substr (pos + kOpenTag.size (),
+                        close - (pos + kOpenTag.size ()));
+        // Trim surrounding whitespace (the convention is "[asset: <id>]"
+        // with a space after the colon, but tolerate "[asset:<id>]" too).
+        const auto first = asset_id.find_first_not_of (" \t");
+        const auto last = asset_id.find_last_not_of (" \t");
+        asset_id = (first == std::string::npos)
+                    ? std::string ()
+                    : asset_id.substr (first, last - first + 1);
+        pos = close + 1;
+
+        if (asset_id.empty ())
+          continue;
+
+        auto asset = db_.load_asset (asset_id);
+        if (!asset || asset->user_id != user_id || asset->status != "active")
+        {
+          reply_error (identity, request_id, -32011,
+                       "asset not found or not owned by this user: "
+                         + asset_id);
+          return;
+        }
+
+        // Sanitize to a bare filename — basename only, no directory
+        // components — before it ever touches a real filesystem path.
+        // original_filename is user-authored text; a crafted "../../x" or
+        // similar must never reach the actual materialize path below.
+        std::string safe_name
+          = fs::path (asset->original_filename).filename ().string ();
+        if (safe_name.empty () || safe_name == "." || safe_name == "..")
+          safe_name = asset_id; // fallback — never let a hostile filename
+                                // pick the materialized path's name
+
+        job_assets.emplace_back (asset_id, safe_name);
+      }
+    }
+
+    // Materialize each validated asset into this job's own directory —
+    // hardlink from the content-addressed blob store (falls back to a real
+    // copy across filesystems), matching cmd_asset_register's own
+    // link_or_copy strategy.
+    for (const auto &[asset_id, filename] : job_assets)
+    {
+      auto asset = db_.load_asset (asset_id); // already validated above
+      const fs::path blob_path
+        = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+      const fs::path dest
+        = agentos_home () / "jobs" / job_id / "assets" / filename;
+      std::error_code ec;
+      fs::create_directories (dest.parent_path (), ec);
+      if (!ec && !fs::exists (dest))
+      {
+        if (::link (blob_path.c_str (), dest.c_str ()) != 0)
+          fs::copy_file (blob_path, dest,
+                         fs::copy_options::overwrite_existing, ec);
+      }
+      db_.insert_job_asset (job_id, asset_id, filename);
+    }
+
+    // Persist job (phase = planning).
+    Task task;
+    task.id = TaskId (job_id);
+    task.goal = goal;
+    task.input_json = (params.HasMember ("input")) ? params_json : "{}";
+    task.user_id = user_id;
+    db_.store_job (task);
+    db_.update_job_phase (TaskId (job_id), "planning");
+    db_.update_job_type (job_id, type);
+
+    spdlog::info ("[orchestrator] job.submit job_id={} user_id={} assets={} "
+                 "goal='{}'",
+                 job_id, user_id, job_assets.size (), goal);
+
+    // Reply immediately — job runs asynchronously.
+    reply_ok (identity, request_id, R"({"job_id":")" + job_id + R"("})");
+
+    // Forward to Master for planning. Built via rapidjson::Writer, not raw
+    // string concatenation — `goal` is arbitrary user-submitted text (may
+    // contain quotes, backslashes, control characters) and concatenating it
+    // into a hand-built JSON string is a real structural-injection risk: a
+    // goal containing `","malicious_key":"x` would inject an extra field
+    // into what Master parses on the other end. job.status/job.list already
+    // do this correctly (w.Key/w.String below); this call site didn't.
+    // ADR-038 + continuation-aware routing: if this job.submit is a
+    // continuation follow-up, resolve which adviser it belongs to HERE
+    // (Orchestrator already owns db_ and all continuation read/write
+    // logic) rather than handing Master the raw continuation_id — Master
+    // has no Database dependency and shouldn't gain one just for this.
+    // peek_continuation_owner does NOT consume the row; the real
+    // consume-and-inject still happens once, later, at its existing
+    // ADR-038 spot. A goal-text fragment on a continuation follow-up may
+    // carry no reliable domain signal of its own, so when we already know
+    // which adviser this conversation belongs to, Master should skip
+    // domain-token/LLM selection entirely rather than risk misrouting and
+    // silently losing the continuation's context (Suite-ADR-001 §B).
+    std::string known_adviser_id;
+    // Explicit override: the caller already knows exactly which adviser
+    // this job belongs to — not inferred from a raw user-typed goal, but
+    // a system-initiated interaction (e.g. Suite-ADR-00X Gap-Mining's own
+    // first hop, which CMS deliberately targets rather than trusting
+    // domain-token matching to land on a Suite that never competes well
+    // on organic user phrasing). Reuses exactly the same known_adviser_id
+    // short-circuit Master already validates (registry_.find_adviser_by_id)
+    // for the continuation-peek case below — Master doesn't need to know
+    // or care which source resolved it.
+    if (params.HasMember ("adviser_id") && params["adviser_id"].IsString ())
+      known_adviser_id = params["adviser_id"].GetString ();
+
+    if (known_adviser_id.empty () && !continuation_id.empty ())
+    {
+      if (auto owner = db_.peek_continuation_owner (continuation_id, user_id))
+        known_adviser_id = *owner;
+      else
+        spdlog::warn ("[orchestrator] job {} carries continuation_id {} but "
+                     "no unconsumed owner was found — falling back to "
+                     "normal domain selection",
+                     job_id, continuation_id);
+    }
+
+    MasterEvent me;
+    me.kind = MasterEvent::Kind::JobSubmit;
+    me.job_id = job_id;
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      w.StartObject ();
+      w.Key ("job_id");
+      w.String (job_id.c_str ());
+      w.Key ("goal");
+      w.String (goal.c_str ());
+      w.Key ("type");
+      w.String (type.c_str ());
+      w.Key ("user_id");
+      w.String (user_id.c_str ());
+      if (!known_adviser_id.empty ())
+      {
+        w.Key ("known_adviser_id");
+        w.String (known_adviser_id.c_str ());
+      }
+      w.EndObject ();
+      me.payload_json = buf.GetString ();
+    }
+    send_to_master_ (std::move (me));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: job.status
+  // ---------------------------------------------------------------------------
+
+  // Builds the same JSON object cmd_job_status returns as its `result`.
+  // Shared with the notify() call sites for job.phase_changed/
+  // job.step_changed so a notification and a job.status reply for the
+  // same job at the same moment are byte-identical in shape. Returns
+  // "" if job_id doesn't exist.
+  std::string Orchestrator::build_job_status_json (const std::string &job_id)
+  {
+    auto job = db_.load_job (job_id);
+    if (!job)
+      return "";
+
+    auto steps = db_.load_steps_for_job (job_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("job_id");
+    w.String (job_id.c_str ());
+    w.Key ("phase");
+    w.String (job->phase.c_str ());
+    w.Key ("goal");
+    w.String (job->goal.c_str ());
+    w.Key ("created_at");
+    w.Int64 (job->created_at);
+    w.Key ("updated_at");
+    w.Int64 (job->updated_at);
+    if (job->error)
+    {
+      w.Key ("error");
+      w.String (job->error->c_str ());
+    }
+    if (job->adviser_id)
+    {
+      w.Key ("adviser_id");
+      w.String (job->adviser_id->c_str ());
+    }
+    // ADR-012 (amended) + ADR-039 §B: always present, defaults to
+    // "result" for jobs predating this field (matches DigestResult's own
+    // default and ActiveJob::deliverable_kind's default).
+    {
+      w.Key ("deliverable_kind");
+      w.String (job->deliverable_kind ? job->deliverable_kind->c_str ()
+                                       : "result");
+    }
+    w.Key ("steps");
+    w.StartArray ();
+    for (const auto &s : steps)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (s.id.c_str ());
+      w.Key ("step_order");
+      w.Int (s.step_order);
+      w.Key ("description");
+      w.String (s.description.c_str ());
+      w.Key ("status");
+      w.String (s.status.c_str ());
+      w.Key ("command");
+      w.String (s.command.c_str ());
+      w.Key ("target_type");
+      w.String (s.target_type.c_str ());
+      w.Key ("needs_forge");
+      w.Bool (s.needs_forge);
+      w.Key ("queued_at");
+      if (s.queued_at)
+        w.Int64 (*s.queued_at);
+      else
+        w.Null ();
+      w.Key ("started_at");
+      if (s.started_at)
+        w.Int64 (*s.started_at);
+      else
+        w.Null ();
+      w.Key ("completed_at");
+      if (s.completed_at)
+        w.Int64 (*s.completed_at);
+      else
+        w.Null ();
+      if (!s.result_json.empty ())
+      {
+        w.Key ("result_json");
+        w.String (s.result_json.c_str ());
+      }
+      if (s.error)
+      {
+        w.Key ("error");
+        w.String (s.error->c_str ());
+      }
+      w.Key ("tokens_prompt");
+      w.Int (s.tokens_prompt);
+      w.Key ("tokens_completion");
+      w.Int (s.tokens_completion);
+
+      // Amendment (forge progress, for CMS/Bridge to render its own
+      // localized "working on it" copy — AgentOS itself never produces
+      // user-facing text here, only this coarse status label + counts).
+      // Only meaningful while the step itself hasn't reached a terminal
+      // status yet — once s.status is done/failed, the step's own
+      // result_json/error already tell the full story, and querying here
+      // would only turn up whatever this job's LAST Forge episode was
+      // (possibly from an earlier, unrelated step — see
+      // load_latest_forge_pipeline_job_for_task's docstring).
+      if (s.needs_forge && s.status != "done" && s.status != "failed")
+      {
+        auto forge_job = db_.load_latest_forge_pipeline_job_for_task (job_id);
+        if (forge_job)
+        {
+          w.Key ("forge_status");
+          w.StartObject ();
+          w.Key ("phase");
+          w.String (forge_status_to_phase (forge_job->status).c_str ());
+          w.Key ("attempt");
+          w.Int (forge_job->attempt);
+          w.Key ("max_attempts");
+          w.Int (forge_job->max_attempts);
+          w.EndObject ();
+        }
+      }
+
+      w.EndObject ();
+    }
+    w.EndArray ();
+
+    // Expose last step's result as job-level result_json for done jobs.
+    if (job->phase == "done" && !steps.empty ()
+        && !steps.back ().result_json.empty ())
+    {
+      w.Key ("result_json");
+      w.String (steps.back ().result_json.c_str ());
+
+      // bridge_hint (job-level, not step-level): a Worker/Adviser step's
+      // output JSON may carry a reserved "bridge_hint": {"key", "path"}
+      // field alongside its normal (opaque to AgentOS) output. This is
+      // the one field AgentOS itself understands and validates — it
+      // doesn't interpret the file at `path`, only confirms it's safe to
+      // hand the pointer to a bridge. Only the LAST step's output is
+      // checked; a hint produced by an earlier step must be carried
+      // forward via $prev_result by the Suite's own pipeline.md if that
+      // step isn't the final one — AgentOS does not collect hints across
+      // steps itself, to keep job completion a single fixed lookup
+      // rather than accumulated per-job state.
+      rapidjson::Document last_result;
+      if (!last_result.Parse (steps.back ().result_json.c_str ())
+             .HasParseError ()
+          && last_result.IsObject ()
+          && last_result.HasMember ("bridge_hint")
+          && last_result["bridge_hint"].IsObject ())
+      {
+        const auto &hint = last_result["bridge_hint"];
+        if (hint.HasMember ("key") && hint["key"].IsString ()
+            && hint.HasMember ("path") && hint["path"].IsString ())
+        {
+          const std::string hint_key = hint["key"].GetString ();
+          const std::string hint_path = hint["path"].GetString ();
+          const fs::path job_output_dir
+            = agentos_home () / "jobs" / job_id / "output";
+
+          if (!is_valid_bridge_hint_key (hint_key))
+          {
+            spdlog::warn ("[orchestrator] job {}: bridge_hint.key '{}' "
+                          "fails validation — dropping",
+                          job_id, hint_key);
+          }
+          // ADR-037 amendment: "generated_code" is a daemon-authored
+          // reserved key (ADR-031 §12), not a step-declared one — it
+          // points at a promoted Worker's stable, shared source location
+          // (agentos_home()/workers/<agent_id>/worker_impl.py), which is
+          // deliberately outside this job's own output directory since
+          // the Worker may be reused by future jobs. It is therefore
+          // exempt from the absolute-path and containment checks below,
+          // which exist to constrain untrusted, step-declared paths.
+          else if (hint_key == "generated_code")
+          {
+            w.Key ("bridge_hint");
+            w.StartObject ();
+            w.Key ("key");
+            w.String (hint_key.c_str ());
+            w.Key ("path");
+            w.String (hint_path.c_str ());
+            w.EndObject ();
+          }
+          else if (fs::path (hint_path).is_absolute ())
+          {
+            spdlog::warn ("[orchestrator] job {}: bridge_hint.path '{}' "
+                          "is absolute, must be relative to the job's "
+                          "own output dir — dropping",
+                          job_id, hint_path);
+          }
+          else
+          {
+            const fs::path candidate = job_output_dir / hint_path;
+            if (!path_is_within (job_output_dir, candidate))
+            {
+              spdlog::warn ("[orchestrator] job {}: bridge_hint.path '{}' "
+                            "resolves outside the job's own output dir — "
+                            "dropping (possible path traversal attempt)",
+                            job_id, hint_path);
+            }
+            else
+            {
+              w.Key ("bridge_hint");
+              w.StartObject ();
+              w.Key ("key");
+              w.String (hint_key.c_str ());
+              w.Key ("path");
+              w.String (candidate.string ().c_str ());
+              w.EndObject ();
+            }
+          }
+        }
+      }
+    }
+
+    w.EndObject ();
+    return buf.GetString ();
+  }
+
+  void Orchestrator::cmd_job_status (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("job_id") || !params["job_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string job_id = params["job_id"].GetString ();
+
+    const std::string result_json = build_job_status_json (job_id);
+    if (result_json.empty ())
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
+    reply_ok (identity, request_id, result_json);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: job.list
+  // ---------------------------------------------------------------------------
+  void Orchestrator::cmd_job_list (const std::string &params_json,
+                                   const std::string &identity,
+                                   const std::string &request_id)
+  {
+    spdlog::info ("[orchestrator] cmd_job_list called");
+
+    rapidjson::Document params;
+    params.Parse (params_json.c_str ());
+
+    // Tenant isolation: job.list is scoped to ONE user_id by default. A
+    // missing/ill-typed user_id used to be silently ignored, which turned
+    // into "list every tenant's jobs" -- a cross-tenant leak waiting on a
+    // single forgotten field in a bridge. Now:
+    //   - user_id present  -> must be a non-empty string; filter applies
+    //                         (wins even if all_users is also set);
+    //   - user_id absent   -> rejected, unless the caller explicitly opts
+    //                         into a cross-user listing with all_users=true
+    //                         (operator/CLI use, e.g. `job list --all-users`).
+    // Note `all` (no time window) is unrelated to `all_users`.
+    std::optional<std::string> user_id_filter;
+    {
+      const bool obj_ok = !params.HasParseError () && params.IsObject ();
+      const bool all_users
+        = obj_ok && params.HasMember ("all_users")
+          && params["all_users"].IsBool () && params["all_users"].GetBool ();
+
+      if (obj_ok && params.HasMember ("user_id"))
+      {
+        if (!params["user_id"].IsString ()
+            || params["user_id"].GetStringLength () == 0)
+        {
+          reply_error (identity, request_id, -32602,
+                       "Invalid params: 'user_id' must be a non-empty string");
+          return;
+        }
+        user_id_filter = params["user_id"].GetString ();
+      }
+      else if (!all_users)
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: 'user_id' is required "
+                     "(or pass all_users=true to list across users)");
+        return;
+      }
+    }
+
+    // --all: no time filter; --since <minutes>: override default 10min window
+    std::optional<int64_t> since_unix = now_unix () - 600; // default: 10 min
+    if (!params.HasParseError ())
+    {
+      if (params.HasMember ("all") && params["all"].IsBool ()
+          && params["all"].GetBool ())
+        since_unix = std::nullopt;
+      else if (params.HasMember ("since_minutes")
+               && params["since_minutes"].IsInt ())
+        since_unix
+          = now_unix ()
+            - static_cast<int64_t> (params["since_minutes"].GetInt ()) * 60;
+    }
+
+    int limit = 100;
+    if (!params.HasParseError () && params.HasMember ("limit")
+        && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto jobs = db_.load_jobs_since (since_unix, limit, user_id_filter);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("jobs");
+    w.StartArray ();
+    for (const auto &j : jobs)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (j.id.c_str ());
+      w.Key ("type");
+      w.String (j.type.c_str ());
+      w.Key ("phase");
+      w.String (j.phase.c_str ());
+      w.Key ("goal");
+      w.String (j.goal.c_str ());
+      w.Key ("user_id");
+      w.String (j.user_id.c_str ());
+      w.Key ("created_at");
+      w.Int64 (j.created_at);
+      w.Key ("updated_at");
+      w.Int64 (j.updated_at);
+      if (j.error)
+      {
+        w.Key ("error");
+        w.String (j.error->c_str ());
+      }
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.Key ("total");
+    w.Int (static_cast<int> (jobs.size ()));
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: job.cancel
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_job_cancel (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("job_id") || !params["job_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string job_id = params["job_id"].GetString ();
+
+    // Job actively executing — remove from active_jobs_.
+    auto it = active_jobs_.find (job_id);
+    if (it != active_jobs_.end ())
+    {
+      active_jobs_.erase (it);
+    }
+    else
+    {
+      // Job not executing — verify it exists and is in a cancellable phase.
+      auto job = db_.load_job (job_id);
+      if (!job)
+      {
+        reply_error (identity, request_id, -32020, "Not found");
+        return;
+      }
+      static const std::unordered_set<std::string> cancellable
+        = {"planning", "executing", "repairing"};
+      if (!cancellable.count (job->phase))
+      {
+        reply_error (identity, request_id, -32022, "Invalid state");
+        return;
+      }
+    }
+
+    // Mark as cancelled — distinct terminal state, not failed.
+    db_.update_job_phase (TaskId (job_id), "cancelled");
+    notify ("job.phase_changed",
+            R"({"job_id":")" + job_id + R"(","new_phase":"cancelled"})",
+            build_job_status_json (job_id));
+    spdlog::info ("[orchestrator] job {} cancelled", job_id);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: review.approve / review.reject
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_review_approve (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("review_id") || !params["review_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    // Human review approval — forward to ForgeCoordinator via MasterDecision.
+    // ForgeCoordinator handles the actual state transition.
+    OrchestratorEvent oe;
+    oe.kind = OrchestratorEvent::Kind::MasterDecision;
+    oe.payload_json = R"({"type":"review_approve","review_id":")"
+                      + std::string (params["review_id"].GetString ())
+                      + R"("})";
+    on_message (
+      std::move (oe)); // self-dispatch (already on Orchestrator thread)
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  void Orchestrator::cmd_review_reject (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("review_id") || !params["review_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_list (const std::string & /*params_json*/,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    // Load all agents (enabled=1) and all their capabilities in two queries,
+    // then join in memory. This avoids N+1 queries and keeps all SQL in
+    // database.cpp per ADR-021.
+    auto agents = db_.load_enabled_agents ();
+    auto caps = db_.load_capabilities ();
+
+    // Build a map: agent_id → list of method names.
+    std::unordered_map<std::string, std::vector<std::string>> caps_by_agent;
+    for (const auto &c : caps)
+      caps_by_agent[c.agent_id].push_back (c.method);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("workers");
+    w.StartArray ();
+    for (const auto &a : agents)
+    {
+      if (a.role != "worker")
+        continue;
+
+      // Determine provenance from manifest JSON: look for "provenance" key.
+      // Fall back to "manual" if not present or unparseable.
+      std::string provenance = "manual";
+      {
+        rapidjson::Document mf;
+        if (!mf.Parse (a.manifest.c_str ()).HasParseError ()
+            && mf.HasMember ("provenance") && mf["provenance"].IsObject ()
+            && mf["provenance"].HasMember ("forge_job_id"))
+          provenance = "forge";
+      }
+
+      w.StartObject ();
+      w.Key ("id");
+      w.String (a.id.c_str ());
+      w.Key ("tier");
+      w.String ("tier0");
+      w.Key ("provenance");
+      w.String (provenance.c_str ());
+      w.Key ("enabled");
+      w.Bool (true); // load_enabled_agents already filters enabled=1
+      w.Key ("capabilities");
+      w.StartArray ();
+      if (auto it = caps_by_agent.find (a.id); it != caps_by_agent.end ())
+        for (const auto &method : it->second)
+          w.String (method.c_str ());
+      w.EndArray ();
+      w.Key ("registered_at");
+      w.Int64 (a.approved_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: adviser.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_adviser_list (const std::string & /*params_json*/,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    auto agents = db_.load_enabled_agents ();
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("advisers");
+    w.StartArray ();
+    for (const auto &a : agents)
+    {
+      if (a.role != "adviser")
+        continue;
+      w.StartObject ();
+      w.Key ("id");
+      w.String (a.id.c_str ());
+      w.Key ("description");
+      w.String (a.description.c_str ());
+      w.Key ("skill_path");
+      w.String (a.binary_path.c_str ());
+      w.Key ("domains");
+      w.StartArray ();
+      auto reg_adviser = registry_.find_adviser_by_id (a.id);
+      if (reg_adviser)
+        for (const auto &d : reg_adviser->domains)
+          w.String (d.c_str ());
+      w.EndArray ();
+      w.Key ("version");
+      w.String (reg_adviser ? reg_adviser->version.c_str () : "");
+      w.Key ("model");
+      w.String ("");
+      w.Key ("active");
+      w.Bool (false);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: forge.list
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_forge_list (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    params.Parse (params_json.c_str ());
+
+    std::optional<ForgeStatus> status_filter;
+    if (!params.HasParseError () && params.HasMember ("phase")
+        && params["phase"].IsString ())
+    {
+      status_filter = phase_to_forge_status (params["phase"].GetString ());
+      if (!status_filter)
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: unknown phase value");
+        return;
+      }
+    }
+
+    auto jobs = db_.load_forge_pipeline_jobs (status_filter);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("forge_jobs");
+    w.StartArray ();
+    for (const auto &fj : jobs)
+      write_forge_job (w, fj);
+    w.EndArray ();
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: forge.status
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_forge_status (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("forge_id") || !params["forge_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string forge_id = params["forge_id"].GetString ();
+
+    auto fj = db_.load_forge_pipeline_job (forge_id);
+    if (!fj)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("forge_job");
+    write_forge_job (w, *fj);
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.register
+  // ---------------------------------------------------------------------------
+
+  namespace
+  {
+    // ADR-031 §11: per-step retry limit, independent of Forge's
+    // max_repairs — retrying a step means re-invoking the same
+    // Worker/Adviser from scratch, not rewriting code.
+    constexpr int kMaxStepRetries = 3;
+
+    // ADR-031 §1: namespace.verb, all lowercase, one dot, max 64 chars.
+    bool is_valid_capability_method (const std::string &method)
+    {
+      static const std::regex re ("^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$");
+      return method.size () <= 64 && std::regex_match (method, re);
+    }
+  } // namespace
+
+  bool Orchestrator::register_worker_package (const fs::path &src_dir,
+                                              std::string &out_worker_id,
+                                              std::string &out_error)
+  {
+    // The daemon is a separate, long-running process — a relative path
+    // resolves against ITS working directory, not the caller's. Silently
+    // operating on the wrong directory (and reporting success) is worse
+    // than refusing outright.
+    if (!src_dir.is_absolute ())
+    {
+      out_error = "'path' must be an absolute path (relative paths resolve "
+                 "against the daemon's own working directory, not the "
+                 "caller's): "
+                 + src_dir.string ();
+      return false;
+    }
+
+    const fs::path manifest_path = src_dir / "manifest.json";
+
+    if (!fs::exists (manifest_path))
+    {
+      out_error = "manifest.json not found at " + manifest_path.string ();
+      return false;
+    }
+
+    std::string manifest_raw;
+    {
+      std::ifstream f (manifest_path);
+      if (!f)
+      {
+        out_error = "cannot open " + manifest_path.string ();
+        return false;
+      }
+      manifest_raw.assign (std::istreambuf_iterator<char> (f),
+                           std::istreambuf_iterator<char> ());
+    }
+
+    rapidjson::Document manifest;
+    if (manifest.Parse (manifest_raw.c_str ()).HasParseError ()
+        || !manifest.IsObject () || !manifest.HasMember ("id")
+        || !manifest["id"].IsString () || !manifest.HasMember ("capabilities")
+        || !manifest["capabilities"].IsArray ())
+    {
+      out_error = "manifest.json is not a valid Worker manifest (ADR-031 "
+                  "§2): missing or malformed 'id'/'capabilities'";
+      return false;
+    }
+
+    const std::string worker_id = manifest["id"].GetString ();
+    if (worker_id.empty ())
+    {
+      out_error = "manifest 'id' is empty";
+      return false;
+    }
+
+    for (auto &cap : manifest["capabilities"].GetArray ())
+    {
+      if (!cap.IsObject () || !cap.HasMember ("method")
+          || !cap["method"].IsString ())
+      {
+        out_error = "capability entry missing 'method'";
+        return false;
+      }
+      const std::string method = cap["method"].GetString ();
+      if (!is_valid_capability_method (method))
+      {
+        out_error = "Invalid capability method name: '" + method
+                    + "' does not match required format namespace.verb";
+        return false;
+      }
+      if (!cap.HasMember ("description") || !cap["description"].IsString ()
+          || std::string (cap["description"].GetString ()).empty ())
+      {
+        out_error = "capability '" + method + "' has no description";
+        return false;
+      }
+    }
+
+    // Two-file (worker.py + worker_impl.py, the Code Writer/Reviewer
+    // convention) and single-file (worker.py alone — hand-authored/
+    // third-party) packages are both accepted; the daemon does not require
+    // either shape, only that *something* runnable exists.
+    fs::path entrypoint;
+    for (const char *candidate :
+         {"worker.py", "worker.scm", worker_id.c_str ()})
+    {
+      if (fs::exists (src_dir / candidate))
+      {
+        entrypoint = src_dir / candidate;
+        break;
+      }
+    }
+    if (entrypoint.empty ())
+    {
+      out_error = "no entrypoint found in " + src_dir.string ()
+                  + " (expected worker.py, worker.scm, or a native binary "
+                    "named after the manifest id)";
+      return false;
+    }
+
+    const fs::path dest_dir = agentos_home () / "workers" / worker_id;
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+    fs::copy (
+      src_dir, dest_dir,
+      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+      out_error = "cannot copy " + src_dir.string () + " to "
+                  + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+
+    const fs::path installed_entrypoint = dest_dir / entrypoint.filename ();
+
+    db_.insert_agent (worker_id, "worker", installed_entrypoint.string (),
+                      manifest_raw, /*description=*/"", "operator");
+
+    for (auto &cap : manifest["capabilities"].GetArray ())
+    {
+      const std::string method = cap["method"].GetString ();
+      const std::string description = cap["description"].GetString ();
+      std::string input_schema = "{}";
+      if (cap.HasMember ("input_schema"))
+      {
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        cap["input_schema"].Accept (w);
+        input_schema = buf.GetString ();
+      }
+      db_.insert_capability (worker_id, method, description, input_schema);
+    }
+
+    spdlog::info ("[orchestrator] registered worker {} ({} capabilities) "
+                  "from {}",
+                  worker_id, manifest["capabilities"].Size (),
+                  src_dir.string ());
+    out_worker_id = worker_id;
+    return true;
+  }
+
+  void Orchestrator::cmd_worker_register (const std::string &params_json,
+                                          const std::string &identity,
+                                          const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    std::string worker_id, error;
+    if (!register_worker_package (params["path"].GetString (), worker_id,
+                                  error))
+    {
+      reply_error (identity, request_id, -32602, error);
+      return;
+    }
+
+    // Registry is an in-memory snapshot built once at startup; refresh it
+    // now so this Worker is immediately dispatchable without a daemon
+    // restart (Registry::init() clears-and-rebuilds, safe to call again).
+    registry_.init (db_);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("worker_id");
+    w.String (worker_id.c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: adviser.register
+  // ---------------------------------------------------------------------------
+  //
+  // ADR-018 Skill Package Format: manifest.toml + skill.md + config.toml.
+  // ADR-031 §2 addition: manifest.toml [meta].description is required and
+  // non-empty (an undescribed Adviser cannot be meaningfully injected into
+  // another Adviser's "Available advisers" list, ADR-031 §3).
+  // ---------------------------------------------------------------------------
+
+  bool Orchestrator::register_adviser_package (const fs::path &src_dir,
+                                               std::string &out_adviser_id,
+                                               std::string &out_error)
+  {
+    if (!src_dir.is_absolute ())
+    {
+      out_error = "'path' must be an absolute path (relative paths resolve "
+                 "against the daemon's own working directory, not the "
+                 "caller's): "
+                 + src_dir.string ();
+      return false;
+    }
+
+    const fs::path manifest_path = src_dir / "manifest.toml";
+    const fs::path skill_path = src_dir / "skill.md";
+
+    if (!fs::exists (manifest_path))
+    {
+      out_error = "manifest.toml not found at " + manifest_path.string ();
+      return false;
+    }
+    if (!fs::exists (skill_path))
+    {
+      out_error = "skill.md not found at " + skill_path.string ();
+      return false;
+    }
+
+    toml::table manifest;
+    try
+    {
+      manifest = toml::parse_file (manifest_path.string ());
+    }
+    catch (const toml::parse_error &e)
+    {
+      out_error = std::string ("manifest.toml parse error: ") + e.what ();
+      return false;
+    }
+
+    auto meta = manifest["meta"];
+    const std::string adviser_id = meta["id"].value_or (std::string ());
+    const std::string description
+      = meta["description"].value_or (std::string ());
+
+    if (adviser_id.empty ())
+    {
+      out_error = "manifest.toml [meta] id is required";
+      return false;
+    }
+    if (description.empty ())
+    {
+      out_error = "Adviser registration rejected: manifest.toml "
+                  "[meta].description is required and must be non-empty";
+      return false;
+    }
+
+    const fs::path dest_dir = agentos_home () / "advisers" / adviser_id;
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+    fs::copy (
+      src_dir, dest_dir,
+      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+      out_error = "cannot copy " + src_dir.string () + " to "
+                  + dest_dir.string () + ": " + ec.message ();
+      return false;
+    }
+
+    const std::string installed_skill_path = (dest_dir / "skill.md").string ();
+    // agents.manifest stores the manifest.toml text verbatim (ADR-018's
+    // actual on-disk format). Registry::init()'s parse_adviser_manifest_toml
+    // (registry.cpp) parses TOML directly for role=='adviser' rows — no
+    // JSON projection needed here.
+    std::string manifest_raw;
+    {
+      std::ifstream f (manifest_path);
+      manifest_raw.assign (std::istreambuf_iterator<char> (f),
+                           std::istreambuf_iterator<char> ());
+    }
+    db_.insert_agent (adviser_id, "adviser", installed_skill_path, manifest_raw,
+                      description, "operator");
+
+    // ADR-038 — read [continuation] section and store supports flag
+    {
+      bool supports_cont = false;
+      if (auto cont_node = manifest["continuation"]; cont_node.is_table ())
+        supports_cont = cont_node["supports"].value_or (false);
+
+      if (supports_cont)
+        db_.set_agent_supports_continuation (adviser_id, true);
+    }
+
+    spdlog::info ("[orchestrator] registered adviser {} from {}", adviser_id,
+                  src_dir.string ());
+    out_adviser_id = adviser_id;
+    return true;
+  }
+
+  void Orchestrator::cmd_adviser_register (const std::string &params_json,
+                                           const std::string &identity,
+                                           const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    std::string adviser_id, error;
+    if (!register_adviser_package (params["path"].GetString (), adviser_id,
+                                   error))
+    {
+      reply_error (identity, request_id, -32602, error);
+      return;
+    }
+
+    registry_.init (db_);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("adviser_id");
+    w.String (adviser_id.c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: adviser.revoke
+  //
+  // Unlike worker.revoke, there is no active-runs/PID/SIGTERM concern here —
+  // an Adviser's completion is a detached LLM call (ADR-018), never a
+  // sandboxed subprocess tracked by WorkerRun, so there's nothing to kill.
+  // Just a straightforward permanent disable (enabled=-1). Reuses
+  // Database::revoke_worker() despite the name — it's role-agnostic
+  // (already relied on for suite removal's adviser components; see
+  // cmd_suite_remove above). Does not touch the filesystem — skill.md/
+  // manifest.toml on disk are left alone, matching worker.revoke's
+  // filesystem-untouched contract.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_adviser_revoke (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("adviser_id")
+        || !params["adviser_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string adviser_id = params["adviser_id"].GetString ();
+
+    db_.revoke_worker (adviser_id);
+    registry_.init (db_);
+    spdlog::warn ("[orchestrator] adviser {} revoked", adviser_id);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+
+  //
+  // ADR-030 Capability Suite package format. This round: local install only
+  // (params.path points at an already-unpacked Suite directory on disk —
+  // no Marketplace download, that's Gap 1a/1b, deferred). "install" reads
+  // suite.toml, registers every bundled advisers/*/ and workers/*/ package
+  // via the same register_*_package helpers worker.register/adviser.register
+  // use, and records suite ownership in installed_suites/suite_components so
+  // `suite show`/`suite remove` can act on exactly this suite's components.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_suite_list (const std::string & /*params_json*/,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    auto suites = db_.load_installed_suites ();
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suites");
+    w.StartArray ();
+    for (const auto &s : suites)
+    {
+      w.StartObject ();
+      w.Key ("suite_id");
+      w.String (s.suite_id.c_str ());
+      w.Key ("version");
+      w.String (s.version.c_str ());
+      w.Key ("enabled");
+      w.Bool (s.enabled);
+      w.Key ("installed_at");
+      w.Int64 (s.installed_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_show (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("suite_id") || !params["suite_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string suite_id = params["suite_id"].GetString ();
+
+    auto suite = db_.load_installed_suite (suite_id);
+    if (!suite)
+    {
+      reply_error (identity, request_id, -32004,
+                   "suite not installed: " + suite_id);
+      return;
+    }
+    auto components = db_.load_suite_components (suite_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite->suite_id.c_str ());
+    w.Key ("version");
+    w.String (suite->version.c_str ());
+    w.Key ("enabled");
+    w.Bool (suite->enabled);
+    w.Key ("install_path");
+    w.String (suite->install_path.c_str ());
+    w.Key ("installed_at");
+    w.Int64 (suite->installed_at);
+    w.Key ("components");
+    w.StartArray ();
+    for (const auto &c : components)
+    {
+      w.StartObject ();
+      w.Key ("type");
+      w.String (c.component_type.c_str ());
+      w.Key ("id");
+      w.String (c.component_id.c_str ());
+      auto agent = db_.load_agent (c.component_id);
+      w.Key ("registered");
+      w.Bool (agent.has_value ());
+      if (agent && c.component_type == "adviser")
+      {
+        w.Key ("description");
+        w.String (agent->description.c_str ());
+      }
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_install (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const fs::path suite_dir = params["path"].GetString ();
+    if (!suite_dir.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'path' must be an absolute path (relative paths resolve "
+                     "against the daemon's own working directory, not the "
+                     "caller's): "
+                     + suite_dir.string ());
+      return;
+    }
+    const fs::path suite_toml_path = suite_dir / "suite.toml";
+    if (!fs::exists (suite_toml_path))
+    {
+      reply_error (identity, request_id, -32602,
+                   "suite.toml not found at " + suite_toml_path.string ());
+      return;
+    }
+
+    toml::table suite_toml;
+    try
+    {
+      suite_toml = toml::parse_file (suite_toml_path.string ());
+    }
+    catch (const toml::parse_error &e)
+    {
+      reply_error (identity, request_id, -32602,
+                   std::string ("suite.toml parse error: ") + e.what ());
+      return;
+    }
+
+    auto meta = suite_toml["meta"];
+    const std::string suite_id = meta["id"].value_or (std::string ());
+    const std::string version
+      = meta["version"].value_or (std::string ("0.0.0"));
+    if (suite_id.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "suite.toml [meta] id is required");
+      return;
+    }
+
+    std::vector<std::pair<std::string, std::string>>
+      registered; // (type, id) — for rollback bookkeeping / suite_components
+
+    // Register every bundled Adviser (advisers/<name>/).
+    const fs::path advisers_dir = suite_dir / "advisers";
+    if (fs::exists (advisers_dir))
+    {
+      for (const auto &entry : fs::directory_iterator (advisers_dir))
+      {
+        if (!entry.is_directory ())
+          continue;
+        std::string adviser_id, error;
+        if (!register_adviser_package (entry.path (), adviser_id, error))
+        {
+          reply_error (identity, request_id, -32602,
+                       "suite install failed registering adviser at "
+                         + entry.path ().string () + ": " + error);
+          return;
+        }
+        registered.emplace_back ("adviser", adviser_id);
+      }
+    }
+
+    // Register every bundled Worker (workers/<name>/).
+    const fs::path workers_dir = suite_dir / "workers";
+    if (fs::exists (workers_dir))
+    {
+      for (const auto &entry : fs::directory_iterator (workers_dir))
+      {
+        if (!entry.is_directory ())
+          continue;
+        std::string worker_id, error;
+        if (!register_worker_package (entry.path (), worker_id, error))
+        {
+          reply_error (identity, request_id, -32602,
+                       "suite install failed registering worker at "
+                         + entry.path ().string () + ": " + error);
+          return;
+        }
+        registered.emplace_back ("worker", worker_id);
+      }
+    }
+
+    // [pipeline] doc — copy into the Plan-authoring Adviser's knowledge/
+    // directory. Convention observed in this Suite's actual layout: the
+    // Plan-authoring Adviser's id matches the Suite's own [meta] id
+    // (translation-pipeline/translation-pipeline). This is inferred from
+    // example, not a documented suite.toml field — if a future Suite names
+    // its planning Adviser differently from the Suite id, this copy step
+    // will silently miss; worth promoting to an explicit suite.toml
+    // '[pipeline] adviser = "..."' field later rather than relying on the
+    // naming convention.
+    auto pipeline = suite_toml["pipeline"];
+    const std::string pipeline_doc = pipeline["doc"].value_or (std::string ());
+    if (!pipeline_doc.empty () && fs::exists (suite_dir / pipeline_doc))
+    {
+      const fs::path knowledge_dir
+        = agentos_home () / "advisers" / suite_id / "knowledge";
+      std::error_code ec;
+      fs::create_directories (knowledge_dir, ec);
+      if (!ec)
+        fs::copy_file (suite_dir / pipeline_doc, knowledge_dir / "pipeline.md",
+                       fs::copy_options::overwrite_existing, ec);
+      if (ec)
+        spdlog::warn ("[orchestrator] suite {} install: could not copy "
+                      "pipeline doc: {}",
+                      suite_id, ec.message ());
+    }
+
+    db_.insert_installed_suite (suite_id, version, suite_dir.string ());
+    for (const auto &[type, id] : registered)
+      db_.insert_suite_component (suite_id, type, id);
+
+    // Single refresh after all components are registered, not per-component
+    // — avoids N redundant full rebuilds during one suite.install call.
+    registry_.init (db_);
+
+    spdlog::info ("[orchestrator] installed suite {} ({} components) from {}",
+                  suite_id, registered.size (), suite_dir.string ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite_id.c_str ());
+    w.Key ("components_registered");
+    w.Int (static_cast<int> (registered.size ()));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_suite_remove (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("suite_id") || !params["suite_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string suite_id = params["suite_id"].GetString ();
+
+    if (!db_.load_installed_suite (suite_id))
+    {
+      reply_error (identity, request_id, -32004,
+                   "suite not installed: " + suite_id);
+      return;
+    }
+
+    // Soft-revoke every component this suite owns (same semantics as
+    // worker.revoke — enabled=-1, row retained for audit; set_worker_enabled/
+    // revoke_worker are role-agnostic despite the name, ADR-031). Does not
+    // touch the filesystem, matching worker.revoke's existing contract.
+    auto components = db_.load_suite_components (suite_id);
+    for (const auto &c : components)
+      db_.revoke_worker (c.component_id);
+
+    db_.set_suite_enabled (suite_id, false);
+    registry_.init (db_);
+
+    spdlog::info ("[orchestrator] removed suite {} ({} components revoked)",
+                  suite_id, components.size ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("suite_id");
+    w.String (suite_id.c_str ());
+    w.Key ("components_revoked");
+    w.Int (static_cast<int> (components.size ()));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.register
+  // ---------------------------------------------------------------------------
+  //
+  // Local-path-only this round (source must be a local absolute path, no
+  // scheme:// — remote/R2 sources are a downloader concern layered on top
+  // later without changing this contract, per the earlier design
+  // discussion). Content-addressed: identical bytes registered twice by
+  // anyone share one blob on disk; the assets table row is what's
+  // per-registration (ownership, display name, status).
+  // ---------------------------------------------------------------------------
+
+  namespace
+  {
+    // Streams the file in chunks rather than loading it whole into memory —
+    // asset files may be large (documents, eventually PDFs).
+    bool sha256_file (const std::filesystem::path &path, std::string &out_hex,
+                      int64_t &out_size)
+    {
+      std::ifstream f (path, std::ios::binary);
+      if (!f)
+        return false;
+
+      EVP_MD_CTX *ctx = EVP_MD_CTX_new ();
+      if (!ctx)
+        return false;
+      if (EVP_DigestInit_ex (ctx, EVP_sha256 (), nullptr) != 1)
+      {
+        EVP_MD_CTX_free (ctx);
+        return false;
+      }
+
+      char buf[65536];
+      int64_t total = 0;
+      while (f.read (buf, sizeof (buf)) || f.gcount () > 0)
+      {
+        const auto n = f.gcount ();
+        if (EVP_DigestUpdate (ctx, buf, static_cast<size_t> (n)) != 1)
+        {
+          EVP_MD_CTX_free (ctx);
+          return false;
+        }
+        total += n;
+      }
+
+      unsigned char digest[EVP_MAX_MD_SIZE];
+      unsigned int digest_len = 0;
+      const bool ok = EVP_DigestFinal_ex (ctx, digest, &digest_len) == 1;
+      EVP_MD_CTX_free (ctx);
+      if (!ok)
+        return false;
+
+      static const char *hex = "0123456789abcdef";
+      std::string hexstr;
+      hexstr.reserve (digest_len * 2);
+      for (unsigned int i = 0; i < digest_len; ++i)
+      {
+        hexstr.push_back (hex[(digest[i] >> 4) & 0xF]);
+        hexstr.push_back (hex[digest[i] & 0xF]);
+      }
+      out_hex = std::move (hexstr);
+      out_size = total;
+      return true;
+    }
+
+    // Hardlink when possible (same filesystem, zero-copy); fall back to a
+    // real copy on EXDEV (cross-device) or any other link() failure —
+    // mirrors the uv global-cache pattern already used for Python deps.
+    bool link_or_copy (const std::filesystem::path &src,
+                       const std::filesystem::path &dst)
+    {
+      std::error_code ec;
+      std::filesystem::create_directories (dst.parent_path (), ec);
+      if (ec)
+        return false;
+      if (::link (src.c_str (), dst.c_str ()) == 0)
+        return true;
+      std::filesystem::copy_file (
+        src, dst, std::filesystem::copy_options::overwrite_existing, ec);
+      return !ec;
+    }
+  } // namespace
+
+  void Orchestrator::cmd_asset_register (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("path") || !params["path"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' and 'path' are required");
+      return;
+    }
+
+    const std::string user_id = params["user_id"].GetString ();
+    const fs::path source_path = params["path"].GetString ();
+
+    if (source_path.string ().find ("://") != std::string::npos
+        || !source_path.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'path' must be a local absolute path (relative paths "
+                   "resolve against the daemon's own working directory, "
+                   "not the caller's); remote sources are not supported "
+                   "yet: "
+                     + source_path.string ());
+      return;
+    }
+    if (!fs::exists (source_path) || !fs::is_regular_file (source_path))
+    {
+      reply_error (identity, request_id, -32602,
+                   "file not found: " + source_path.string ());
+      return;
+    }
+
+    std::string original_filename;
+    if (params.HasMember ("filename") && params["filename"].IsString ()
+        && std::string (params["filename"].GetString ()).size () > 0)
+      original_filename = params["filename"].GetString ();
+    else
+      original_filename = source_path.filename ().string ();
+
+    std::string sha256_hex;
+    int64_t size_bytes = 0;
+    if (!sha256_file (source_path, sha256_hex, size_bytes))
+    {
+      reply_error (identity, request_id, -32603,
+                   "failed to hash " + source_path.string ());
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / sha256_hex / "content";
+    if (!fs::exists (blob_path))
+    {
+      if (!link_or_copy (source_path, blob_path))
+      {
+        reply_error (identity, request_id, -32603,
+                     "failed to store blob for " + source_path.string ());
+        return;
+      }
+    }
+
+    const std::string asset_id = new_uuid ();
+    db_.insert_asset (asset_id, user_id, original_filename, sha256_hex,
+                      size_bytes, source_path.string ());
+
+    spdlog::info ("[orchestrator] registered asset {} ({}, {} bytes) for "
+                 "user {}",
+                 asset_id, original_filename, size_bytes, user_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("asset_id");
+    w.String (asset_id.c_str ());
+    w.Key ("sha256");
+    w.String (sha256_hex.c_str ());
+    w.Key ("size_bytes");
+    w.Int64 (size_bytes);
+    w.Key ("blob_path");
+    w.String (blob_path.string ().c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.show / asset.revoke
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_asset_show (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' is required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("asset_id");
+    w.String (asset->asset_id.c_str ());
+    w.Key ("user_id");
+    w.String (asset->user_id.c_str ());
+    w.Key ("original_filename");
+    w.String (asset->original_filename.c_str ());
+    w.Key ("sha256");
+    w.String (asset->sha256.c_str ());
+    w.Key ("size_bytes");
+    w.Int64 (asset->size_bytes);
+    w.Key ("status");
+    w.String (asset->status.c_str ());
+    w.Key ("registered_at");
+    w.Int64 (asset->registered_at);
+    w.Key ("blob_path");
+    w.String (blob_path.string ().c_str ());
+    w.Key ("blob_exists");
+    w.Bool (fs::exists (blob_path));
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_asset_list (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    // user_id required; the server side does not default it silently — a
+    // missing user_id here means the caller (CLI or otherwise) failed to
+    // send one, which is a caller bug worth surfacing, not something to
+    // paper over. The CLI's own --user default (and its warning when the
+    // flag was omitted) is a separate, deliberate UX decision made at the
+    // CLI layer — this handler just requires the field to be present.
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    const std::string user_id = params["user_id"].GetString ();
+
+    auto assets = db_.load_assets_for_user (user_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("assets");
+    w.StartArray ();
+    for (const auto &a : assets)
+    {
+      w.StartObject ();
+      w.Key ("asset_id");
+      w.String (a.asset_id.c_str ());
+      w.Key ("original_filename");
+      w.String (a.original_filename.c_str ());
+      w.Key ("size_bytes");
+      w.Int64 (a.size_bytes);
+      w.Key ("status");
+      w.String (a.status.c_str ());
+      w.Key ("registered_at");
+      w.Int64 (a.registered_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_asset_revoke (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' is required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    // Soft-delete only — same posture as worker.revoke: the row and the
+    // underlying blob both stay on disk (a job that already materialized
+    // this asset before the revoke keeps working; the content-addressed
+    // blob may be shared with other still-active assets referencing the
+    // same sha256 anyway, so it is never safe to delete purely on one
+    // asset row's revoke). Future job.submit calls referencing this
+    // asset_id will be rejected by cmd_job_submit's status=='active' check.
+    db_.set_asset_status (asset_id, "revoked");
+
+    spdlog::info ("[orchestrator] revoked asset {}", asset_id);
+
+    reply_ok (identity, request_id, R"({"asset_id":")" + asset_id + R"("})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.revoke_by_user
+  // ---------------------------------------------------------------------------
+  //
+  // Exactly two triggers, both meaning the whole account is going away:
+  // a GDPR right-to-be-forgotten request, or the inactivity auto-cleanup
+  // job (window still TBD on the CMS side: 3/6/12 months — does not
+  // affect this RPC's contract either way). Never used for an ordinary
+  // single-asset revoke, which stays on asset.revoke (soft-delete, so a
+  // job that already materialized that asset keeps working). This is a
+  // HARD delete: once the account is gone there is no future job left
+  // that could still need these rows, and an erasure request means the
+  // bytes need to actually be gone, not just status-flipped.
+  //
+  // Deletes every asset row under user_id in one shot, regardless of
+  // whether it originated from a CLI/API asset.register call or from
+  // AgentOS's own memory pipeline registering derived material as an
+  // asset: both live in the same `assets` table keyed by user_id
+  // (ADR-035's subject-memory design deliberately does not duplicate
+  // asset storage — it only references back into this same table via
+  // related_asset_ids), so there is no origin-specific branch to write
+  // here.
+  //
+  // Row deletion (Database::delete_all_assets_for_user) is one atomic
+  // transaction — including clearing any job_assets rows that reference
+  // these asset_ids, which is required, not optional cleanup: with
+  // foreign_keys=ON, job_assets.asset_id REFERENCES assets(asset_id)
+  // with no ON DELETE clause, so deleting an asset ever attached to a
+  // job.submit would otherwise fail the FK check. That single transaction
+  // is what actually removes the partial-failure window CMS was worried
+  // about: CMS sends one request and gets back one final revoked_count,
+  // there is no N-step loop crossing the network for a mid-flight hiccup
+  // to interrupt.
+  //
+  // Blob reclamation below is a second, purely internal step and is
+  // necessarily per-hash: content-addressed blobs are shared storage, so
+  // "this user's rows are gone" does not mean a given sha256 is
+  // unreferenced (another asset row — this user's sibling with identical
+  // content, or another user's — may point at the same bytes). That loop
+  // never leaves this process and never turns into multiple CMS-visible
+  // round trips, so it does not reintroduce the problem this RPC exists
+  // to solve.
+  //
+  // Idempotent at the row level: revoked_count is the number of asset
+  // rows actually deleted by *this* call, so a retried call after a
+  // prior success returns 0, not an error — and a user_id with no assets
+  // at all also returns 0, not an error.
+  //
+  // Known gap, flagged rather than silently accepted: subject_memory rows
+  // may hold related_asset_ids pointing at asset_ids this call just
+  // deleted. This RPC does not touch subject_memory — whether whole-
+  // account erasure also needs to purge/redact subject_memory rows is a
+  // separate decision that belongs with ADR-035, not folded in here.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_asset_revoke_by_user (const std::string &params_json,
+                                               const std::string &identity,
+                                               const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    const std::string user_id = params["user_id"].GetString ();
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' must not be empty");
+      return;
+    }
+
+    // std::nullopt signals an actual DB failure (prepare/step/commit
+    // error), kept distinct from a legitimate "0 rows deleted" success.
+    auto result = db_.delete_all_assets_for_user (user_id);
+    if (!result)
+    {
+      reply_error (identity, request_id, -32603,
+                   "failed to delete assets for user " + user_id);
+      return;
+    }
+
+    // Best-effort blob GC: a blob directory that fails to remove
+    // (permissions, concurrent reader, etc.) is logged loudly but does
+    // NOT fail the overall call — the assets-table rows are already
+    // committed gone at this point, which is the part every other
+    // AgentOS code path actually queries. Left-over blob bytes on disk
+    // are a follow-up cleanup / compliance concern, not a correctness
+    // problem for AgentOS's own view of the world. If GDPR erasure ever
+    // needs a hard guarantee on physical bytes (not just DB rows), that
+    // should be its own retryable GC pass rather than folded into this
+    // request's success/failure signal.
+    for (const auto &sha256 : result->candidate_sha256)
+    {
+      const int64_t remaining = db_.count_assets_by_sha256 (sha256);
+      if (remaining == 0)
+      {
+        const fs::path blob_dir = agentos_home () / "assets" / "blobs" / sha256;
+        std::error_code ec;
+        fs::remove_all (blob_dir, ec);
+        if (ec)
+          spdlog::error ("[orchestrator] asset.revoke_by_user: failed to "
+                         "remove orphaned blob {} for user {}: {}",
+                         blob_dir.string (), user_id, ec.message ());
+      }
+      else if (remaining < 0)
+      {
+        spdlog::error ("[orchestrator] asset.revoke_by_user: reference-count "
+                       "check failed for sha256 {} (user {}) — blob left in "
+                       "place out of caution",
+                       sha256, user_id);
+      }
+    }
+
+    spdlog::info ("[orchestrator] asset.revoke_by_user: hard-deleted {} "
+                 "asset row(s) for user {}",
+                 result->deleted_count, user_id);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (user_id.c_str ());
+    w.Key ("revoked_count");
+    w.Int64 (result->deleted_count);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: asset.extract
+  // ---------------------------------------------------------------------------
+  //
+  // Pulls a registered asset's content back out of blob storage under its
+  // original registered filename, into a caller-specified directory —
+  // operational/debugging convenience (e.g. inspecting what actually got
+  // registered), not part of the job pipeline (which reads directly from
+  // the per-job materialized copy, never from an arbitrary extract
+  // destination). No ownership check, same posture as asset.show — this is
+  // an operator-level inspection tool, not a job-time data path.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_asset_extract (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("asset_id") || !params["asset_id"].IsString ()
+        || !params.HasMember ("dest_dir") || !params["dest_dir"].IsString ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'asset_id' and 'dest_dir' are required");
+      return;
+    }
+    const std::string asset_id = params["asset_id"].GetString ();
+    const fs::path dest_dir = params["dest_dir"].GetString ();
+    if (!dest_dir.is_absolute ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "'dest_dir' must be an absolute path (relative paths "
+                     "resolve against the daemon's own working directory, "
+                     "not the caller's): "
+                     + dest_dir.string ());
+      return;
+    }
+
+    auto asset = db_.load_asset (asset_id);
+    if (!asset)
+    {
+      reply_error (identity, request_id, -32011,
+                   "asset not found: " + asset_id);
+      return;
+    }
+
+    const fs::path blob_path
+      = agentos_home () / "assets" / "blobs" / asset->sha256 / "content";
+    if (!fs::exists (blob_path))
+    {
+      reply_error (identity, request_id, -32603,
+                   "blob missing from disk for asset " + asset_id + ": "
+                     + blob_path.string ());
+      return;
+    }
+
+    std::error_code ec;
+    fs::create_directories (dest_dir, ec);
+    if (ec)
+    {
+      reply_error (identity, request_id, -32603,
+                   "cannot create " + dest_dir.string () + ": "
+                     + ec.message ());
+      return;
+    }
+
+    // Extraction always uses the asset's original registered filename —
+    // sanitized to a bare basename first, same discipline as
+    // cmd_job_submit's per-job materialization, so a hostile filename in
+    // the DB can't be used to write outside dest_dir.
+    std::string safe_name
+      = fs::path (asset->original_filename).filename ().string ();
+    if (safe_name.empty () || safe_name == "." || safe_name == "..")
+      safe_name = asset_id;
+
+    const fs::path dest_path = dest_dir / safe_name;
+    fs::copy_file (blob_path, dest_path, fs::copy_options::overwrite_existing,
+                   ec);
+    if (ec)
+    {
+      reply_error (identity, request_id, -32603,
+                   "failed to extract to " + dest_path.string () + ": "
+                     + ec.message ());
+      return;
+    }
+
+    spdlog::info ("[orchestrator] extracted asset {} ({}) to {}", asset_id,
+                 safe_name, dest_path.string ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("filename");
+    w.String (safe_name.c_str ());
+    w.Key ("path");
+    w.String (dest_path.string ().c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_facts_record (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("fact_type") || !params["fact_type"].IsString ()
+        || !params.HasMember ("fact_key") || !params["fact_key"].IsString ()
+        || !params.HasMember ("payload") || !params["payload"].IsObject ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error: no authenticated user");
+      return;
+    }
+
+    const std::string fact_type_name = params["fact_type"].GetString ();
+    auto ft_info = lookup_fact_type (fact_type_name);
+    if (!ft_info)
+    {
+      reply_error (identity, request_id, -32602, "Unknown fact_type");
+      return;
+    }
+
+    const std::string fact_key = params["fact_key"].GetString ();
+
+    // payload to JSON string
+    rapidjson::StringBuffer payload_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> pw (payload_buf);
+    params["payload"].Accept (pw);
+    const std::string payload_json = payload_buf.GetString ();
+
+    const std::string source = current_caller_key_id_;
+
+    Database::UserFactEvent event;
+    event.user_id    = user_id;
+    event.fact_type  = fact_type_name;
+    event.fact_key   = fact_key;
+    event.payload    = payload_json;
+    event.source     = source;
+    event.created_at = now_unix ();
+
+    // early validation for decayed facts – reject before any write
+    if (ft_info->decayed)
+    {
+        if (!params.HasMember ("signal") || !params["signal"].IsNumber ())
+        {
+            reply_error (identity, request_id, -32602,
+                         "Invalid params: signal required for decayed fact_type");
+            return;
+        }
+
+        double signal = params["signal"].GetDouble ();
+
+        // -32031 is this operation's business-rule-violation bucket (same
+        // pattern as -32030 elsewhere in this file for cred/vault
+        // operations): one code, distinguished by the message string,
+        // covering "this fact_type is configured/registered incorrectly or
+        // the write itself failed" — not a per-condition code, matching how
+        // -32030 is already used for cred.submit/vault.rekey failures.
+        auto it = config_.memory_curve.find (fact_type_name);
+        if (it == config_.memory_curve.end ())
+        {
+            reply_error (identity, request_id, -32031,
+                         "No memory_curve config for fact_type " + fact_type_name);
+            return;
+        }
+        const auto &mc = it->second;
+        auto algo = MemoryCurveRegistry::instance ().resolve (mc.algorithm);
+        if (!algo)
+        {
+            reply_error (identity, request_id, -32031,
+                         "Algorithm not found: " + mc.algorithm);
+            return;
+        }
+
+        rapidjson::Document cfg_params;
+        cfg_params.Parse (mc.params_json.c_str ());
+
+        auto compute_fn = [&](std::optional<double> old_score, double sig) -> double
+        {
+            ScoreUpdateInput inp{old_score, sig};
+            return (*algo)(inp, cfg_params);
+        };
+
+        double new_score = 0.0;
+        if (!db_.record_user_fact (event, /*decayed=*/true, signal, compute_fn, source, new_score))
+        {
+            reply_error (identity, request_id, -32031, "Failed to record fact");
+            return;
+        }
+    }
+    else
+    {
+        double dummy_score = 0.0;
+        if (!db_.record_user_fact (event, /*decayed=*/false, 0.0,
+                                   [](std::optional<double>,double)->double{return 0.0;},
+                                   source, dummy_score))
+        {
+            reply_error (identity, request_id, -32031, "Failed to record fact");
+            return;
+        }
+    }
+
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  void Orchestrator::cmd_user_facts_get (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error");
+      return;
+    }
+    std::vector<std::string> fact_types;
+    if (params.HasMember ("fact_types") && params["fact_types"].IsArray ())
+    {
+      for (const auto &v : params["fact_types"].GetArray ())
+        if (v.IsString ())
+          fact_types.emplace_back (v.GetString ());
+    }
+
+    auto rows = db_.load_user_facts_for_user (user_id, fact_types);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("facts");
+    w.StartArray ();
+    for (const auto &row : rows)
+    {
+      w.StartObject ();
+      w.Key ("fact_type");
+      w.String (row.fact_type.c_str ());
+      w.Key ("fact_key");
+      w.String (row.fact_key.c_str ());
+      w.Key ("value");
+      rapidjson::Document val_doc;
+      if (!val_doc.Parse (row.fact_value.c_str ()).HasParseError ())
+        val_doc.Accept (w);
+      else
+        w.String (row.fact_value.c_str ());
+      w.Key ("updated_at");
+      w.Int64 (row.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_register (const std::string &params_json,
+                                           const std::string &identity,
+                                           const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_type") || !params["subject_type"].IsString ()
+        || !params.HasMember ("unit_type") || !params["unit_type"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string user_id = current_caller_key_id_;
+    if (user_id.empty ())
+    {
+      reply_error (identity, request_id, -32603, "Internal error");
+      return;
+    }
+    const std::string subject_type = params["subject_type"].GetString ();
+    const std::string unit_type = params["unit_type"].GetString ();
+    if (unit_type != "file" && unit_type != "line")
+    {
+      reply_error (identity, request_id, -32602,
+                    "unit_type must be 'file' or 'line'");
+      return;
+    }
+    std::string title;
+    if (params.HasMember ("title") && params["title"].IsString ())
+      title = params["title"].GetString ();
+
+    const std::string subject_id = new_uuid ();
+    int64_t ts = now_unix ();
+    Database::SubjectRow srow;
+    srow.subject_id = subject_id;
+    srow.user_id    = user_id;
+    srow.subject_type = subject_type;
+    srow.unit_type  = unit_type;
+    srow.title      = title;
+    srow.created_at = ts;
+    srow.updated_at = ts;
+    db_.insert_subject (srow);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("subject_id");
+    w.String (subject_id.c_str ());
+    w.Key ("created_at");
+    w.Int64 (ts);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_populate (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("units") || !params["units"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    auto subj = db_.load_subject (subject_id);
+    if (!subj || subj->user_id != current_caller_key_id_)
+    {
+      reply_error (identity, request_id, -32020, "subject not found");
+      return;
+    }
+    std::vector<std::string> units;
+    for (const auto &v : params["units"].GetArray ())
+      if (v.IsString ())
+        units.emplace_back (v.GetString ());
+
+    int inserted = 0, already = 0;
+    db_.populate_subject_units (subject_id, units, inserted, already);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("inserted");
+    w.Int (inserted);
+    w.Key ("already_known");
+    w.Int (already);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_next (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    int limit = 50;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto rows = db_.next_pending_subject_units (subject_id, limit);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("units");
+    w.StartArray ();
+    for (const auto &r : rows)
+    {
+      w.StartObject ();
+      w.Key ("unit_index");
+      w.Int (r.unit_index);
+      w.Key ("unit_ref");
+      w.String (r.unit_ref.c_str ());
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_units_complete (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("unit_indices") || !params["unit_indices"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    std::vector<int> indices;
+    for (const auto &v : params["unit_indices"].GetArray ())
+      if (v.IsInt ())
+        indices.push_back (v.GetInt ());
+
+    bool ok = db_.complete_subject_units (subject_id, indices);
+    reply_ok (identity, request_id, ok ? R"({"ok":true})" : R"({"ok":false})");
+  }
+
+  void Orchestrator::cmd_subject_units_progress (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    auto prog = db_.get_subject_progress (subject_id);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("total");
+    w.Int (prog.total);
+    w.Key ("completed");
+    w.Int (prog.completed);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_memory_upsert (const std::string &params_json,
+                                                const std::string &identity,
+                                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
+        || !params.HasMember ("entry_key") || !params["entry_key"].IsString ()
+        || !params.HasMember ("entry_value") || !params["entry_value"].IsObject ()
+        || !params.HasMember ("source_job_id") || !params["source_job_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id_str = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id_str);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    Database::SubjectMemoryRow row;
+    row.subject_id = params["subject_id"].GetString ();
+    row.entry_key  = params["entry_key"].GetString ();
+    {
+      rapidjson::StringBuffer vb;
+      rapidjson::Writer<rapidjson::StringBuffer> vw (vb);
+      params["entry_value"].Accept (vw);
+      row.entry_value = vb.GetString ();
+    }
+    if (params.HasMember ("related_asset_ids") && params["related_asset_ids"].IsArray ())
+    {
+      rapidjson::StringBuffer ab;
+      rapidjson::Writer<rapidjson::StringBuffer> aw (ab);
+      params["related_asset_ids"].Accept (aw);
+      row.related_asset_ids = ab.GetString ();
+    }
+    else
+      row.related_asset_ids = "[]";
+    row.source_job_id = params["source_job_id"].GetString ();
+    row.created_at = now_unix ();
+    row.updated_at = now_unix ();
+
+    // ADR-035 write-provenance addition. track defaults to "inferred" —
+    // the ordinary case for a domain Adviser's incremental analysis
+    // output. signed_off_by identifies which Adviser/Worker is making this
+    // specific write; it is NOT current_caller_key_id_ (that's the access
+    // key/user identity for the connected client, not the identity of a
+    // domain component like "compliance-adviser@v1") — a client's access
+    // key does not by itself authorize an attested write, so this must be
+    // an explicit, separate field.
+    std::string track = "inferred";
+    if (params.HasMember ("track") && params["track"].IsString ())
+      track = params["track"].GetString ();
+    row.track = track;
+
+    std::string signed_off_by;
+    if (params.HasMember ("signed_off_by") && params["signed_off_by"].IsString ())
+      signed_off_by = params["signed_off_by"].GetString ();
+
+    if (track == "attested" && signed_off_by.empty ())
+    {
+      reply_error (identity, request_id, -32602,
+                   "signed_off_by is required when track=\"attested\"");
+      return;
+    }
+
+    if (auto err = db_.upsert_subject_memory (row, signed_off_by))
+    {
+      // Only failure mode currently defined (Database::SubjectMemoryWriteError
+      // has exactly one enumerator) — no silent downgrade to "inferred",
+      // matching the no-silent-acceptance posture used elsewhere (e.g.
+      // ADR-031 §1 capability-format validation).
+      reply_error (identity, request_id, -32032,
+                   "sign-off denied: signed_off_by not authorized for "
+                   "entry_key \"" + row.entry_key + "\"");
+      return;
+    }
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("revision");
+    w.Int (row.revision);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_subject_memory_query (const std::string &params_json,
+                                               const std::string &identity,
+                                               const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string subject_id = params["subject_id"].GetString ();
+    {
+        auto subj = db_.load_subject (subject_id);
+        if (!subj || subj->user_id != current_caller_key_id_)
+        {
+            reply_error (identity, request_id, -32020, "subject not found");
+            return;
+        }
+    }
+    std::optional<std::string> key_prefix;
+    if (params.HasMember ("key_prefix") && params["key_prefix"].IsString ())
+      key_prefix = params["key_prefix"].GetString ();
+    int limit = 100;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+    std::optional<std::string> cursor;
+    if (params.HasMember ("cursor") && params["cursor"].IsString ())
+      cursor = params["cursor"].GetString ();
+
+    auto rows = db_.query_subject_memory (subject_id, key_prefix, limit, cursor);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("entries");
+    w.StartArray ();
+    for (const auto &r : rows)
+    {
+      w.StartObject ();
+      w.Key ("entry_key");
+      w.String (r.entry_key.c_str ());
+      w.Key ("entry_value");
+      rapidjson::Document val;
+      if (!val.Parse (r.entry_value.c_str ()).HasParseError ())
+        val.Accept (w);
+      else
+        w.String (r.entry_value.c_str ());
+      w.Key ("track");
+      w.String (r.track.c_str ());
+      w.Key ("signed_off_by");
+      if (r.signed_off_by) w.String (r.signed_off_by->c_str ());
+      else w.Null ();
+      w.Key ("signed_off_at");
+      if (r.signed_off_at) w.Int64 (*r.signed_off_at);
+      else w.Null ();
+      w.Key ("revision");
+      w.Int (r.revision);
+      w.Key ("updated_at");
+      w.Int64 (r.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    std::string next_cursor;
+    if (!rows.empty () && static_cast<int>(rows.size ()) == limit)
+      next_cursor = rows.back ().entry_key;
+    w.Key ("next_cursor");
+    if (next_cursor.empty ()) w.Null ();
+    else w.String (next_cursor.c_str ());
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  // ADR-035 write-provenance addition. Registers (or replaces) which
+  // adviser/worker identities may write track="attested" for entry_keys
+  // matching a given prefix. Intentionally has NO subject_id — policy is global,
+  // not per-subject, matching the design: "certification:" should mean
+  // the same thing for every subject a Suite registers, not be
+  // re-declared per product/codebase. Idempotent: re-registering an
+  // already-known prefix replaces its authorized_signers list wholesale.
+  void Orchestrator::cmd_subject_memory_write_policy_upsert (
+      const std::string &params_json, const std::string &identity,
+      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("entry_key_prefix")
+        || !params["entry_key_prefix"].IsString ()
+        || !params.HasMember ("authorized_signers")
+        || !params["authorized_signers"].IsArray ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string prefix = params["entry_key_prefix"].GetString ();
+    if (prefix.empty ())
+    {
+      // An empty prefix matches every entry_key (it's a prefix of
+      // anything) — refusing this outright is cheaper and clearer than
+      // letting it silently become "everything is attested-gated by this
+      // one rule," which is almost certainly not what an empty string
+      // was meant to express.
+      reply_error (identity, request_id, -32602,
+                   "entry_key_prefix must not be empty");
+      return;
+    }
+    for (auto &v : params["authorized_signers"].GetArray ())
+    {
+      if (!v.IsString ())
+      {
+        reply_error (identity, request_id, -32602,
+                     "authorized_signers must be an array of strings");
+        return;
+      }
+    }
+    rapidjson::StringBuffer wb;
+    rapidjson::Writer<rapidjson::StringBuffer> ww (wb);
+    params["authorized_signers"].Accept (ww);
+
+    if (!db_.upsert_subject_memory_write_policy (prefix, wb.GetString ()))
+    {
+      reply_error (identity, request_id, -32603,
+                   "Internal error: failed to write policy row");
+      return;
+    }
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+  // ---------------------------------------------------------------------------
+  // Command: worker.enable
+
+  void Orchestrator::cmd_worker_enable (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+    db_.set_worker_enabled (worker_id, true);
+    registry_.init (db_);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.disable
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_disable (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+    db_.set_worker_enabled (worker_id, false);
+    registry_.init (db_);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Command: worker.revoke
+  //
+  // Soft revoke (default): refuses if the worker has any running runs (-32022).
+  // Force revoke (force=true): sends SIGTERM then SIGKILL to all active run
+  // PIDs, marks them failed in DB, marks affected jobs failed in memory and
+  // DB, then permanently revokes the worker entry (enabled=-1).
+  // Use --force when a worker is stuck in a dead loop and cannot exit cleanly.
+  // Does not touch the filesystem — directory cleanup is the operator's
+  // responsibility.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_worker_revoke (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string worker_id = params["worker_id"].GetString ();
+    const bool force = params.HasMember ("force") && params["force"].IsBool ()
+                       && params["force"].GetBool ();
+
+    // Collect active runs for this worker from DB.
+    std::vector<WorkerRun> active_runs;
+    for (const auto &run : db_.get_active_worker_runs ())
+    {
+      if (run.worker_id == worker_id)
+        active_runs.push_back (run);
+    }
+
+    if (!active_runs.empty () && !force)
+    {
+      reply_error (identity, request_id, -32022,
+                   "Worker has active runs — use --force to kill them, "
+                   "or wait for jobs to complete");
+      return;
+    }
+
+    if (force && !active_runs.empty ())
+    {
+      // Step 1: SIGTERM all active PIDs.
+      for (const auto &run : active_runs)
+      {
+        if (run.pid > 0)
+        {
+          spdlog::warn ("[orchestrator] force-revoke {}: SIGTERM pid {}",
+                        worker_id, run.pid);
+          ::kill (run.pid, SIGTERM);
+        }
+      }
+
+      // Step 2: brief grace period then SIGKILL.
+      std::this_thread::sleep_for (std::chrono::milliseconds (200));
+      for (const auto &run : active_runs)
+      {
+        if (run.pid > 0)
+          ::kill (run.pid, SIGKILL);
+      }
+
+      // Step 3: find and fail all in-memory jobs whose current_run_id
+      // matches one of the killed runs. Must collect job_ids first to
+      // avoid iterator invalidation inside finish_job().
+      std::vector<std::string> jobs_to_fail;
+      for (const auto &[jid, job] : active_jobs_)
+      {
+        for (const auto &run : active_runs)
+        {
+          if (job.current_run_id == run.run_id)
+          {
+            jobs_to_fail.push_back (jid);
+            break;
+          }
+        }
+      }
+      for (const auto &jid : jobs_to_fail)
+      {
+        spdlog::warn (
+          "[orchestrator] force-revoke: failing job {} (worker {} killed)", jid,
+          worker_id);
+        finish_job (jid, false, "worker force-revoked by operator");
+      }
+    }
+
+    // Step 4: commit to DB — mark runs failed + set enabled=-1.
+    // For soft revoke (no active runs) this is equivalent to revoke_worker().
+    db_.force_revoke_worker (worker_id);
+    registry_.init (db_);
+    spdlog::warn ("[orchestrator] worker {} revoked (force={})", worker_id,
+                  force);
+    reply_ok (identity, request_id, R"({"ok":true})");
+  }
+
+  // ---------------------------------------------------------------------------
+  // WorkerDone
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_worker_done (const OrchestratorEvent &ev)
+  {
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
+      return;
+
+    const std::string run_id
+      = doc.HasMember ("run_id") && doc["run_id"].IsString ()
+          ? doc["run_id"].GetString ()
+          : "";
+    const std::string run_dir
+      = doc.HasMember ("run_dir") && doc["run_dir"].IsString ()
+          ? doc["run_dir"].GetString ()
+          : "";
+    const int exit_code
+      = doc.HasMember ("exit_code") && doc["exit_code"].IsInt ()
+          ? doc["exit_code"].GetInt ()
+          : 0;
+
+    // Dispatcher now carries the owning job_id explicitly. Keep the run_id
+    // lookup as a compatibility fallback for events produced by older code.
+    std::string job_id
+      = ev.job_id.empty () ? "" : ev.job_id;
+    if (job_id.empty ())
+      for (const auto &[jid, job] : active_jobs_)
+        if (job.current_run_id == run_id)
+        {
+          job_id = jid;
+          break;
+        }
+
+    if (job_id.empty ())
+    {
+      spdlog::warn ("[orchestrator] WorkerDone: unknown run_id {}", run_id);
+      return;
+    }
+
+    on_step_complete (job_id, run_id, exit_code, run_dir);
+  }
+
+  // ---------------------------------------------------------------------------
+  // WorkerFailed
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_worker_failed (const OrchestratorEvent &ev)
+  {
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
+      return;
+
+    const std::string run_id
+      = doc.HasMember ("run_id") && doc["run_id"].IsString ()
+          ? doc["run_id"].GetString ()
+          : "";
+    const int exit_code
+      = doc.HasMember ("exit_code") && doc["exit_code"].IsInt ()
+          ? doc["exit_code"].GetInt ()
+          : -1;
+
+    // Dispatcher now carries the owning job_id explicitly. Keep the run_id
+    // lookup as a compatibility fallback for events produced by older code.
+    std::string job_id
+      = ev.job_id.empty () ? "" : ev.job_id;
+    if (job_id.empty ())
+      for (const auto &[jid, job] : active_jobs_)
+        if (job.current_run_id == run_id)
+        {
+          job_id = jid;
+          break;
+        }
+
+    if (job_id.empty ())
+    {
+      spdlog::warn ("[orchestrator] WorkerFailed: unknown run_id {}", run_id);
+      return;
+    }
+
+    on_step_failed (job_id, run_id, exit_code);
+  }
+
+  // ---------------------------------------------------------------------------
+  // AdviserDone / AdviserFailed
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_adviser_done (const OrchestratorEvent &ev)
+  {
+    auto it = active_jobs_.find (ev.job_id);
+    if (it != active_jobs_.end ())
+    {
+      // ADR-031 §9/§10: the job already has an established Plan, so this
+      // AdviserDone is a target_type:"adviser" pipeline step's result, not
+      // an initial Planning response — handle exactly like
+      // on_step_complete's Worker path (persist result, advance pipeline),
+      // not "forward to Master as a new Plan".
+      ActiveJob &job = it->second;
+      if (job.pending_steps.empty ())
+        return;
+
+      rapidjson::Document doc;
+      std::string result_json = "{}";
+      int step_tokens_prompt = 0;
+      int step_tokens_completion = 0;
+      if (!doc.Parse (ev.payload_json.c_str ()).HasParseError ()
+          && doc.IsObject () && doc.HasMember ("result"))
+      {
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        doc["result"].Accept (w);
+        result_json = buf.GetString ();
+
+        // Amendment: this step's own LLM token usage, set by
+        // dispatch_adviser_step — previously computed but discarded,
+        // leaving every target_type:"adviser" step's tokens permanently
+        // 0 in job.status's steps[] (ADR-039 §B).
+        if (doc.HasMember ("tokens_prompt") && doc["tokens_prompt"].IsInt ())
+          step_tokens_prompt = doc["tokens_prompt"].GetInt ();
+        if (doc.HasMember ("tokens_completion")
+            && doc["tokens_completion"].IsInt ())
+          step_tokens_completion = doc["tokens_completion"].GetInt ();
+      }
+
+      // ADR-038 post‑completion: check for "updated_context" in the
+      // adviser’s output and, if present, create a fresh continuation row.
+      const ActiveStep &step_ref = job.pending_steps.front ();
+      bool final_step = (job.pending_steps.size () == 1);
+      rapidjson::Document out_doc;
+      bool has_out_doc = false;
+      if (!out_doc.Parse (result_json.c_str ()).HasParseError ()
+          && out_doc.IsObject ())
+        has_out_doc = true;
+      std::string updated_context_str;
+      if (has_out_doc && out_doc.HasMember ("updated_context"))
+      {
+        rapidjson::StringBuffer ctx_buf;
+        rapidjson::Writer<rapidjson::StringBuffer> ctx_w (ctx_buf);
+        out_doc["updated_context"].Accept (ctx_w);
+        updated_context_str = ctx_buf.GetString ();
+      }
+
+      if (!updated_context_str.empty ())
+      {
+        auto adv_obj = registry_.find_adviser_by_id (step_ref.step.command);
+        if (adv_obj && adv_obj->supports_continuation)
+        {
+          Database::InteractionContinuationRow row;
+          row.continuation_id = new_uuid ();
+          row.user_id         = job.user_id;
+          row.adviser_id      = step_ref.step.command;
+          row.context_payload = std::move (updated_context_str);
+          row.created_at      = now_unix ();
+          row.consumed_at     = std::nullopt;
+          db_.insert_interaction_continuation (row);
+          spdlog::info ("[orchestrator] created continuation {} for "
+                       "step‑adviser {} (job {})",
+                       row.continuation_id, step_ref.step.command, job.job_id);
+
+          if (final_step)
+          {
+            const fs::path output_dir
+              = agentos_home () / "jobs" / job.job_id / "output";
+            const std::string hint_file = "continuation_hint.json";
+            const fs::path hint_path = output_dir / hint_file;
+            std::error_code ec;
+            fs::create_directories (output_dir, ec);
+            if (!ec)
+            {
+              std::string hint_json
+                = std::string ("{\"continuation_id\":\"") + row.continuation_id + "\"}";
+              std::ofstream ofs (hint_path);
+              if (ofs) ofs << hint_json;
+              else
+                spdlog::warn ("[orchestrator] could not write {}",
+                              hint_path.string ());
+            }
+            else
+              spdlog::warn ("[orchestrator] mkdir {}: {}",
+                            output_dir.string (), ec.message ());
+
+            // Attach bridge_hint to result JSON
+            if (!has_out_doc)
+            {
+              out_doc.SetObject ();
+              has_out_doc = true;
+            }
+            rapidjson::Value hint_obj (rapidjson::kObjectType);
+            hint_obj.AddMember ("key",
+              rapidjson::Value ("interaction_continuation", out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            hint_obj.AddMember ("path",
+              rapidjson::Value (hint_file.c_str (), out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            out_doc.AddMember ("bridge_hint", std::move (hint_obj),
+                               out_doc.GetAllocator ());
+          }
+        }
+      }
+
+      // Re‑serialize result_json if it was mutated
+      if (has_out_doc && !updated_context_str.empty () && final_step)
+      {
+        rapidjson::StringBuffer new_buf;
+        rapidjson::Writer<rapidjson::StringBuffer> nw (new_buf);
+        out_doc.Accept (nw);
+        result_json = new_buf.GetString ();
+      }
+
+      db_.update_step_result (job.pending_steps.front ().step.id, result_json);
+      db_.update_step_tokens (job.pending_steps.front ().step.id,
+                              step_tokens_prompt, step_tokens_completion);
+      job.last_step_result = result_json;
+      job.pending_steps.pop_front ();
+
+      notify ("job.step_changed",
+              R"({"job_id":")" + ev.job_id + R"(","status":"done"})",
+              build_job_status_json (ev.job_id));
+
+      dispatch_next_step (job);
+      return;
+    }
+
+    // Job not yet active — this is the initial Planning/domain-Adviser
+    // response (a Plan), forward to Master for review as before.
+    MasterEvent me;
+    me.kind = MasterEvent::Kind::JobSubmit;
+    me.job_id = ev.job_id;
+    me.payload_json = ev.payload_json;
+    send_to_master_ (std::move (me));
+  }
+
+  void Orchestrator::handle_adviser_failed (const OrchestratorEvent &ev)
+  {
+    if (active_jobs_.count (ev.job_id))
+    {
+      // ADR-031 §11: an already-dispatched adviser-target step failed —
+      // same local-retry policy as a Worker-target step's runtime failure,
+      // never escalate to Master here (Forge cannot help; it never
+      // generates Advisers).
+      on_step_failed (ev.job_id, /*run_id=*/"", /*exit_code=*/-1);
+      return;
+    }
+
+    // Job not yet active — the initial Planning/domain-Adviser spawn
+    // itself failed. This is a genuine Master-level concern (no step
+    // exists yet to retry).
+    MasterEvent me;
+    me.kind = MasterEvent::Kind::AdviserFailed;
+    me.job_id = ev.job_id;
+    me.payload_json = ev.payload_json;
+    send_to_master_ (std::move (me));
+  }
+
+  // ---------------------------------------------------------------------------
+  // MasterDecision
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_master_decision (const OrchestratorEvent &ev)
+  {
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
+      return;
+
+    if (!doc.HasMember ("type") || !doc["type"].IsString ())
+      return;
+
+    const std::string type = doc["type"].GetString ();
+
+    if (type == "spawn_adviser")
+    {
+      // Master has selected an Adviser — spawn it as a detached thread.
+      // Thread calls LlmProxy, produces plan_ready or AdviserFailed.
+      // ADR-018: skill.md is the system prompt; Adviser owns its session.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      const std::string adviser_id
+        = doc.HasMember ("adviser_id") && doc["adviser_id"].IsString ()
+            ? doc["adviser_id"].GetString ()
+            : "";
+      const std::string goal = doc.HasMember ("goal") && doc["goal"].IsString ()
+                                 ? doc["goal"].GetString ()
+                                 : "";
+      // ADR-012 (amended): Master's Digest Pass output, riding alongside
+      // the raw goal on this event. digested_problem is the primary input
+      // handed to the spawned Adviser below; goal remains available as a
+      // fallback (see the detached-thread user-prompt construction further
+      // down). deliverable_kind is persisted once here — the only place a
+      // job's entry Adviser is spawned — and consumed later by the
+      // forge_complete handler (ADR-031 §12).
+      const std::string digested_problem
+        = doc.HasMember ("digested_problem") && doc["digested_problem"].IsString ()
+            ? doc["digested_problem"].GetString ()
+            : goal;
+      const std::string deliverable_kind
+        = doc.HasMember ("deliverable_kind") && doc["deliverable_kind"].IsString ()
+            ? doc["deliverable_kind"].GetString ()
+            : "result";
+
+      if (job_id.empty () || adviser_id.empty ())
+      {
+        spdlog::error (
+          "[orchestrator] spawn_adviser: missing job_id or adviser_id");
+        return;
+      }
+
+      spdlog::info ("[orchestrator] spawning adviser {} for job {}", adviser_id,
+                    job_id);
+      db_.set_job_adviser_id (job_id, adviser_id);
+      db_.set_job_deliverable_kind (job_id, deliverable_kind);
+
+      // Read skill.md as system prompt (ADR-018).
+      auto home = agentos_home ();
+      const std::string skill_path
+        = (home / "advisers" / adviser_id / "skill.md").string ();
+      std::string system_prompt;
+      {
+        std::ifstream f (skill_path);
+        if (f)
+          system_prompt.assign (std::istreambuf_iterator<char> (f),
+                                std::istreambuf_iterator<char> ());
+        else
+          spdlog::warn (
+            "[orchestrator] skill.md not found for adviser {}, using empty "
+            "system prompt",
+            adviser_id);
+      }
+
+      // Skip injecting capability/adviser lists entirely for an adviser
+      // that structurally can never produce a Plan (manifest.toml
+      // [capabilities] can_produce_plan = false) — it could never
+      // legitimately use this information, and its presence (formatted
+      // identically to how a real Plan-authoring adviser's prompt looks)
+      // is a plausible contributor to exactly the failure this flag exists
+      // to guard against: the model pattern-completing into producing a
+      // Plan anyway, especially on later turns of a conversation, rather
+      // than literally re-checking the system prompt's "always respond
+      // this way" instruction every time. Removing the temptation at the
+      // source is a stronger fix than only catching the violation after
+      // the fact in plan_ready.
+      const bool adviser_can_produce_plan = [&]
+      {
+        auto reg = registry_.find_adviser_by_id (adviser_id);
+        return !reg || reg->can_produce_plan;
+      } ();
+
+      // Query Registry for current enabled capabilities — inject at spawn time
+      // so the Planning Adviser selects from actual registered methods
+      // (ADR-031). This is dynamic data; it must NOT live in skill.md.
+      std::string capability_list_str;
+      if (adviser_can_produce_plan)
+      {
+        auto caps = db_.load_capabilities ();
+        if (caps.empty ())
+        {
+          capability_list_str = "Available capabilities (use ONLY these "
+                                "exact strings as command values for "
+                                "target_type: \"worker\" steps): none "
+                                "registered\n";
+        }
+        else
+        {
+          capability_list_str
+            = "Available capabilities (use ONLY these exact strings as "
+              "command values for target_type: \"worker\" steps):\n";
+          for (const auto &c : caps)
+          {
+            capability_list_str += "  " + c.method;
+            if (!c.description.empty ())
+              capability_list_str += "  — " + c.description;
+            capability_list_str += "\n";
+            // input_schema tells the Adviser the EXACT field names a step's
+            // "input" object must use (e.g. "input_path"/"format") — the
+            // description alone is not sufficient; an Adviser without this
+            // will invent plausible-sounding names ("source_file") instead
+            // of the ones the Worker actually reads, and silently omit
+            // fields never mentioned in prose (e.g. "format").
+            if (!c.input_schema.empty () && c.input_schema != "{}")
+              capability_list_str
+                += "    input schema: " + c.input_schema + "\n";
+          }
+        }
+      }
+
+      // ADR-031 §3 addition: inject the other registered, enabled Advisers
+      // (excluding this one) so a Plan-authoring Adviser can target
+      // target_type: "adviser" steps for judgment-requiring work. Fresh at
+      // every spawn, same no-caching policy as the capability list above.
+      //
+      // Also excludes any candidate whose own manifest.toml declares
+      // entry_only = true — this is the actual fix for a mistake observed
+      // in both directions this session (User Intent's Plan targeted
+      // Gap-Mining; Gap-Mining's Plan targeted User Intent). An entry_only
+      // adviser's description is written to tell the BRIDGE when to
+      // invoke it (e.g. gap-mining's own: "...to gently explore what the
+      // user actually wants...") — read out of that context by another
+      // Plan-authoring Adviser, it looks like a perfectly good reason to
+      // delegate to it. The model wasn't malfunctioning; it made a locally
+      // reasonable call on a description written for the wrong audience.
+      // plan_ready's entry_only rejection guard still exists as a
+      // backstop, but removing the temptation at the source — never
+      // showing it as an option at all — is the real fix, same principle
+      // as can_produce_plan=false skipping this injection entirely above.
+      std::string adviser_list_str;
+      if (adviser_can_produce_plan)
+      {
+        auto agents = db_.load_enabled_agents ();
+        std::vector<Database::AgentRow> other_advisers;
+        for (const auto &a : agents)
+        {
+          if (a.role != "adviser" || a.id == adviser_id)
+            continue;
+          auto candidate_reg = registry_.find_adviser_by_id (a.id);
+          if (candidate_reg && candidate_reg->entry_only)
+            continue;
+          other_advisers.push_back (a);
+        }
+
+        if (other_advisers.empty ())
+        {
+          adviser_list_str = "Available advisers (use ONLY these exact "
+                             "strings as command values for target_type: "
+                             "\"adviser\" steps): none registered\n";
+        }
+        else
+        {
+          adviser_list_str
+            = "Available advisers (you MAY target these for steps "
+              "requiring judgment formed at execution time, using "
+              "target_type: \"adviser\" and this exact string as "
+              "command):\n";
+          for (const auto &a : other_advisers)
+          {
+            adviser_list_str += "  " + a.id;
+            if (!a.description.empty ())
+              adviser_list_str += "  — " + a.description;
+            adviser_list_str += "\n";
+          }
+        }
+      }
+
+      // Assets attached to this job at submission time (cmd_job_submit) —
+      // queried here, on the Orchestrator thread, same as capability/adviser
+      // lists above; the detached thread below only ever sees pre-built
+      // strings, never touches db_ itself.
+      std::string attached_assets_str;
+      {
+        auto job_assets = db_.load_job_assets (job_id);
+        if (!job_assets.empty ())
+        {
+          attached_assets_str
+            = "Attached assets (reference in a step's input using "
+              "$asset:<asset_id> — write the exact asset_id shown, not the "
+              "filename):\n";
+          for (const auto &ja : job_assets)
+            attached_assets_str
+              += "  " + ja.filename + "  (asset_id: " + ja.asset_id + ")\n";
+        }
+      }
+
+      // ADR-038: consume a pending continuation (if any) *before* the
+      // one‑shot LLM call. Must happen on the Orchestrator thread.
+      //
+      // Fast in-memory check first (registry_ is already populated from
+      // the DB and refreshed on every register/enable/disable mutation —
+      // see Registry::init) — this keeps the invocation path for every
+      // non-opted-in Adviser (Planning, Code Writer, Code Reviewer, and
+      // any domain Adviser that doesn't declare [continuation] supports =
+      // true) exactly as cheap as it was before this ADR: zero extra DB
+      // hits. Only an Adviser that both opted in AND was actually handed
+      // a continuation_id at job.submit time reaches the DB lookup below.
+      std::string context_payload_consumed;
+      bool has_consumed_continuation = false;
+      std::string job_user_id;
+
+      auto reg_adviser_for_cont = registry_.find_adviser_by_id (adviser_id);
+      if (!reg_adviser_for_cont || !reg_adviser_for_cont->supports_continuation)
+      {
+        // Entry Adviser doesn't opt in — any continuation_id supplied at
+        // job.submit time for this job is meaningless and discarded
+        // silently here (same "degrade silently, never error" posture as
+        // an unknown/expired continuation_id). Must still erase the
+        // pending entry, or it would never be cleaned up (there is no
+        // other cleanup path for this specific case).
+        pending_continuation_ids_.erase (job_id);
+      }
+      else
+      {
+        // job_user_id is needed regardless of whether an incoming
+        // continuation_id is present: turn 1 of a chain (no incoming
+        // continuation_id yet, just about to produce the first
+        // updated_context below) still needs it for the post-completion
+        // write. Only fetched here, inside the opt-in branch, so
+        // non-opted-in Advisers still incur zero extra DB hits.
+        if (auto maybe_job = db_.load_job (job_id))
+          job_user_id = maybe_job->user_id;
+
+        auto it = pending_continuation_ids_.find (job_id);
+        if (it != pending_continuation_ids_.end ())
+        {
+          const std::string cid = it->second;
+          pending_continuation_ids_.erase (it);
+
+          if (!cid.empty ())
+          {
+            auto row = db_.read_and_consume_continuation (
+              cid, job_user_id, adviser_id);
+            if (row)
+            {
+              context_payload_consumed = std::move (row->context_payload);
+              has_consumed_continuation = true;
+              spdlog::info ("[orchestrator] consumed continuation {} for "
+                           "adviser {} (job {})",
+                           cid, adviser_id, job_id);
+            }
+            else
+              spdlog::warn ("[orchestrator] continuation_id {} not found / "
+                           "already consumed / mismatched for adviser {} "
+                           "(job {}), proceeding without it",
+                           cid, adviser_id, job_id);
+          }
+        }
+      }
+
+      // Detach LLM thread — never blocks Orchestrator event loop.
+      // Captures by value; `this` is safe (Orchestrator outlives all threads).
+      std::thread (
+        [this, job_id, goal, digested_problem,
+         system_prompt = std::move (system_prompt),
+         capability_list_str = std::move (capability_list_str),
+         adviser_list_str = std::move (adviser_list_str),
+         attached_assets_str = std::move (attached_assets_str),
+         adviser_id,
+         context_payload_consumed = std::move (context_payload_consumed),
+         has_consumed_continuation,
+         job_user_id = std::move (job_user_id)] () mutable
+        {
+          // ADR-033: inject domain‑knowledge from the selected Adviser’s
+          // package
+          std::string domain_knowledge;
+          {
+            auto home = agentos_home ();
+            auto knowledge_path
+              = home / "advisers" / adviser_id / "knowledge" / "pipeline.md";
+            if (std::filesystem::exists (knowledge_path))
+            {
+              std::ifstream f (knowledge_path);
+              if (f)
+              {
+                domain_knowledge
+                  += "--- " + adviser_id + "/knowledge/pipeline.md ---\n";
+                domain_knowledge
+                  += std::string (std::istreambuf_iterator<char> (f),
+                                  std::istreambuf_iterator<char> ())
+                     + "\n---\n";
+              }
+              else
+                spdlog::warn ("[orchestrator] cannot read {}",
+                              knowledge_path.string ());
+            }
+          }
+
+          // LlmProxy has no complete(); LlmClient wraps it (ADR-017).
+          LlmClient client (llm_, config_.llm);
+
+          LlmRequest req;
+          req.system_prompt = std::move (system_prompt);
+          // ADR-040: propagate the AgentOS tenant identity to the LLM layer.
+          // DeepSeek maps this field to its provider-side user_id isolation.
+          req.user_id = std::move (job_user_id);
+
+          std::string user;
+          if (has_consumed_continuation && !context_payload_consumed.empty ())
+            user = "Context from previous interaction:\n"
+                   + context_payload_consumed + "\n\n";
+          // ADR-012 (amended): digested_problem is Master's Digest Pass
+          // rewrite of the goal and is the primary input; the original
+          // goal rides alongside it as a fallback field, not a
+          // replacement — if a given Digest Pass prompt version produces
+          // a poor digestion, the raw goal remains available to the
+          // Adviser (and to a human reviewing the job later) rather than
+          // being fully occluded by Master's rewritten version.
+          user += "Goal: " + digested_problem + "\n\n";
+          if (digested_problem != goal)
+            user += "Original user goal (verbatim, for reference): " + goal
+                   + "\n\n";
+          user += capability_list_str + "\n";
+          user += adviser_list_str + "\n";
+          if (!attached_assets_str.empty ())
+            user += attached_assets_str + "\n";
+          if (!domain_knowledge.empty ())
+            user += "Domain knowledge:\n" + domain_knowledge;
+          user
+            += "\nDecompose the following goal into an ordered list of steps.\n"
+               "Respond ONLY with a JSON object — no markdown, no prose — in "
+               "this exact shape:\n"
+               "{\"steps\":[{\"id\":\"<uuid>\",\"target_type\":\"worker\"|"
+               "\"adviser\",\"command\":\"<capability method (worker) or "
+               "adviser ref (adviser)>\",\"needs_forge\":<bool, required "
+               "for target_type:\\\"worker\\\", omit or false for "
+               "target_type:\\\"adviser\\\">,"
+               "\"description\":\"<what this step does>\","
+               "\"input\":{\"...\":\"step-specific input; reference an "
+               "earlier step's result with \\\"$step:<step id>.<field>\\\", "
+               "the immediately preceding step's whole result with "
+               "\\\"$prev_result\\\", an attached asset's file path with "
+               "\\\"$asset:<asset_id>\\\" (see Attached assets below, if "
+               "any), or a real path to write this job's output to by "
+               "prefixing a filename with \\\"$job_output_dir\\\" e.g. "
+               "\\\"$job_output_dir/translated.md\\\"\"}},...]}.\n"
+               "Every step MUST include target_type — there is no default. "
+               "Set needs_forge:true for any target_type:\"worker\" step "
+               "whose required capability is not in the Available "
+               "capabilities list. target_type:\"adviser\" steps must use "
+               "an exact string from the Available advisers list and must "
+               "not set needs_forge:true (Forge generates Workers, never "
+               "Advisers).\n";
+
+          req.user_prompt = user;
+          req.max_tokens = 4096;
+
+          auto result = client.complete (req);
+
+          OrchestratorEvent ev;
+          ev.job_id = job_id;
+
+          if (!result.ok)
+          {
+            spdlog::error (
+              "[orchestrator] adviser LLM call failed for job {}: {}", job_id,
+              result.error);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json
+              = R"({"job_id":")" + job_id + R"(","reason":"LLM call failed"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          // Strip markdown fence if LLM wrapped response in ```json...```
+          std::string content = result.value.content;
+          if (content.size () >= 3 && content.substr (0, 3) == "```")
+          {
+            auto first_nl = content.find ('\n');
+            if (first_nl != std::string::npos)
+              content = content.substr (first_nl + 1);
+            if (content.size () >= 3
+                && content.substr (content.size () - 3) == "```")
+              content.erase (content.size () - 3);
+            while (!content.empty ()
+                   && (content.back () == '\n' || content.back () == '\r'
+                       || content.back () == ' '))
+              content.pop_back ();
+          }
+
+          // Parse response JSON from LLM. Two mutually exclusive shapes are
+          // valid (Suite-ADR-001 §A): a Plan ({"steps":[...]}) or a
+          // clarification request ({"needs_clarification":true, ...}).
+          rapidjson::Document resp;
+          if (resp.Parse (content.c_str ()).HasParseError ()
+              || !resp.IsObject ())
+          {
+            spdlog::error (
+              "[orchestrator] adviser produced invalid JSON for job {}: {}",
+              job_id, content);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json = R"({"job_id":")" + job_id
+                              + R"(","reason":"invalid response JSON"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          const bool wants_clarification
+            = resp.HasMember ("needs_clarification")
+              && resp["needs_clarification"].IsBool ()
+              && resp["needs_clarification"].GetBool ();
+
+          if (wants_clarification)
+          {
+            // A missing/empty clarification_question is not recoverable
+            // the way an absent bridge_hint is — fall through to
+            // AdviserFailed rather than silently degrading, per §A.
+            if (!resp.HasMember ("clarification_question")
+                || !resp["clarification_question"].IsString ()
+                || std::string (
+                     resp["clarification_question"].GetString ())
+                     .empty ())
+            {
+              spdlog::error (
+                "[orchestrator] adviser set needs_clarification but "
+                "omitted clarification_question for job {}: {}",
+                job_id, content);
+              ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+              ev.payload_json
+                = R"({"job_id":")" + job_id
+                  + R"(","reason":"needs_clarification with no question"})";
+              enqueue (std::move (ev));
+              return;
+            }
+
+            // clarification_options, if present, must be an array of
+            // strings — a malformed options field invalidates the whole
+            // response (do not silently drop just the options).
+            if (resp.HasMember ("clarification_options"))
+            {
+              bool options_ok = resp["clarification_options"].IsArray ();
+              if (options_ok)
+                for (const auto &opt :
+                     resp["clarification_options"].GetArray ())
+                  if (!opt.IsString ())
+                  {
+                    options_ok = false;
+                    break;
+                  }
+              if (!options_ok)
+              {
+                spdlog::error (
+                  "[orchestrator] adviser's clarification_options is "
+                  "malformed for job {}: {}",
+                  job_id, content);
+                ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+                ev.payload_json
+                  = R"({"job_id":")" + job_id
+                    + R"(","reason":"malformed clarification_options"})";
+                enqueue (std::move (ev));
+                return;
+              }
+            }
+
+            // Build the result_json this job will expose at job.status.
+            rapidjson::Document out_doc;
+            out_doc.SetObject ();
+            out_doc.AddMember ("needs_clarification", true,
+                               out_doc.GetAllocator ());
+            out_doc.AddMember (
+              "clarification_question",
+              rapidjson::Value (resp["clarification_question"].GetString (),
+                                 out_doc.GetAllocator ()),
+              out_doc.GetAllocator ());
+            if (resp.HasMember ("clarification_options"))
+            {
+              rapidjson::Value opts (rapidjson::kArrayType);
+              for (const auto &opt : resp["clarification_options"].GetArray ())
+                opts.PushBack (
+                  rapidjson::Value (opt.GetString (), out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+              out_doc.AddMember ("clarification_options", std::move (opts),
+                                 out_doc.GetAllocator ());
+            }
+
+            // ADR-038 post-completion: whether a continuation gets created
+            // is a structural decision — this adviser declared
+            // supports_continuation in its own manifest, and this response
+            // IS a needs_clarification turn — not something the model's
+            // response should be able to accidentally suppress by omitting
+            // updated_context. That field's *content* is genuinely optional
+            // (the adviser may have nothing worth carrying forward this
+            // turn), but its *absence* must not silently disable
+            // continuation entirely — that previously made whether a
+            // conversation could continue depend on LLM output variance,
+            // which is exactly backwards: continuability is the sender
+            // side's capability, not the model's to decide turn by turn.
+            // Unlike the Plan-shape branch below (which never attaches
+            // bridge_hint, since Planning is never itself the final step of
+            // a job), this response IS the job's terminal output — there is
+            // no pipeline to run afterward — so we DO attach bridge_hint
+            // here, mirroring handle_adviser_done's final_step==true branch.
+            {
+              auto reg_adviser = registry_.find_adviser_by_id (adviser_id);
+              if (reg_adviser && reg_adviser->supports_continuation)
+              {
+                std::string updated_ctx = "{}";
+                if (resp.HasMember ("updated_context"))
+                {
+                  rapidjson::StringBuffer ctx_buf;
+                  rapidjson::Writer<rapidjson::StringBuffer> ctw (ctx_buf);
+                  resp["updated_context"].Accept (ctw);
+                  updated_ctx = ctx_buf.GetString ();
+                }
+                else
+                  spdlog::info ("[orchestrator] adviser {} (job {}) omitted "
+                               "updated_context on a needs_clarification "
+                               "response — continuation still created with "
+                               "an empty context payload",
+                               adviser_id, job_id);
+
+                Database::InteractionContinuationRow row;
+                row.continuation_id = new_uuid ();
+                row.user_id         = job_user_id;
+                row.adviser_id      = adviser_id;
+                row.context_payload = std::move (updated_ctx);
+                row.created_at      = now_unix ();
+                row.consumed_at     = std::nullopt;
+                db_.insert_interaction_continuation (row);
+                spdlog::info ("[orchestrator] created continuation {} for "
+                             "entry adviser {} (job {}, clarification)",
+                             row.continuation_id, adviser_id, job_id);
+
+                const fs::path output_dir
+                  = agentos_home () / "jobs" / job_id / "output";
+                const std::string hint_file = "continuation_hint.json";
+                std::error_code ec;
+                fs::create_directories (output_dir, ec);
+                if (!ec)
+                {
+                  std::ofstream ofs (output_dir / hint_file);
+                  if (ofs)
+                    ofs << "{\"continuation_id\":\"" << row.continuation_id
+                        << "\"}";
+                  else
+                    spdlog::warn ("[orchestrator] could not write {}",
+                                 (output_dir / hint_file).string ());
+                }
+                else
+                  spdlog::warn ("[orchestrator] mkdir {}: {}",
+                               output_dir.string (), ec.message ());
+
+                rapidjson::Value hint_obj (rapidjson::kObjectType);
+                hint_obj.AddMember (
+                  "key",
+                  rapidjson::Value ("interaction_continuation",
+                                    out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+                hint_obj.AddMember (
+                  "path",
+                  rapidjson::Value (hint_file.c_str (),
+                                    out_doc.GetAllocator ()),
+                  out_doc.GetAllocator ());
+                out_doc.AddMember ("bridge_hint", std::move (hint_obj),
+                                   out_doc.GetAllocator ());
+              }
+            }
+
+            rapidjson::StringBuffer out_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
+            out_doc.Accept (out_w);
+            const std::string clarification_result_json = out_buf.GetString ();
+
+            // No PipelinePlan was produced, so there is no pipeline step to
+            // dispatch and this job never enters active_jobs_. But
+            // cmd_job_status's "done" result_json/bridge_hint exposure is
+            // hard-wired to read steps.back().result_json — that's the
+            // only source it has (there is no job-level result_json
+            // column). So this entry Adviser's own completion is persisted
+            // as a single synthetic step, already "done", purely so the
+            // existing query-time code picks it up unmodified. This is the
+            // one piece of plumbing the original §A design didn't
+            // anticipate — it assumed a job-level result_json write path
+            // that doesn't actually exist.
+            PipelinePlanStep synthetic_step;
+            synthetic_step.id = new_uuid ();
+            synthetic_step.target_type = "adviser";
+            synthetic_step.command = adviser_id;
+            synthetic_step.description
+              = "Entry adviser clarification response";
+            synthetic_step.needs_forge = false;
+            db_.store_pipeline_task (TaskId (job_id), synthetic_step,
+                                     /*order=*/0);
+            db_.update_step_result (synthetic_step.id,
+                                    clarification_result_json);
+
+            // active_jobs_ is only ever touched from the Orchestrator's own
+            // event-loop thread, never from this detached thread — enqueue
+            // a lightweight event and let handle_master_decision's
+            // "needs_clarification_done" branch call finish_job() on the
+            // correct thread, matching how plan_ready already hands off to
+            // the main thread below instead of building the ActiveJob here.
+            ev.kind = OrchestratorEvent::Kind::MasterDecision;
+            ev.payload_json
+              = R"({"type":"needs_clarification_done","job_id":")" + job_id
+                + R"("})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          if (!resp.HasMember ("steps") || !resp["steps"].IsArray ())
+          {
+            spdlog::error (
+              "[orchestrator] adviser produced invalid plan for job {}: {}",
+              job_id, content);
+            ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+            ev.payload_json = R"({"job_id":")" + job_id
+                              + R"(","reason":"invalid plan JSON"})";
+            enqueue (std::move (ev));
+            return;
+          }
+
+          // Assign stable UUIDs to any steps that lack one.
+          for (auto &s : resp["steps"].GetArray ())
+          {
+            if (!s.HasMember ("id") || !s["id"].IsString ()
+                || std::string (s["id"].GetString ()).empty ())
+            {
+              s.AddMember (
+                rapidjson::Value ("id", resp.GetAllocator ()),
+                rapidjson::Value (new_uuid ().c_str (), resp.GetAllocator ()),
+                resp.GetAllocator ());
+            }
+          }
+
+          // ADR-038 post‑completion: if the parsed output includes an
+          // "updated_context" field, write a new interaction‑continuation
+          // row. The planning Adviser is never a pipeline step, so we do
+          // NOT attach any bridge_hint for it.
+          if (resp.HasMember ("updated_context"))
+          {
+            std::string updated_ctx;
+            {
+              rapidjson::StringBuffer ctx_buf;
+              rapidjson::Writer<rapidjson::StringBuffer> ctw (ctx_buf);
+              resp["updated_context"].Accept (ctw);
+              updated_ctx = ctx_buf.GetString ();
+            }
+            // Only produce a row if the Adviser is opted‑in. Fast
+            // in-memory check (same rationale as the pre-call check
+            // above) rather than a DB round trip.
+            {
+              auto reg_adviser = registry_.find_adviser_by_id (adviser_id);
+              if (reg_adviser && reg_adviser->supports_continuation)
+              {
+                Database::InteractionContinuationRow row;
+                row.continuation_id = new_uuid ();          // fresh UUID
+                row.user_id         = job_user_id;
+                row.adviser_id      = adviser_id;
+                row.context_payload = std::move (updated_ctx);
+                row.created_at      = now_unix ();
+                row.consumed_at     = std::nullopt;
+                db_.insert_interaction_continuation (row);
+                spdlog::info ("[orchestrator] created continuation {} for "
+                             "planning adviser {} (job {})",
+                             row.continuation_id, adviser_id, job_id);
+              }
+            }
+          }
+
+          // Build plan_ready payload — enqueue directly as MasterDecision
+          // so handle_master_decision picks it up on the Orchestrator thread.
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("type");
+          w.String ("plan_ready");
+          w.Key ("job_id");
+          w.String (job_id.c_str ());
+          w.Key ("job_type");
+          w.String ("oneshot");
+          w.Key ("steps");
+          resp["steps"].Accept (w);
+          // Carry Planning Adviser token usage so it can be stored on step 0.
+          w.Key ("planning_tokens_prompt");
+          w.Int (result.value.prompt_tokens);
+          w.Key ("planning_tokens_completion");
+          w.Int (result.value.completion_tokens);
+          w.EndObject ();
+
+          ev.kind = OrchestratorEvent::Kind::MasterDecision;
+          ev.payload_json = buf.GetString ();
+          enqueue (std::move (ev));
+        })
+        .detach ();
+
+      return;
+    }
+
+    if (type == "needs_clarification_done")
+    {
+      // Suite-ADR-001 §A: the entry Adviser's response, its DB-side
+      // continuation row/hint file, and its synthetic "done" step were all
+      // already built and persisted on the detached LLM thread (identical
+      // db_ usage to the existing ADR-038 continuation write a few lines
+      // below, which already runs from that same thread). The only thing
+      // that must happen on THIS thread is finish_job, since it touches
+      // active_jobs_ — an in-memory map the Orchestrator's event loop owns
+      // exclusively and that is never safe to mutate from another thread.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      if (job_id.empty ())
+      {
+        spdlog::error (
+          "[orchestrator] needs_clarification_done: missing job_id");
+        return;
+      }
+      finish_job (job_id, /*success=*/true, /*error=*/"");
+      return;
+    }
+
+    if (type == "plan_ready")
+    {
+      // Master has produced a plan — build ActiveJob and start pipeline.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      if (job_id.empty ())
+        return;
+
+      // Parse pipeline steps from payload.
+      ActiveJob job;
+      job.job_id = job_id;
+      job.type = (doc.HasMember ("job_type") && doc["job_type"].IsString ())
+                   ? doc["job_type"].GetString ()
+                   : "oneshot";
+
+      // ADR-029 + ADR-038: store the owning user for later use (continuation reads/writes).
+      std::string originating_adviser_id;
+      std::string originating_goal;
+      if (auto j = db_.load_job (job_id); j)
+      {
+        job.user_id = j->user_id;
+        originating_goal = j->goal;
+        if (j->adviser_id)
+          originating_adviser_id = *j->adviser_id;
+        // ADR-012 (amended) + ADR-031 §12: carry this job's Digest Pass
+        // classification into the in-memory ActiveJob so the
+        // forge_complete handler can consult it without another DB round
+        // trip. job.deliverable_kind already defaults to "result", so a
+        // NULL column (job predates this field) is a no-op here.
+        if (j->deliverable_kind)
+          job.deliverable_kind = *j->deliverable_kind;
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] plan_ready: job {} not found in DB "
+                      "while building active_job", job_id);
+      }
+
+      // can_produce_plan enforcement: checked BEFORE allowed_advisers,
+      // and independent of target_type — an adviser whose manifest.toml
+      // declares [capabilities] can_produce_plan = false must never emit
+      // Shape 1 at all, regardless of what target_type/command a
+      // hallucinated step uses. This exists because allowed_advisers alone
+      // only constrains target_type:"adviser" steps — a hallucinated
+      // target_type:"worker" step sidesteps that check entirely, which was
+      // observed in practice (a test-only adviser whose contract is
+      // "always Shape 2, never a Plan" still produced a worker-target
+      // step referencing an unrelated, already-registered worker).
+      if (!originating_adviser_id.empty () && doc.HasMember ("steps")
+          && doc["steps"].IsArray () && !doc["steps"].Empty ())
+      {
+        auto reg_adviser = registry_.find_adviser_by_id (originating_adviser_id);
+        if (reg_adviser && !reg_adviser->can_produce_plan)
+        {
+          rapidjson::StringBuffer steps_buf;
+          rapidjson::Writer<rapidjson::StringBuffer> steps_w (steps_buf);
+          doc["steps"].Accept (steps_w);
+          const std::string reason
+            = "can_produce_plan=false, offending steps: "
+              + std::string (steps_buf.GetString ());
+          spdlog::error (
+            "[orchestrator] job {} rejected: adviser {} produced a Plan, "
+            "but its manifest.toml declares can_produce_plan = false — "
+            "entire Plan rejected, not dispatched. Offending steps: {}",
+            job_id, originating_adviser_id, steps_buf.GetString ());
+          if (should_retry_plan_rejection (job_id, originating_adviser_id,
+                                           reason))
+          {
+            OrchestratorEvent retry_ev;
+            retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+            retry_ev.job_id = job_id;
+            retry_ev.payload_json = build_spawn_adviser_payload (
+              job_id, originating_adviser_id, originating_goal);
+            enqueue (std::move (retry_ev));
+            return;
+          }
+          finish_job (job_id, false,
+                     "Adviser '" + originating_adviser_id
+                       + "' is not permitted to produce a Plan");
+          return;
+        }
+      }
+
+      // Peer-adviser allow-list enforcement: the originating Adviser's own
+      // manifest.toml may declare [capabilities] allowed_advisers — if it
+      // does, every target_type:"adviser" step in this Plan must target
+      // something in that list, checked as a pre-pass BEFORE any step gets
+      // persisted or dispatched, and rejecting the WHOLE Plan atomically if
+      // any step violates it (same "no partial, fail outright" posture as
+      // ADR-031 §1's capability-format validation — a Plan that's half
+      // trustworthy is not something to dispatch part of). Advisers that
+      // never declared this restriction (every existing product Suite
+      // today) are completely unaffected. This exists because a Plan-
+      // producing Adviser's own completion can hallucinate a step
+      // targeting some other real, already-registered adviser it was never
+      // meant to invoke — this has been observed in practice, not a
+      // hypothetical concern, and prompt-level "never reference X"
+      // instructions alone were not a reliable enough guard.
+      if (!originating_adviser_id.empty () && doc.HasMember ("steps")
+          && doc["steps"].IsArray ())
+      {
+        auto reg_adviser = registry_.find_adviser_by_id (originating_adviser_id);
+        if (reg_adviser && reg_adviser->allowed_advisers)
+        {
+          const auto &allowed = *reg_adviser->allowed_advisers;
+          for (const auto &s : doc["steps"].GetArray ())
+          {
+            const std::string target_type
+              = (s.HasMember ("target_type") && s["target_type"].IsString ())
+                  ? s["target_type"].GetString ()
+                  : "";
+            if (target_type != "adviser")
+              continue;
+            const std::string command
+              = (s.HasMember ("command") && s["command"].IsString ())
+                  ? s["command"].GetString ()
+                  : "";
+            if (std::find (allowed.begin (), allowed.end (), command)
+                == allowed.end ())
+            {
+              spdlog::error (
+                "[orchestrator] job {} rejected: adviser {} produced a "
+                "Plan step targeting adviser '{}', which is not in its "
+                "declared allowed_advisers list — entire Plan rejected, "
+                "not dispatched",
+                job_id, originating_adviser_id, command);
+              if (should_retry_plan_rejection (
+                    job_id, originating_adviser_id,
+                    "allowed_advisers violation, targeted '" + command
+                      + "'"))
+              {
+                OrchestratorEvent retry_ev;
+                retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+                retry_ev.job_id = job_id;
+                retry_ev.payload_json = build_spawn_adviser_payload (
+                  job_id, originating_adviser_id, originating_goal);
+                enqueue (std::move (retry_ev));
+                return;
+              }
+              finish_job (job_id, false,
+                         "Plan step targeted disallowed adviser '" + command
+                           + "'");
+              return;
+            }
+          }
+        }
+      }
+
+      // Entry-only enforcement: the INVERSE of the allowed_advisers check
+      // above — that one asks "is the authoring Adviser permitted to
+      // target this?"; this one asks "does the TARGET Adviser refuse to
+      // ever be targeted internally at all?", regardless of who's asking.
+      // Runs even when the authoring Adviser has no allowed_advisers
+      // restriction of its own (every existing product Suite today) —
+      // this guard is about the target's own declared preference, not the
+      // author's. Discovered in practice, both directions, same session:
+      // User Intent's own Plan targeted Gap-Mining as an internal step,
+      // and separately Gap-Mining's own Plan targeted User Intent — each
+      // is a front-door/bridge-triggered entry point, never meant to be
+      // another Adviser's pipeline component.
+      if (doc.HasMember ("steps") && doc["steps"].IsArray ())
+      {
+        for (const auto &s : doc["steps"].GetArray ())
+        {
+          const std::string target_type
+            = (s.HasMember ("target_type") && s["target_type"].IsString ())
+                ? s["target_type"].GetString ()
+                : "";
+          if (target_type != "adviser")
+            continue;
+          const std::string command
+            = (s.HasMember ("command") && s["command"].IsString ())
+                ? s["command"].GetString ()
+                : "";
+          auto target_adviser = registry_.find_adviser_by_id (command);
+          if (target_adviser && target_adviser->entry_only)
+          {
+            spdlog::error (
+              "[orchestrator] job {} rejected: adviser {} produced a Plan "
+              "step targeting adviser '{}', which declares "
+              "[capabilities] entry_only = true — it may only be entered "
+              "via explicit top-level routing, never as another "
+              "adviser's internal Plan step — entire Plan rejected, not "
+              "dispatched",
+              job_id, originating_adviser_id.empty () ? "(unknown)"
+                                                       : originating_adviser_id,
+              command);
+            if (should_retry_plan_rejection (
+                  job_id,
+                  originating_adviser_id.empty () ? "(unknown)"
+                                                   : originating_adviser_id,
+                  "entry_only violation, targeted '" + command + "'")
+                && !originating_adviser_id.empty ())
+            {
+              OrchestratorEvent retry_ev;
+              retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+              retry_ev.job_id = job_id;
+              retry_ev.payload_json = build_spawn_adviser_payload (
+                job_id, originating_adviser_id, originating_goal);
+              enqueue (std::move (retry_ev));
+              return;
+            }
+            finish_job (job_id, false,
+                       "Plan step targeted entry-only adviser '" + command
+                         + "'");
+            return;
+          }
+        }
+      }
+
+      // Both rejection guards passed (or never applied) — this job's Plan
+      // is clean. Drop any retry-count entry now; leaving it would grow
+      // g_plan_rejection_retry_count unboundedly over the daemon's
+      // lifetime for every job that was ever retried at least once, even
+      // successfully.
+      g_plan_rejection_retry_count.erase (job_id);
+
+      if (doc.HasMember ("steps") && doc["steps"].IsArray ())
+      {
+        int order = 0;
+        for (const auto &s : doc["steps"].GetArray ())
+        {
+          ActiveStep as;
+          if (s.HasMember ("id") && s["id"].IsString ())
+            as.step.id = s["id"].GetString ();
+          if (s.HasMember ("command") && s["command"].IsString ())
+            as.step.command = s["command"].GetString ();
+          if (s.HasMember ("description") && s["description"].IsString ())
+            as.step.description = s["description"].GetString ();
+          // ADR-031 §9: target_type is required, no default — leniently
+          // left empty here if missing/malformed; dispatch_next_step logs
+          // a warning and treats an empty target_type as "worker" as a
+          // second line of defense, but parsing it here means it's
+          // available immediately (e.g. for logging) rather than only at
+          // dispatch time.
+          if (s.HasMember ("target_type") && s["target_type"].IsString ())
+            as.step.target_type = s["target_type"].GetString ();
+          // ADR-031 §10 (+ asset attachment): the step's own input
+          // parameters — this was previously dropped entirely, meaning
+          // step.params was always empty regardless of what the
+          // Plan-authoring Adviser wrote (e.g. input_path/format for
+          // extract_segments, or $asset:<id>/$step:<id>.<field>/
+          // $prev_result reference tokens). Every value is stored as its
+          // JSON text representation (via Writer, not GetString()) so
+          // resolve_step_references' "parses as JSON -> embed raw, else ->
+          // quote" logic downstream sees consistent input regardless of
+          // whether the Adviser wrote a string, number, object, or array.
+          if (s.HasMember ("input") && s["input"].IsObject ())
+          {
+            for (auto it = s["input"].MemberBegin ();
+                 it != s["input"].MemberEnd (); ++it)
+            {
+              if (it->value.IsString ())
+              {
+                as.step.params[it->name.GetString ()]
+                  = it->value.GetString ();
+              }
+              else
+              {
+                rapidjson::StringBuffer vbuf;
+                rapidjson::Writer<rapidjson::StringBuffer> vw (vbuf);
+                it->value.Accept (vw);
+                as.step.params[it->name.GetString ()] = vbuf.GetString ();
+              }
+            }
+          }
+          // ADR-031: needs_forge is required; absence is a Planning Adviser
+          // failure — treat missing field as false and log a warning.
+          if (s.HasMember ("needs_forge") && s["needs_forge"].IsBool ())
+            as.step.needs_forge = s["needs_forge"].GetBool ();
+          else
+          {
+            spdlog::warn ("[orchestrator] plan step missing needs_forge field "
+                          "for job {} step {} — treating as false",
+                          job_id, as.step.id);
+            as.step.needs_forge = false;
+          }
+          // Persist step to DB so job.status can display it (ADR-022).
+          db_.store_pipeline_task (TaskId (job_id), as.step, order++);
+          job.pending_steps.push_back (std::move (as));
+        }
+      }
+
+      // Write Planning Adviser token usage to step 0 (additive).
+      {
+        int pt = (doc.HasMember ("planning_tokens_prompt")
+                  && doc["planning_tokens_prompt"].IsInt ())
+                   ? doc["planning_tokens_prompt"].GetInt ()
+                   : 0;
+        int ct = (doc.HasMember ("planning_tokens_completion")
+                  && doc["planning_tokens_completion"].IsInt ())
+                   ? doc["planning_tokens_completion"].GetInt ()
+                   : 0;
+        if ((pt > 0 || ct > 0) && !job.pending_steps.empty ())
+          db_.update_step_tokens (job.pending_steps.front ().step.id, pt, ct);
+      }
+
+      // Load goal from DB so it is available for task injection.
+      if (auto j = db_.load_job (job_id); j)
+        job.goal = j->goal;
+
+      db_.update_job_phase (TaskId (job_id), "executing");
+      active_jobs_[job_id] = std::move (job);
+      dispatch_next_step (active_jobs_[job_id]);
+    }
+    else if (type == "trigger_forge")
+    {
+      // Launch Forge pipeline to generate a Worker for the missing capability.
+      // ADR-019: ForgeCoordinator owns the state machine; Orchestrator just
+      // creates the DB record and posts the request.
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      const std::string command
+        = doc.HasMember ("command") && doc["command"].IsString ()
+            ? doc["command"].GetString ()
+            : "";
+
+      // Use step description for semantic context in requirement_json.
+      // This becomes the capability description in the worker manifest,
+      // so Planning Adviser can do proper semantic matching in future jobs.
+      std::string step_description;
+      if (doc.HasMember ("step_description")
+          && doc["step_description"].IsString ())
+        step_description = doc["step_description"].GetString ();
+      if (step_description.empty ())
+        step_description = "Implement capability: " + command;
+
+      if (job_id.empty () || command.empty ())
+      {
+        spdlog::error (
+          "[orchestrator] trigger_forge: missing job_id or command");
+        finish_job (job_id, false, "trigger_forge: missing fields");
+        return;
+      }
+
+      // Build requirement_json (ADR-019 Code Writer input contract).
+      rapidjson::StringBuffer req_buf;
+      rapidjson::Writer<rapidjson::StringBuffer> rw (req_buf);
+      rw.StartObject ();
+      rw.Key ("description");
+      rw.String (step_description.c_str ());
+      rw.Key ("method");
+      rw.String (command.c_str ());
+      rw.Key ("input_schema");
+      rw.StartObject ();
+      rw.EndObject ();
+      rw.Key ("output_schema");
+      rw.StartObject ();
+      rw.EndObject ();
+      rw.EndObject ();
+      const std::string requirement_json = req_buf.GetString ();
+
+      // Create and persist the forge_pipeline_jobs row (persist-before-act).
+      const std::string forge_job_id = new_uuid ();
+      ForgePipelineJob fpj;
+      fpj.id = forge_job_id;
+      fpj.task_id = job_id;
+      fpj.status = ForgeStatus::drafting;
+      fpj.requirement_json = requirement_json;
+      fpj.attempt = 0;
+      fpj.max_attempts = 3;
+      fpj.created_at = now_unix ();
+      fpj.updated_at = now_unix ();
+      db_.store_forge_pipeline_job (fpj);
+
+      spdlog::info ("[orchestrator] trigger_forge job_id={} command={} "
+                    "forge_job_id={}",
+                    job_id, command, forge_job_id);
+
+      // Post to ForgeCoordinator — returns immediately.
+      // task_id = job_id (resume on complete); step_id = step id (token usage).
+      std::string step_id_for_forge;
+      {
+        auto jit = active_jobs_.find (job_id);
+        if (jit != active_jobs_.end () && !jit->second.pending_steps.empty ())
+          step_id_for_forge = jit->second.pending_steps.front ().step.id;
+      }
+      forge::ForgeRequest freq;
+      freq.forge_job_id = forge_job_id;
+      freq.task_id = job_id;
+      freq.step_id = step_id_for_forge;
+      freq.requirement_json = requirement_json;
+      freq.feedback = "";
+      freq.attempt = 0;
+      freq.max_attempts = 3;
+      forge_.post (std::move (freq));
+    }
+    else if (type == "forge_complete")
+    {
+      // ForgeCoordinator completed — retry the waiting step.
+      const std::string task_id
+        = doc.HasMember ("task_id") && doc["task_id"].IsString ()
+            ? doc["task_id"].GetString ()
+            : "";
+      const int outcome = doc.HasMember ("outcome") && doc["outcome"].IsInt ()
+                            ? doc["outcome"].GetInt ()
+                            : -1;
+      const std::string worker_id
+        = doc.HasMember ("worker_id") && doc["worker_id"].IsString ()
+            ? doc["worker_id"].GetString ()
+            : "";
+
+      spdlog::info ("[orchestrator] forge_complete task_id={} outcome={} "
+                    "worker_id={} active_jobs_size={}",
+                    task_id, outcome, worker_id, active_jobs_.size ());
+
+      if (outcome == 0) // ForgeResult::Outcome::promoted
+      {
+        auto it = active_jobs_.find (task_id);
+        if (it != active_jobs_.end ())
+        {
+          ActiveJob &job = it->second;
+
+          // ADR-031 §12: a job whose Digest Pass (ADR-012) classified
+          // deliverable_kind as "artifact" wants the generated source
+          // itself, not the output of running it against invented input.
+          // Skip the normal "promote then execute" continuation — same
+          // helper dispatch_next_step's already-registered-worker branch
+          // uses, so both code paths behave identically.
+          if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ()
+              && complete_step_as_generated_code (job, worker_id))
+          {
+            // handled inside complete_step_as_generated_code, which
+            // already advanced the pipeline (dispatch_next_step or
+            // finish_job) — nothing further to do here.
+          }
+          else
+          {
+            spdlog::info ("[orchestrator] forge_complete: resuming job {}",
+                          task_id);
+            dispatch_next_step (job);
+          }
+        }
+        else
+        {
+          spdlog::error ("[orchestrator] forge_complete: job {} not in "
+                         "active_jobs_ — cannot resume",
+                         task_id);
+        }
+      }
+      else
+      {
+        finish_job (task_id, false, "forge pipeline failed");
+      }
+    }
+    else if (type == "job_failed")
+    {
+      const std::string job_id
+        = doc.HasMember ("job_id") && doc["job_id"].IsString ()
+            ? doc["job_id"].GetString ()
+            : "";
+      const std::string reason
+        = doc.HasMember ("reason") && doc["reason"].IsString ()
+            ? doc["reason"].GetString ()
+            : "unknown";
+      finish_job (job_id, false, reason);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // TimerFired
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::handle_timer_fired (const OrchestratorEvent &ev)
+  {
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ())
+      return;
+
+    if (!doc.HasMember ("kind") || !doc["kind"].IsString ())
+      return;
+
+    const std::string kind = doc["kind"].GetString ();
+
+    if (kind == "scheduled_job_fire")
+    {
+      // Create a new oneshot job instance for the scheduled template.
+      const std::string goal = doc.HasMember ("goal") && doc["goal"].IsString ()
+                                 ? doc["goal"].GetString ()
+                                 : "";
+      if (!goal.empty ())
+      {
+        OrchestratorEvent submit;
+        submit.kind = OrchestratorEvent::Kind::GatewayInbound;
+        {
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("method");
+          w.String ("job.submit");
+          w.Key ("key");
+          w.String ("");
+          w.Key ("id");
+          w.String ("timer");
+          w.Key ("params");
+          w.StartObject ();
+          w.Key ("goal");
+          w.String (goal.c_str ());
+          w.EndObject ();
+          w.EndObject ();
+          submit.payload_json = buf.GetString ();
+        }
+        on_message (std::move (submit));
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pipeline execution
+  // ---------------------------------------------------------------------------
+
+  // ADR-031 §10: resolve $prev_result and $step:<id>.<field> reference
+  // tokens in a step's params against persisted step results. $prev_result
+  // is a shorthand for "the immediately preceding step's whole result" —
+  // callers pass it in explicitly since ActiveJob already tracks it
+  // (job.last_step_result), avoiding a redundant DB read for the common
+  // case. $step:<id> (no field) substitutes that step's whole result;
+  // $step:<id>.<field> extracts one top-level field from it. Values that
+  // aren't reference tokens pass through unchanged.
+  std::unordered_map<std::string, std::string>
+  Orchestrator::resolve_step_references (
+    const std::unordered_map<std::string, std::string> &params,
+    const std::string &prev_result, const std::string &job_id)
+  {
+    std::unordered_map<std::string, std::string> resolved;
+    resolved.reserve (params.size ());
+
+    for (const auto &[key, value] : params)
+    {
+      if (value == "$prev_result")
+      {
+        resolved[key] = prev_result.empty () ? "{}" : prev_result;
+        continue;
+      }
+
+      // Prefix substitution (not whole-value matching like $asset:/$step:
+      // below) — a step's input can build a real output filename on top
+      // of this job's actual output directory, e.g.
+      // "$job_output_dir/translated_en.md". Resolves to the exact same
+      // path __JOB_OUTPUT_DIR__ substitutes to for the manifest's
+      // fs_write grant (dispatch_next_step), so a Worker like `reassemble`
+      // can actually write to a path its own sandbox has been granted
+      // access to.
+      static const std::string kJobOutputDir = "$job_output_dir";
+      if (value.rfind (kJobOutputDir, 0) == 0)
+      {
+        const std::string real_output_dir
+          = (agentos_home () / "jobs" / job_id / "output").string ();
+        resolved[key] = real_output_dir + value.substr (kJobOutputDir.size ());
+        continue;
+      }
+
+      if (value.rfind ("$asset:", 0) == 0)
+      {
+        // Resolves to the absolute path of the file this job.submit call
+        // already validated ownership for and materialized into this job's
+        // own directory (cmd_job_submit) — never a fresh lookup here, per
+        // the static-binding decision: by the time a step dispatches, the
+        // job_id -> asset_id -> path mapping was fixed once at submission
+        // time and does not change for the life of the job.
+        const std::string asset_id = value.substr (7); // after "$asset:"
+        auto job_assets = db_.load_job_assets (job_id);
+        auto it = std::find_if (job_assets.begin (), job_assets.end (),
+                                [&] (const Database::JobAssetRow &r)
+                                { return r.asset_id == asset_id; });
+        if (it == job_assets.end ())
+        {
+          spdlog::warn ("[orchestrator] $asset reference '{}' not found "
+                       "among job {}'s attached assets",
+                       value, job_id);
+          resolved[key] = "\"\"";
+          continue;
+        }
+        const std::string path
+          = (agentos_home () / "jobs" / job_id / "assets" / it->filename)
+              .string ();
+        // Emit as a JSON string value (quoted), not a raw path — this
+        // result is later embedded into task_json/prompt text via the
+        // "parses as JSON -> emit raw, else -> quote" logic at each call
+        // site, so a bare path would be mis-typed as invalid JSON and get
+        // double-quoted incorrectly. Quoting it here up front keeps this
+        // function's contract uniform: every resolved value is valid JSON.
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        w.String (path.c_str ());
+        resolved[key] = buf.GetString ();
+        continue;
+      }
+
+      if (value.rfind ("$step:", 0) == 0)
+      {
+        const std::string rest = value.substr (6); // after "$step:"
+        const auto dot = rest.find ('.');
+        const std::string ref_step_id
+          = (dot == std::string::npos) ? rest : rest.substr (0, dot);
+        const std::string field
+          = (dot == std::string::npos) ? "" : rest.substr (dot + 1);
+
+        const std::string ref_result = db_.load_step_result (ref_step_id);
+        if (ref_result.empty ())
+        {
+          spdlog::warn ("[orchestrator] $step reference '{}' resolved to "
+                       "empty (step {} has no persisted result)",
+                       value, ref_step_id);
+          resolved[key] = "{}";
+          continue;
+        }
+
+        if (field.empty ())
+        {
+          resolved[key] = ref_result;
+          continue;
+        }
+
+        rapidjson::Document doc;
+        if (doc.Parse (ref_result.c_str ()).HasParseError () || !doc.IsObject ()
+            || !doc.HasMember (field.c_str ()))
+        {
+          spdlog::warn ("[orchestrator] $step reference '{}': field '{}' "
+                       "not found in step {}'s result",
+                       value, field, ref_step_id);
+          resolved[key] = "{}";
+          continue;
+        }
+
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        doc[field.c_str ()].Accept (w);
+        resolved[key] = buf.GetString ();
+        continue;
+      }
+
+      resolved[key] = value; // not a reference — pass through
+    }
+
+    return resolved;
+  }
+
+  // ADR-031 §12: shared by forge_complete's promoted branch and
+  // dispatch_next_step's already-registered-worker branch — see
+  // orchestrator.h for why this must be one function, not two copies.
+  bool Orchestrator::complete_step_as_generated_code (
+      ActiveJob &job, const std::string &agent_id)
+  {
+    if (job.pending_steps.empty ())
+      return false;
+
+    const fs::path source_path
+      = agentos_home () / "workers" / agent_id / "worker_impl.py";
+
+    // Not a reliable "was this Forge-generated" check via metadata (see
+    // orchestrator.h) — checking the file itself is the only signal that
+    // actually reflects reality. A hand-authored/Suite-bundled Worker
+    // (e.g. translation-pipeline's translate-reassemble) will not have
+    // this file, and has no sensible "here's the source" interpretation
+    // regardless of this job's deliverable_kind.
+    if (!fs::exists (source_path))
+    {
+      spdlog::info (
+        "[orchestrator] job {} deliverable_kind=artifact but worker {} "
+        "has no worker_impl.py at the expected Forge-promoted location "
+        "({}) — not a Forge-generated capability, falling back to normal "
+        "execution",
+        job.job_id, agent_id, source_path.string ());
+      return false;
+    }
+
+    const std::string step_id = job.pending_steps.front ().step.id;
+
+    rapidjson::Document out_doc;
+    out_doc.SetObject ();
+    auto &alloc = out_doc.GetAllocator ();
+    out_doc.AddMember ("forge_generated", true, alloc);
+    out_doc.AddMember (
+      "agent_id", rapidjson::Value (agent_id.c_str (), alloc), alloc);
+
+    rapidjson::Value hint_obj (rapidjson::kObjectType);
+    hint_obj.AddMember (
+      "key", rapidjson::Value ("generated_code", alloc), alloc);
+    hint_obj.AddMember (
+      "path", rapidjson::Value (source_path.string ().c_str (), alloc),
+      alloc);
+    out_doc.AddMember ("bridge_hint", std::move (hint_obj), alloc);
+
+    rapidjson::StringBuffer out_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> out_w (out_buf);
+    out_doc.Accept (out_w);
+    const std::string result_json = out_buf.GetString ();
+
+    spdlog::info (
+      "[orchestrator] job {} deliverable_kind=artifact, skipping "
+      "execution of worker {} for step {} — returning generated_code "
+      "hint instead",
+      job.job_id, agent_id, step_id);
+
+    db_.update_step_result (step_id, result_json);
+    job.last_step_result = result_json;
+    job.pending_steps.pop_front ();
+
+    notify ("job.step_changed",
+            R"({"job_id":")" + job.job_id + R"(","status":"done"})",
+            build_job_status_json (job.job_id));
+
+    // Handles both "more steps remain" (dispatches the next one) and
+    // "this was the last step" (job.pending_steps.empty() → finish_job)
+    // uniformly — no separate branch needed here.
+    dispatch_next_step (job);
+    return true;
+  }
+
+  void Orchestrator::dispatch_next_step (ActiveJob &job)
+  {
+    if (job.pending_steps.empty ())
+    {
+      // Copy job_id before finish_job() erases the ActiveJob from
+      // active_jobs_ — the reference would dangle otherwise (UB).
+      const std::string job_id = job.job_id;
+      finish_job (job_id, true);
+      return;
+    }
+
+    ActiveStep &step = job.pending_steps.front ();
+
+    // ADR-031 §9: route by target_type. Missing target_type is leniently
+    // treated as "worker" (logged, not rejected) — mirrors the existing
+    // needs_forge leniency below rather than hard-failing the Plan; a
+    // Plan-authoring Adviser that omits it should be flagged, not let a
+    // whole job die over one missing field.
+    if (step.step.target_type.empty ())
+    {
+      spdlog::warn ("[orchestrator] plan step missing target_type for job {} "
+                   "step {} — treating as \"worker\"",
+                   job.job_id, step.step.id);
+      step.step.target_type = "worker";
+    }
+
+    if (step.step.target_type == "adviser")
+    {
+      dispatch_adviser_step (job);
+      return;
+    }
+
+    // Look up Worker for this step's command.
+    auto worker = registry_.find_worker_for_command (step.step.command);
+
+    // ADR-031: needs_forge semantics.
+    //   needs_forge=true  + Registry miss  → trigger Forge immediately.
+    //   needs_forge=true  + Registry hit   → dispatch found worker (already
+    //                                        exists; Forge not needed).
+    //   needs_forge=false + Registry hit   → dispatch (normal path).
+    //   needs_forge=false + Registry miss  → anomaly; log WARNING then fall
+    //                                        through to WorkerExhausted so
+    //                                        Master can decide.
+    if (!worker)
+    {
+      if (step.step.needs_forge)
+      {
+        spdlog::info ("[orchestrator] needs_forge=true, no worker for '{}', "
+                      "triggering Forge for job {}",
+                      step.step.command, job.job_id);
+        MasterEvent me;
+        me.kind = MasterEvent::Kind::WorkerExhausted;
+        me.job_id = job.job_id;
+        // Encode needs_forge=true so Master skips WorkerExhausted handling
+        // and goes straight to trigger_forge.
+        me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
+                          + step.step.command
+                          + R"(","needs_forge":true,"step_description":")"
+                          + step.step.description + R"("})";
+        send_to_master_ (std::move (me));
+      }
+      else
+      {
+        spdlog::warn ("[orchestrator] needs_forge=false but no worker for '{}' "
+                      "in job {} — Planning Adviser violated capability "
+                      "constraint (ADR-031)",
+                      step.step.command, job.job_id);
+        MasterEvent me;
+        me.kind = MasterEvent::Kind::WorkerExhausted;
+        me.job_id = job.job_id;
+        me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
+                          + step.step.command
+                          + R"(","needs_forge":false,"step_description":")"
+                          + step.step.description + R"("})";
+        send_to_master_ (std::move (me));
+      }
+      return;
+    }
+
+    // ADR-031 §12: this job's Digest Pass (ADR-012) classified
+    // deliverable_kind as "artifact" — the user wants this capability's
+    // source code itself, not the output of running it against invented
+    // input. This applies regardless of whether `worker` was just
+    // promoted by Forge moments ago (that case is also handled in
+    // handle_master_decision's forge_complete branch, via the same
+    // complete_step_as_generated_code helper) or is an already-registered
+    // Worker reused from a prior job — deliverable_kind's effect must not
+    // depend on which of the two brought this Worker into existence.
+    if (job.deliverable_kind == "artifact")
+    {
+      if (complete_step_as_generated_code (job, worker->id.value ()))
+        return;
+      // else: not actually a Forge-generated capability (see
+      // complete_step_as_generated_code) — fall through to normal
+      // execution below, exactly as if deliverable_kind were "result".
+    }
+
+    // Generate run_id and build DispatchRequest.
+    const std::string run_id = new_uuid ();
+    step.run_id = run_id;
+
+    DispatchRequest req;
+    req.job_id = job.job_id;
+    req.run_id = run_id;
+    req.step_id = step.step.id;
+    req.worker_id = worker->id.value ();
+    req.binary_path = worker->binary_path;
+
+    // ADR-015/016: substitute the reserved __JOB_INPUT_PATH__/
+    // __JOB_OUTPUT_DIR__ placeholders in the Worker's declared fs_read/
+    // fs_write with this job's actual per-job directories. This is the
+    // piece that was missing entirely before — fs_read/fs_write were never
+    // populated on DispatchRequest at all, so a Worker's sandbox got no
+    // grant for its own declared paths no matter what the manifest said.
+    {
+      const std::string job_assets_dir
+        = (agentos_home () / "jobs" / job.job_id / "assets").string ();
+      const std::string job_output_dir
+        = (agentos_home () / "jobs" / job.job_id / "output").string ();
+      // Fixed, cross-job shared location — unlike the two placeholders
+      // above, this is NOT per-job. Currently the only consumer is
+      // product.feedback.submit (Gap-Mining Suite's convergence sink),
+      // which deliberately writes to one shared directory across every
+      // job/user rather than an isolated per-job output dir.
+      const std::string product_feedback_dir
+        = (agentos_home () / "product_feedback").string ();
+      std::error_code ec;
+      fs::create_directories (job_assets_dir, ec); // may not exist yet if
+                                                    // this job had zero
+                                                    // attached assets
+      fs::create_directories (job_output_dir, ec); // fs_write target must
+                                                    // exist before Landlock
+                                                    // can grant it
+      if (ec)
+        spdlog::warn ("[orchestrator] cannot create output dir {}: {}",
+                     job_output_dir, ec.message ());
+      fs::create_directories (product_feedback_dir, ec);
+      if (ec)
+        spdlog::warn ("[orchestrator] cannot create product feedback dir "
+                     "{}: {}",
+                     product_feedback_dir, ec.message ());
+
+      auto substitute = [&] (const std::string &path)
+      {
+        if (path == "__JOB_INPUT_PATH__")
+          return job_assets_dir;
+        if (path == "__JOB_OUTPUT_DIR__")
+          return job_output_dir;
+        if (path == "__PRODUCT_FEEDBACK_DIR__")
+          return product_feedback_dir;
+        return path; // not a placeholder — pass through as declared
+      };
+
+      for (const auto &p : worker->fs_read)
+        req.fs_read.push_back (substitute (p));
+      for (const auto &p : worker->fs_write)
+        req.fs_write.push_back (substitute (p));
+
+      std::string fs_read_str, fs_write_str;
+      for (const auto &p : req.fs_read)
+        fs_read_str += p + "; ";
+      for (const auto &p : req.fs_write)
+        fs_write_str += p + "; ";
+      spdlog::info ("[orchestrator] step {} fs_read=[{}] fs_write=[{}] "
+                   "network={}",
+                   step.step.id, fs_read_str, fs_write_str, worker->network);
+    }
+    // ADR-XXX: Trusted Worker Network Exemption. A Worker's manifest-
+    // declared `network` grant is a necessary but not sufficient
+    // condition for actually receiving network access at dispatch time
+    // — it must also appear, by registered name, in the daemon's own
+    // config.toml [trusted_workers].network_exempt list (operator-only,
+    // never Suite-writable; see Config::TrustedWorkers). Absence of the
+    // name in that list forces req.network = false regardless of what
+    // the manifest asked for; this is an AND-gate, not an override, so
+    // a trusted name still cannot obtain network access for a Worker
+    // whose own manifest never declared it.
+    const auto &exempt_list = config_.trusted_workers.network_exempt;
+    const bool operator_trusted
+      = std::find (exempt_list.begin (), exempt_list.end (), worker->name)
+        != exempt_list.end ();
+    req.network = worker->network && operator_trusted;
+    if (worker->network && !operator_trusted)
+      spdlog::info ("[orchestrator] worker '{}' declares network=true but is "
+                   "not in [trusted_workers].network_exempt — dispatching "
+                   "with network disabled for run {}",
+                   worker->name, run_id);
+    // Build task_json with all step data the worker needs (ADR-019).
+    // command and description give the worker its semantic context.
+    // $prev_result carries the previous step's output (ADR-022).
+    {
+      // Resolve $prev_result/$step:<id>.<field>/$asset:<id> tokens in this
+      // step's own input params before merging them in below. This was
+      // previously missing entirely for Worker-target steps — the Plan's
+      // per-step `input` (e.g. input_path/format for extract_segments) was
+      // never forwarded into task_json at all, only the fixed
+      // job_id/step_id/command/description/$prev_result fields were.
+      auto resolved_params = resolve_step_references (
+        step.step.params, job.last_step_result, job.job_id);
+
+      rapidjson::StringBuffer tbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> tw (tbuf);
+      tw.StartObject ();
+      tw.Key ("job_id");
+      tw.String (job.job_id.c_str ());
+      tw.Key ("step_id");
+      tw.String (step.step.id.c_str ());
+      tw.Key ("command");
+      tw.String (step.step.command.c_str ());
+      tw.Key ("description");
+      tw.String (step.step.description.c_str ());
+      // Inject previous step result as $prev_result (empty object if first
+      // step) — kept as its own always-present key for backward
+      // compatibility with Worker scripts that look for it directly,
+      // independent of whether the Plan step's own params also reference
+      // $prev_result by name.
+      tw.Key ("$prev_result");
+      if (!job.last_step_result.empty ())
+        tw.RawValue (job.last_step_result.c_str (),
+                     job.last_step_result.size (), rapidjson::kObjectType);
+      else
+      {
+        tw.StartObject ();
+        tw.EndObject ();
+      }
+      // Merge the step's own resolved input params as top-level keys —
+      // e.g. extract_segments expects input_path/format directly on the
+      // task object, not nested under a "params" sub-object.
+      for (const auto &[k, v] : resolved_params)
+      {
+        tw.Key (k.c_str ());
+        rapidjson::Document probe;
+        if (!probe.Parse (v.c_str ()).HasParseError ()
+            && (probe.IsObject () || probe.IsArray () || probe.IsString ()
+                || probe.IsNumber () || probe.IsBool ()))
+          tw.RawValue (v.c_str (), v.size (), probe.GetType ());
+        else
+          tw.String (v.c_str ());
+      }
+      tw.EndObject ();
+      req.task_json = tbuf.GetString ();
+      spdlog::info ("[orchestrator] step {} task_json: {}", step.step.id,
+                   req.task_json);
+    }
+
+    // Persist worker_run before fork (ADR-022: persist before act).
+    WorkerRun run;
+    run.run_id = run_id;
+    run.worker_id = worker->id.value ();
+    run.pid = 0; // filled after fork
+    run.started_at = static_cast<int64_t> (
+      std::chrono::duration_cast<std::chrono::seconds> (
+        std::chrono::system_clock::now ().time_since_epoch ())
+        .count ());
+    run.status = WorkerStatus::running;
+    run.layer_path = {};
+    run.log_path = {};
+    db_.insert_worker_run (run);
+
+    auto result = dispatcher_.fork_exec (req);
+    if (!result.ok)
+    {
+      spdlog::error ("[orchestrator] fork_exec failed for job {}: {}",
+                     job.job_id, result.error);
+      on_step_failed (job.job_id, run_id, -1);
+      return;
+    }
+
+    // Persist the actual runtime paths separately: layer_path is the run
+    // layer, while step.job_dir is the persistent per-job workspace.
+    run.pid = result.pid;
+    run.layer_path = result.run_dir;
+    run.log_path = result.log_path;
+    db_.update_worker_run (run);
+
+    job.current_run_id = run_id;
+    step.job_dir = result.job_dir;
+
+    // Mark step as running with started_at timestamp (ADR-025).
+    db_.update_step_status (step.step.id, db::step_status::running);
+
+    spdlog::info ("[orchestrator] dispatched step {} run_id={} pid={}",
+                  step.step.id, run_id, result.pid);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-031 §9/§10: dispatch a target_type:"adviser" step
+  // ---------------------------------------------------------------------------
+  //
+  // Mirrors the Planning/domain-Adviser spawn (single-shot LlmClient::complete
+  // call in a detached thread, ADR-018) but with two differences: the prompt
+  // asks for a step result, not a Plan; and the parsed response is treated as
+  // an opaque JSON result object handed to the next step, not validated
+  // against the {"steps":[...]} Plan schema.
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::dispatch_adviser_step (ActiveJob &job)
+  {
+    if (job.pending_steps.empty ())
+      return;
+
+    ActiveStep &step = job.pending_steps.front ();
+
+    auto adviser = registry_.find_adviser_by_id (step.step.command);
+    if (!adviser)
+    {
+      // No Forge fallback exists for Advisers (Forge only ever generates
+      // Workers, ADR-031 §9) — there is nothing to retry into existence.
+      // The Plan-authoring Adviser violated the Available-advisers
+      // constraint; fail the job directly rather than looping on a
+      // reference that will never resolve.
+      spdlog::error ("[orchestrator] target_type:adviser step '{}' "
+                    "references unknown adviser '{}' for job {} — "
+                    "Plan-authoring Adviser violated the Available-advisers "
+                    "constraint (ADR-031 §9)",
+                    step.step.id, step.step.command, job.job_id);
+      finish_job (job.job_id, false,
+                 "step " + step.step.id + " targets unknown adviser '"
+                   + step.step.command + "'");
+      return;
+    }
+
+    const std::string job_id = job.job_id;
+    const std::string step_id = step.step.id;
+    const std::string adviser_id = step.step.command;
+    const std::string step_description = step.step.description;
+
+    // ADR-038: consume a mid‑pipeline continuation_id (section 4).
+    std::string ctx_payload;     // will be injected into the prompt
+    bool has_ctx = false;
+    {
+      std::string cid;
+      auto it = step.step.params.find ("continuation_id");
+      if (it != step.step.params.end ())
+        cid = it->second;
+      if (!cid.empty ())
+      {
+        // 'adviser' was already fetched via registry_.find_adviser_by_id
+        // above (needed to validate the step's target in the first place)
+        // — reuse it instead of a redundant DB round trip.
+        if (adviser->supports_continuation)
+        {
+          auto row = db_.read_and_consume_continuation (cid, job.user_id,
+                                                        adviser_id);
+          if (row)
+          {
+            ctx_payload = std::move (row->context_payload);
+            has_ctx      = true;
+            spdlog::info ("[orchestrator] consumed continuation {} "
+                         "for step‑adviser {} (job {})",
+                         cid, adviser_id, job_id);
+          }
+          else
+            spdlog::warn ("[orchestrator] continuation_id {} not found / "
+                         "already consumed / mismatched for adviser {} "
+                         "(job {}), proceeding without it",
+                         cid, adviser_id, job_id);
+        }
+      }
+    }
+
+    // ADR-031 §10: resolve $prev_result / $step:<id>.<field> before
+    // building the prompt.
+    auto resolved_params
+      = resolve_step_references (step.step.params, job.last_step_result,
+                                 job.job_id);
+
+    spdlog::info ("[orchestrator] dispatching adviser-target step {} → "
+                 "adviser {} for job {}",
+                 step_id, adviser_id, job_id);
+
+    db_.update_step_status (step.step.id, db::step_status::running);
+
+    auto home = agentos_home ();
+    const std::string skill_path
+      = (home / "advisers" / adviser_id / "skill.md").string ();
+    std::string system_prompt;
+    {
+      std::ifstream f (skill_path);
+      if (f)
+        system_prompt.assign (std::istreambuf_iterator<char> (f),
+                              std::istreambuf_iterator<char> ());
+      else
+        spdlog::warn ("[orchestrator] skill.md not found for adviser {}, "
+                     "using empty system prompt",
+                     adviser_id);
+    }
+
+    // ADR-031 §10 user prompt shape: description, then "Input from previous
+    // step" (omitted for a first step — mirrors $prev_result injection for
+    // Worker-target steps, ADR-022's "only if i > 0" rule), then remaining
+    // step params under their own heading.
+    std::string user_prompt = step_description + "\n\n";
+    if (has_ctx && !ctx_payload.empty ())
+      user_prompt += "Context from previous interaction:\n"
+                     + ctx_payload + "\n\n";
+
+    if (!job.last_step_result.empty ())
+      user_prompt
+        += "Input from previous step:\n" + job.last_step_result + "\n\n";
+
+    if (!resolved_params.empty ())
+    {
+      user_prompt += "Step input parameters:\n";
+      rapidjson::StringBuffer pbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> pw (pbuf);
+      pw.StartObject ();
+      for (const auto &[k, v] : resolved_params)
+      {
+        pw.Key (k.c_str ());
+        // v may already be JSON (substituted from $step:/$prev_result) or a
+        // plain string literal from the Plan — emit raw if it parses as an
+        // object/array, else as a quoted string, so the adviser always sees
+        // well-formed JSON either way.
+        rapidjson::Document probe;
+        if (!probe.Parse (v.c_str ()).HasParseError ()
+            && (probe.IsObject () || probe.IsArray ()))
+          pw.RawValue (v.c_str (), v.size (), probe.GetType ());
+        else
+          pw.String (v.c_str ());
+      }
+      pw.EndObject ();
+      user_prompt += std::string (pbuf.GetString ()) + "\n";
+    }
+
+    const std::string job_user_id = job.user_id;
+
+    std::thread (
+      [this, job_id, step_id, adviser_id, job_user_id = std::move (job_user_id),
+       system_prompt = std::move (system_prompt),
+       user_prompt = std::move (user_prompt)] () mutable
+      {
+        LlmClient client (llm_, config_.llm);
+        LlmRequest req;
+        req.system_prompt = std::move (system_prompt);
+        req.user_prompt = std::move (user_prompt);
+        // ADR-040: keep the tenant identity attached to every LLM request.
+        req.user_id = std::move (job_user_id);
+        req.max_tokens = 4096;
+
+        auto result = client.complete (req);
+
+        OrchestratorEvent ev;
+        ev.job_id = job_id;
+
+        if (!result.ok)
+        {
+          spdlog::error ("[orchestrator] adviser-step LLM call failed for "
+                        "job {} step {}: {}",
+                        job_id, step_id, result.error);
+          ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+          ev.payload_json = R"({"job_id":")" + job_id + R"(","step_id":")"
+                            + step_id
+                            + R"(","reason":"LLM call failed"})";
+          enqueue (std::move (ev));
+          return;
+        }
+
+        std::string content = result.value.content;
+        if (content.size () >= 3 && content.substr (0, 3) == "```")
+        {
+          auto first_nl = content.find ('\n');
+          if (first_nl != std::string::npos)
+            content = content.substr (first_nl + 1);
+          if (content.size () >= 3
+              && content.substr (content.size () - 3) == "```")
+            content.erase (content.size () - 3);
+          while (!content.empty ()
+                 && (content.back () == '\n' || content.back () == '\r'
+                     || content.back () == ' '))
+            content.pop_back ();
+        }
+
+        rapidjson::Document doc;
+        if (doc.Parse (content.c_str ()).HasParseError () || !doc.IsObject ())
+        {
+          spdlog::error ("[orchestrator] adviser {} produced invalid JSON "
+                        "for job {} step {}: {}",
+                        adviser_id, job_id, step_id, content);
+          ev.kind = OrchestratorEvent::Kind::AdviserFailed;
+          ev.payload_json = R"({"job_id":")" + job_id + R"(","step_id":")"
+                            + step_id + R"(","reason":"invalid JSON output"})";
+          enqueue (std::move (ev));
+          return;
+        }
+
+        ev.kind = OrchestratorEvent::Kind::AdviserDone;
+        {
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+          w.StartObject ();
+          w.Key ("job_id");
+          w.String (job_id.c_str ());
+          w.Key ("step_id");
+          w.String (step_id.c_str ());
+          // Amendment: this step's own LLM usage — previously computed
+          // here (result.value.*) but discarded, leaving every
+          // target_type:"adviser" step's tokens_prompt/tokens_completion
+          // permanently 0 while the unrelated Planning-Adviser call that
+          // produced this job's Plan got its usage misattributed onto
+          // whichever step happened to be first in the Plan (see
+          // handle_master_decision's plan_ready handling, which stores
+          // planning_tokens_prompt/completion on job.pending_steps.front()
+          // at Plan-creation time — a Worker-target step, if the Plan's
+          // first step is one, showing nonzero tokens despite being
+          // deterministic non-LLM execution is that same pre-existing
+          // misattribution, not a bug introduced here).
+          w.Key ("tokens_prompt");
+          w.Int (result.value.prompt_tokens);
+          w.Key ("tokens_completion");
+          w.Int (result.value.completion_tokens);
+          w.Key ("result");
+          doc.Accept (w); // re-serialize the validated document, not the
+                          // raw completion text — Parse() only guarantees
+                          // the leading JSON value was well-formed, not that
+                          // the whole string was consumed; reusing raw
+                          // `content` could smuggle trailing bytes into the
+                          // outer payload's structure.
+          w.EndObject ();
+          ev.payload_json = buf.GetString ();
+        }
+        enqueue (std::move (ev));
+      })
+      .detach ();
+  }
+
+  void Orchestrator::on_step_complete (const std::string &job_id,
+                                       const std::string &run_id, int exit_code,
+                                       const std::string &run_dir)
+  {
+    auto it = active_jobs_.find (job_id);
+    if (it == active_jobs_.end ())
+      return;
+
+    ActiveJob &job = it->second;
+
+    // Collect result.
+    auto collected = dispatcher_.collect (run_id, run_dir, exit_code);
+    if (!collected.ok)
+    {
+      spdlog::warn ("[orchestrator] collect failed for run_id={}: {}", run_id,
+                    collected.error);
+      on_step_failed (job_id, run_id, exit_code);
+      return;
+    }
+
+    // Store result in DB (ADR-022: persist before act).
+    // $prev_result injection reads from DB when multi-step pipeline is
+    // implemented; no in-memory field on ActiveStep for result.
+    if (!job.pending_steps.empty ())
+    {
+      db_.update_step_result (job.pending_steps.front ().step.id,
+                              collected.result_json);
+    }
+
+    // Save result for $prev_result injection into the next step (ADR-022).
+    job.last_step_result = collected.result_json;
+
+    // Advance pipeline.
+    job.pending_steps.pop_front ();
+    job.current_run_id.clear ();
+
+    // Notify Gateway.
+    notify ("job.step_changed",
+            R"({"job_id":")" + job_id + R"(","status":"done"})",
+            build_job_status_json (job_id));
+
+    dispatch_next_step (job);
+  }
+
+  void Orchestrator::on_step_failed (const std::string &job_id,
+                                     const std::string &run_id, int exit_code)
+  {
+    spdlog::warn ("[orchestrator] step failed job_id={} run_id={} exit={}",
+                  job_id, run_id, exit_code);
+
+    auto it = active_jobs_.find (job_id);
+    if (it == active_jobs_.end ())
+      return;
+
+    ActiveJob &job = it->second;
+    if (job.pending_steps.empty ())
+      return;
+
+    // ADR-031 §11: this function is only ever reached after a step was
+    // successfully dispatched — dispatch_next_step's genuine Registry-miss
+    // case (no Worker/Adviser for the command at all) escalates to
+    // Master/WorkerExhausted directly and returns before any dispatch
+    // happens (see dispatch_next_step and dispatch_adviser_step). So a
+    // failure reaching this function always means "a capability that
+    // exists failed at runtime" -- retry the same step locally; never
+    // escalate to Forge for this (Forge rewrites code, it does not fix a
+    // transient runtime failure, and conflating the two burns LLM calls on
+    // failures that were never a missing-capability problem in the first
+    // place).
+    ActiveStep &step = job.pending_steps.front ();
+    step.attempts++;
+
+    if (step.attempts <= kMaxStepRetries)
+    {
+      spdlog::warn ("[orchestrator] step {} ({}) failed, retrying job {} "
+                   "(attempt {}/{})",
+                   step.step.id, step.step.command, job_id, step.attempts,
+                   kMaxStepRetries);
+      job.current_run_id.clear ();
+      dispatch_next_step (job);
+      return;
+    }
+
+    spdlog::error ("[orchestrator] step {} ({}) exhausted {} retries -- "
+                  "failing job {}",
+                  step.step.id, step.step.command, kMaxStepRetries, job_id);
+    finish_job (job_id, false,
+               "step " + step.step.id + " (" + step.step.command
+                 + ") failed after " + std::to_string (kMaxStepRetries)
+                 + " retries");
+  }
+
+  void Orchestrator::finish_job (const std::string &job_id, bool success,
+                                 const std::string &error)
+  {
+    db_.update_job_phase (TaskId (job_id), success ? "done" : "failed");
+
+    if (!success && !error.empty ())
+      db_.update_job_error (job_id, error);
+
+    active_jobs_.erase (job_id);
+
+    notify ("job.phase_changed",
+            R"({"job_id":")" + job_id + R"(","new_phase":")"
+              + (success ? "done" : "failed") + R"("})",
+            build_job_status_json (job_id));
+
+    spdlog::info ("[orchestrator] job {} {}", job_id,
+                  success ? "done" : ("failed: " + error));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Response helpers
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::reply_ok (const std::string &identity,
+                               const std::string &request_id,
+                               const std::string &result_json)
+  {
+    GatewayEvent ev;
+    ev.kind = GatewayEvent::Kind::Outbound;
+    ev.outbound.identity = identity;
+    ev.outbound.message = make_response (request_id, result_json);
+    send_to_gateway_ (std::move (ev));
+  }
+
+  void Orchestrator::reply_error (const std::string &identity,
+                                  const std::string &request_id, int code,
+                                  const std::string &message)
+  {
+    GatewayEvent ev;
+    ev.kind = GatewayEvent::Kind::Outbound;
+    ev.outbound.identity = identity;
+    ev.outbound.message = make_error_response (request_id, code, message);
+    send_to_gateway_ (std::move (ev));
+  }
+
+  void Orchestrator::notify (const std::string &method,
+                             const std::string &params_json,
+                             const std::string &outbox_params_json)
+  {
+    const std::string message = make_notification (method, params_json);
+
+    GatewayEvent ev;
+    ev.kind = GatewayEvent::Kind::Outbound;
+    ev.outbound.identity = ""; // broadcast
+    ev.outbound.message = message;
+    send_to_gateway_ (std::move (ev));
+
+    // Amendment (Bridge event mailbox): persist a notification as a
+    // JSON file under agentos_home()/events/. This is a true mailbox,
+    // not durable storage -- low frequency (job.phase_changed/
+    // job.step_changed only), read-then-deleted by a single Bridge
+    // consumer, never read back by AgentOS itself. It exists so a
+    // Bridge that wasn't connected at the exact moment of the live
+    // broadcast above (or missed it to a network blip) can still catch
+    // up by draining this directory -- triggered by any live
+    // notification it DID receive (as a "go check outbox now" signal,
+    // not by parsing content out of the broadcast itself), or by a
+    // periodic timer as a safety net against a silently-lost broadcast.
+    //
+    // Deliberately NOT the same content as the live broadcast above.
+    // The broadcast stays small (job_id + one changed field) so it's
+    // cheap to fan out to every connected client; the outbox copy
+    // carries the full job.status shape instead (callers pass
+    // build_job_status_json's output as outbox_params_json), so a
+    // Bridge that receives the small broadcast trigger, then reads
+    // this file, gets a complete, directly-usable snapshot -- no
+    // separate job.status RPC round trip needed to fill in the fields
+    // the broadcast didn't carry. Falls back to params_json (old
+    // single-payload behavior) if the caller didn't supply a richer
+    // outbox_params_json.
+    //
+    // Filename is <epoch_ms>_<uuid>.json -- the millisecond prefix
+    // keeps a plain lexicographic directory listing in chronological
+    // order, which matters for a consumer replaying job.phase_changed/
+    // job.step_changed for the same job in the order they actually
+    // happened.
+    {
+      const std::string outbox_payload_json
+        = outbox_params_json.empty () ? params_json : outbox_params_json;
+      const std::string outbox_message
+        = make_notification (method, outbox_payload_json);
+
+      std::error_code ec;
+      const fs::path events_dir = agentos_home () / "events";
+      fs::create_directories (events_dir, ec);
+      if (ec)
+      {
+        spdlog::warn ("[orchestrator] cannot create events dir {}: {}",
+                      events_dir.string (), ec.message ());
+        return;
+      }
+
+      const auto now_ms
+        = std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::system_clock::now ().time_since_epoch ())
+            .count ();
+      const fs::path event_path
+        = events_dir / (std::to_string (now_ms) + "_" + new_uuid () + ".json");
+
+      std::ofstream f (event_path, std::ios::trunc);
+      if (!f)
+      {
+        spdlog::warn ("[orchestrator] cannot write event file {}",
+                      event_path.string ());
+        return;
+      }
+      f << outbox_message;
+    }
+  }
+
+  std::string Orchestrator::new_uuid ()
+  {
+    return gen_uuid ();
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-028: cred.* JSON-RPC handlers
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_cred_submit (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ()
+        || !params.HasMember ("token") || !params["token"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+
+    std::string user_id = params["user_id"].GetString ();
+    std::string provider = params["provider"].GetString ();
+    std::string token = params["token"].GetString ();
+
+    std::optional<std::string> refresh;
+    if (params.HasMember ("refresh_token")
+        && params["refresh_token"].IsString ())
+      refresh = params["refresh_token"].GetString ();
+
+    std::optional<int64_t> expires;
+    if (params.HasMember ("expires_at") && params["expires_at"].IsInt64 ())
+      expires = params["expires_at"].GetInt64 ();
+
+    auto result
+      = cred_vault_.submit (user_id, provider, token, refresh, expires);
+    if (!result)
+    {
+      reply_error (identity, request_id, -32030, "cred.submit failed");
+      return;
+    }
+    reply_ok (identity, request_id,
+              std::string ("{\"credential_id\":\"") + *result + "\"}");
+  }
+
+  void Orchestrator::cmd_cred_revoke (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    bool ok = cred_vault_.revoke (params["user_id"].GetString (),
+                                  params["provider"].GetString ());
+    reply_ok (identity, request_id,
+              std::string ("{\"ok\":") + (ok ? "true" : "false") + "}");
+  }
+
+  void Orchestrator::cmd_cred_grant (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("worker_id") || !params["worker_id"].IsString ()
+        || !params.HasMember ("provider") || !params["provider"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = cred_vault_.grant (
+      params["worker_id"].GetString (), params["provider"].GetString (),
+      "admin"); // granted_by: use actual key id in production
+    if (!res)
+    {
+      reply_error (identity, request_id, -32030, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id,
+              std::string ("{\"grant_id\":\"") + *res + "\"}");
+  }
+
+  void Orchestrator::cmd_cred_revoke_grant (const std::string &params_json,
+                                            const std::string &identity,
+                                            const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("grant_id") || !params["grant_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    bool ok = cred_vault_.revoke_grant (params["grant_id"].GetString ());
+    reply_ok (identity, request_id,
+              std::string ("{\"ok\":") + (ok ? "true" : "false") + "}");
+  }
+
+  void Orchestrator::cmd_cred_list (const std::string &params_json,
+                                    const std::string &identity,
+                                    const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto list = cred_vault_.list (params["user_id"].GetString ());
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("credentials");
+    w.StartArray ();
+    for (const auto &c : list)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (c.id.c_str ());
+      w.Key ("provider");
+      w.String (c.provider.c_str ());
+      if (c.expires_at)
+      {
+        w.Key ("expires_at");
+        w.Int64 (*c.expires_at);
+      }
+      w.Key ("updated_at");
+      w.Int64 (c.updated_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_cred_audit (const std::string &params_json,
+                                     const std::string &identity,
+                                     const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    std::optional<std::string> user_id, job_id, provider;
+    if (params.HasMember ("user_id") && params["user_id"].IsString ())
+      user_id = params["user_id"].GetString ();
+    if (params.HasMember ("job_id") && params["job_id"].IsString ())
+      job_id = params["job_id"].GetString ();
+    if (params.HasMember ("provider") && params["provider"].IsString ())
+      provider = params["provider"].GetString ();
+    int limit = 50;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+
+    auto entries = cred_vault_.audit (user_id, job_id, provider, limit);
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("entries");
+    w.StartArray ();
+    for (const auto &e : entries)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (e.id.c_str ());
+      w.Key ("credential_id");
+      w.String (e.credential_id.c_str ());
+      w.Key ("user_id");
+      w.String (e.user_id.c_str ());
+      w.Key ("worker_id");
+      w.String (e.worker_id.c_str ());
+      w.Key ("job_id");
+      w.String (e.job_id.c_str ());
+      w.Key ("step_id");
+      w.String (e.step_id.c_str ());
+      w.Key ("run_id");
+      w.String (e.run_id.c_str ());
+      w.Key ("action");
+      w.String (e.action.c_str ());
+      if (e.reason)
+      {
+        w.Key ("reason");
+        w.String (e.reason->c_str ());
+      }
+      w.Key ("timestamp");
+      w.Int64 (e.timestamp);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_vault_rekey (const std::string & /*params*/,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    auto res = cred_vault_.rekey ();
+    if (!res)
+      reply_error (identity, request_id, -32030, "vault.rekey failed");
+    else
+      reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-029: user.* JSON-RPC handlers (admin only)
+  // ---------------------------------------------------------------------------
+
+  void Orchestrator::cmd_user_register (const std::string &params_json,
+                                        const std::string &identity,
+                                        const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.register_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32030, res.error ());
+      return;
+    }
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (res->id.c_str ());
+    w.Key ("created_at");
+    w.Int64 (res->created_at);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_list (const std::string &params_json,
+                                    const std::string &identity,
+                                    const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    std::optional<bool> enabled_filter;
+    if (params.HasMember ("enabled") && params["enabled"].IsBool ())
+      enabled_filter = params["enabled"].GetBool ();
+
+    int limit = 50;
+    int offset = 0;
+    if (params.HasMember ("limit") && params["limit"].IsInt ())
+      limit = params["limit"].GetInt ();
+    if (params.HasMember ("offset") && params["offset"].IsInt ())
+      offset = params["offset"].GetInt ();
+
+    auto users = user_manager_.list_users (enabled_filter, limit, offset);
+    if (!users)
+    {
+      reply_error (identity, request_id, -32030, users.error ());
+      return;
+    }
+    auto total = user_manager_.count_users (enabled_filter);
+    if (!total)
+    {
+      reply_error (identity, request_id, -32030, total.error ());
+      return;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("users");
+    w.StartArray ();
+    for (const auto &u : *users)
+    {
+      w.StartObject ();
+      w.Key ("id");
+      w.String (u.id.c_str ());
+      w.Key ("enabled");
+      w.Bool (u.enabled);
+      w.Key ("created_at");
+      w.Int64 (u.created_at);
+      w.EndObject ();
+    }
+    w.EndArray ();
+    w.Key ("total");
+    w.Int (*total);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_enable (const std::string &params_json,
+                                      const std::string &identity,
+                                      const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.enable_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  void Orchestrator::cmd_user_disable (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.disable_user (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    reply_ok (identity, request_id, "{\"ok\":true}");
+  }
+
+  void Orchestrator::cmd_user_profile (const std::string &params_json,
+                                       const std::string &identity,
+                                       const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    auto res = user_manager_.get_profile (params["user_id"].GetString ());
+    if (!res)
+    {
+      reply_error (identity, request_id, -32020, res.error ());
+      return;
+    }
+    const auto &p = *res;
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (p.user_id.c_str ());
+    w.Key ("first_seen");
+    w.Int64 (p.first_seen);
+    w.Key ("last_seen");
+    if (p.last_seen)
+      w.Int64 (*p.last_seen);
+    else
+      w.Null ();
+    w.Key ("total_jobs");
+    w.Int (p.total_jobs);
+    w.Key ("successful_jobs");
+    w.Int (p.successful_jobs);
+    w.Key ("failed_jobs");
+    w.Int (p.failed_jobs);
+    w.Key ("connected_providers");
+    w.StartArray ();
+    for (const auto &prov : p.connected_providers)
+      w.String (prov.c_str ());
+    w.EndArray ();
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+} // namespace agentos

@@ -1,0 +1,528 @@
+/**
+ * Copyright (C) 2026  HardenedLinux community
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * test_master.cpp
+ *
+ * Black-box tests for Master (ADR-024 Actor model).
+ * Master is started as a real Actor thread; on_message() always returns
+ * immediately (LLM calls run in detached threads). Results are observed
+ * via a mock send_to_orchestrator callback.
+ *
+ * Non-LLM coverage (MasterTest):
+ *   - JobSubmit with no advisers registered → job_failed
+ *   - JobSubmit with exactly one adviser → select_adviser skips the
+ *     selection sub-task's LLM disambiguation branch (still runs the
+ *     mandatory Digest Pass, ADR-012 — see MasterSelectInvoker below),
+ *     directly forwards spawn_adviser
+ *   - JobSubmit with missing goal → job_failed immediately (no thread)
+ *   - AdviserFailed → job_failed
+ *
+ * LLM-dependent coverage (MasterLlmTest, skipped without DEEPSEEK_API_KEY):
+ *   - JobSubmit with 2+ advisers → LLM selects one
+ *   - WorkerExhausted → LLM forge decision → trigger_forge or job_failed
+ */
+
+#include <gtest/gtest.h>
+
+#include "agentos/central.h" // for Config
+#include "agentos/database.h"
+#include "agentos/home_init.h"
+#include "agentos/llm_client.h"
+#include "agentos/llm_proxy.h"
+#include "agentos/master.h"
+#include "agentos/registry.h"
+#include "agentos/types.h"
+
+#include <condition_variable>
+#include <filesystem>
+#include <mutex>
+#include <vector>
+
+namespace fs = std::filesystem;
+using namespace agentos;
+
+namespace agentos
+{
+  // MasterSelectInvoker — test-only friend access point (declared as a
+  // friend in master.h; defined here since no test currently needed it
+  // before ADR-012's mandatory Digest Pass made Master::llm_fn_ injection
+  // necessary for tests that must not depend on real network I/O).
+  //
+  // MUST live in namespace agentos: an unqualified `friend struct X;`
+  // inside a class that is itself inside namespace agentos injects X as
+  // agentos::X (not ::X) if no matching declaration is already visible
+  // at that point. Defining this struct at file/global scope instead —
+  // an earlier version of this file did — silently creates a distinct,
+  // unrelated ::MasterSelectInvoker with no actual friendship, which
+  // compiles fine right up until it tries to touch anything private and
+  // fails with "is private within this context" on every member.
+  //
+  // Exposes exactly two things test code needs and production code must
+  // never be able to reach through a public API:
+  //   - install_fake_llm(): inject a synchronous, instant fake for llm_fn_
+  //     so a test doesn't pay for (or depend on) a real LLM round-trip.
+  //   - call_select_adviser(): invoke the private select_adviser() directly,
+  //     for tests that want to assert on SelectionResult without going
+  //     through the full Actor message-queue/thread-detach path.
+  struct MasterSelectInvoker
+  {
+    static void install_fake_llm (
+        Master &m, std::function<Result<LlmResponse> (const LlmRequest &)> fn)
+    {
+      m.llm_fn_ = std::move (fn);
+    }
+
+    static Master::SelectionResult
+    call_select_adviser (Master &m, const std::string &job_id,
+                         const std::string &goal,
+                         const std::string &known_adviser_id)
+    {
+      return m.select_adviser (job_id, goal, known_adviser_id);
+    }
+  };
+} // namespace agentos
+
+// A fixed, instant fake Digest Pass response — never touches the network.
+// Used by tests that only care about non-LLM behavior (adviser routing,
+// job_failed paths) and would otherwise be at the mercy of a real
+// LlmProxy's timeout/retry timing now that Master::select_adviser()
+// always issues a Digest Pass call regardless of branch (ADR-012).
+static Result<LlmResponse>
+fake_digest_response (const LlmRequest &)
+{
+  LlmResponse resp;
+  resp.content
+    = R"({"digested_problem":"test","deliverable_kind":"result","adviser_id_suggestion":""})";
+  return Result<LlmResponse> (resp);
+}
+
+// ---------------------------------------------------------------------------
+// Fixture
+// ---------------------------------------------------------------------------
+
+class MasterTest : public ::testing::Test
+{
+protected:
+  fs::path home_;
+  std::unique_ptr<Database> db_;
+  std::unique_ptr<Registry> registry_;
+  std::unique_ptr<LlmProxy> llm_proxy_;
+  std::unique_ptr<LlmClient> llm_client_;
+  Config config_;
+  std::unique_ptr<Master> master_;
+
+  std::mutex mtx_;
+  std::condition_variable cv_;
+  std::vector<OrchestratorEvent> orch_events_;
+
+  void SetUp () override
+  {
+    char tmpl[] = "/tmp/agentos_master_test_XXXXXX";
+    char *dir = mkdtemp (tmpl);
+    ASSERT_NE (dir, nullptr);
+    home_ = dir;
+    setenv ("AGENTOS_HOME", home_.c_str (), 1);
+    agentos::initialise_home (home_);
+
+    db_ = std::make_unique<Database> ((home_ / "agentos.db").string ());
+    ASSERT_TRUE (db_->open ());
+  }
+
+  // Construct registry/llm/master after any DB seeding is done by the test.
+  // fake_llm defaults to the instant, no-network Digest Pass stub above —
+  // ADR-012 made every select_adviser() call issue a Digest Pass
+  // unconditionally, so any non-LLM-focused test that used to reach zero
+  // or one candidate and skip the LLM entirely now needs this seam or it
+  // pays for (and depends on the timing of) a real network round-trip.
+  // Pass nullptr explicitly to opt out (MasterLlmTest does, to exercise
+  // the real LlmClient/LlmProxy path end-to-end).
+  void start_master (
+      std::function<Result<LlmResponse> (const LlmRequest &)> fake_llm
+      = fake_digest_response)
+  {
+    registry_ = std::make_unique<Registry> ();
+    registry_->init (*db_);
+    llm_proxy_ = std::make_unique<LlmProxy> (1, 5);
+    llm_client_ = std::make_unique<LlmClient> (*llm_proxy_, config_.llm);
+
+    master_
+      = std::make_unique<Master> (*llm_client_, *registry_,
+                                  [this] (OrchestratorEvent ev)
+                                  {
+                                    std::lock_guard<std::mutex> lk (mtx_);
+                                    orch_events_.push_back (std::move (ev));
+                                    cv_.notify_all ();
+                                  });
+
+    if (fake_llm)
+      MasterSelectInvoker::install_fake_llm (*master_, std::move (fake_llm));
+
+    master_->start ();
+  }
+
+  // Database::open() now unconditionally seeds the three builtin advisers
+  // (planning / code-writer / code-reviewer) via seed_builtin_advisers().
+  // Tests that assume a genuinely empty or exact-count adviser registry
+  // must neutralize them explicitly before start_master(). set_worker_enabled
+  // operates generically on the `agents` table regardless of role, despite
+  // the name.
+  void disable_builtin_advisers ()
+  {
+    for (const char *id : {"planning", "code-writer", "code-reviewer"})
+      db_->set_worker_enabled (id, false);
+  }
+
+  void TearDown () override
+  {
+    if (master_)
+      master_->stop ();
+    db_->close ();
+    unsetenv ("AGENTOS_HOME");
+    fs::remove_all (home_);
+  }
+
+  bool wait_orch (size_t n, int timeout_ms = 5000)
+  {
+    std::unique_lock<std::mutex> lk (mtx_);
+    return cv_.wait_for (lk, std::chrono::milliseconds (timeout_ms),
+                         [&] { return orch_events_.size () >= n; });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// JobSubmit, no advisers registered → job_failed
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, JobSubmit_NoAdvisers_JobFailed)
+{
+  disable_builtin_advisers (); // builtins are seeded by DB open now —
+                               // registry_.all_advisers() is only empty
+                               // once they're explicitly disabled
+  start_master ();
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-1";
+  ev.payload_json = R"({"goal":"do something"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  EXPECT_EQ (orch_events_[0].kind, OrchestratorEvent::Kind::MasterDecision);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job_failed"),
+             std::string::npos);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job-1"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// JobSubmit, missing goal → job_failed immediately, no detached thread
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, JobSubmit_MissingGoal_JobFailedImmediately)
+{
+  start_master ();
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-2";
+  ev.payload_json = R"({})"; // no "goal" field
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job_failed"),
+             std::string::npos);
+  EXPECT_NE (orch_events_[0].payload_json.find ("missing goal"),
+             std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// JobSubmit, exactly one adviser → deterministic selection, spawn_adviser.
+// The mandatory Digest Pass (ADR-012) still fires — via the injected fake
+// so the assertion below stays about routing, not LLM timing — but its
+// adviser_id_suggestion is never consulted, since Step 1 already resolved
+// to a single candidate.
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, JobSubmit_SingleAdviser_SkipsLlmAndSpawns)
+{
+  disable_builtin_advisers ();
+
+  // Insert one adviser agent row before constructing Registry.
+  // Advisers ship manifest.toml, not manifest.json (ADR-018) —
+  // registry.cpp's parse_adviser_manifest_toml reads a [meta] table.
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning"]
+)");
+
+  start_master ();
+
+  ASSERT_EQ (registry_->all_advisers ().size (), 1u)
+    << "test setup: expected exactly one adviser to be loaded from DB";
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-3";
+  // Goal must contain a token that exactly matches the adviser's "planning"
+  // domain tag (ADR-033 §1: token-overlap match, no stemming). "plan
+  // something" tokenizes to ["plan","something"] and would never match
+  // "planning" — it must be the exact word, not a prefix/stem of it.
+  ev.payload_json = R"({"goal":"outline a planning workflow"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  EXPECT_NE (orch_events_[0].payload_json.find ("spawn_adviser"),
+             std::string::npos);
+  EXPECT_NE (orch_events_[0].payload_json.find ("planning-adviser"),
+             std::string::npos);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job-3"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// AdviserFailed → job_failed
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, AdviserFailed_JobFailed)
+{
+  start_master ();
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::AdviserFailed;
+  ev.job_id = "job-4";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job_failed"),
+             std::string::npos);
+  EXPECT_NE (orch_events_[0].payload_json.find ("job-4"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// on_message never blocks — multiple JobSubmits processed promptly even
+// while detached LLM threads are (would be) in flight.
+//
+// Uses the fake Digest Pass installed by start_master()'s default — with
+// zero candidates (all advisers disabled) this still exercises
+// select_adviser()'s zero-candidate branch, which per ADR-012 now issues
+// a Digest Pass call same as every other branch; the fake makes that call
+// instant and network-free so 5 concurrent jobs aren't serialized through
+// LlmProxy's single worker thread waiting on a real (or really-timing-out)
+// HTTP round-trip.
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, OnMessage_DoesNotBlock_ProcessesMultipleQuickly)
+{
+  disable_builtin_advisers (); // 0 advisers → each JobSubmit still runs one
+                               // Digest Pass call (ADR-012), but the fake
+                               // installed by start_master() makes it
+                               // instant and network-free
+  start_master ();
+
+  for (int i = 0; i < 5; ++i)
+  {
+    MasterEvent ev;
+    ev.kind = MasterEvent::Kind::JobSubmit;
+    ev.job_id = "job-bulk-" + std::to_string (i);
+    ev.payload_json = R"({"goal":"x"})";
+    master_->enqueue (std::move (ev));
+  }
+
+  ASSERT_TRUE (wait_orch (5, 2000));
+  std::lock_guard<std::mutex> lk (mtx_);
+  EXPECT_EQ (orch_events_.size (), 5u);
+}
+
+// ---------------------------------------------------------------------------
+// select_adviser() direct-call coverage (ADR-012): the Digest Pass always
+// runs, and its adviser_id_suggestion must never be consulted once the
+// adviser is already known — verified here by installing a fake that
+// deliberately misbehaves and suggests an out-of-set/irrelevant adviser
+// id, then asserting the known_adviser_id still wins outright.
+// ---------------------------------------------------------------------------
+
+TEST_F (MasterTest, SelectAdviser_KnownAdviserId_IgnoresMisbehavingSuggestion)
+{
+  disable_builtin_advisers ();
+
+  db_->insert_agent ("adviser-a", "adviser", "", R"(
+[meta]
+id = "adviser-a"
+domains = ["alpha"]
+)");
+  db_->insert_agent ("adviser-b", "adviser", "", R"(
+[meta]
+id = "adviser-b"
+domains = ["beta"]
+)");
+
+  registry_ = std::make_unique<Registry> ();
+  registry_->init (*db_);
+  llm_proxy_ = std::make_unique<LlmProxy> (1, 5);
+  llm_client_ = std::make_unique<LlmClient> (*llm_proxy_, config_.llm);
+  master_ = std::make_unique<Master> (
+      *llm_client_, *registry_, [this] (OrchestratorEvent ev)
+      {
+        std::lock_guard<std::mutex> lk (mtx_);
+        orch_events_.push_back (std::move (ev));
+        cv_.notify_all ();
+      });
+
+  // Deliberately misbehaving fake: known_adviser_id below will be
+  // "adviser-a", but this fake suggests "adviser-b" anyway. A correct
+  // implementation must not even parse this field once known_adviser_id
+  // resolved — this test would still pass with a naive "read but prefer
+  // known value" implementation, but is the closest black-box check
+  // available without a code-path-level instrumentation hook.
+  MasterSelectInvoker::install_fake_llm (
+      *master_, [] (const LlmRequest &) -> Result<LlmResponse>
+      {
+        LlmResponse resp;
+        resp.content = R"({"digested_problem":"x","deliverable_kind":)"
+                       R"("result","adviser_id_suggestion":"adviser-b"})";
+        return Result<LlmResponse> (resp);
+      });
+  // start() even though this test never enqueue()s through the Actor
+  // queue — TearDown() unconditionally calls stop(), and matching every
+  // other fixture's start/stop lifecycle avoids relying on stop()'s
+  // behavior when start() was never called.
+  master_->start ();
+
+  // Note: `auto`, not `Master::SelectionResult` — friendship isn't
+  // transitive. MasterSelectInvoker (a friend of Master) can return the
+  // type, but this test body is not itself a friend and cannot spell out
+  // the private nested type name directly to declare a variable of it.
+  auto sel = MasterSelectInvoker::call_select_adviser (
+      *master_, "job-known", "irrelevant text matching neither domain",
+      "adviser-a");
+
+  EXPECT_EQ (sel.adviser_id, "adviser-a");
+  EXPECT_EQ (sel.digest.deliverable_kind, "result");
+}
+
+// ---------------------------------------------------------------------------
+// LLM-dependent tests
+// ---------------------------------------------------------------------------
+
+class MasterLlmTest : public MasterTest
+{
+protected:
+  void SetUp () override
+  {
+    MasterTest::SetUp ();
+
+    const char *key = std::getenv ("DEEPSEEK_API_KEY");
+    if (!key || std::strlen (key) == 0)
+      GTEST_SKIP () << "DEEPSEEK_API_KEY not set — skipping LLM tests";
+
+    setenv ("AGENTOS_ADVISER_API_KEY", key, 1);
+    config_.llm.base_url = "https://api.deepseek.com";
+    config_.llm.model = "deepseek-chat";
+    config_.llm.api_key = key;
+  }
+
+  void TearDown () override
+  {
+    unsetenv ("AGENTOS_ADVISER_API_KEY");
+    MasterTest::TearDown ();
+  }
+
+  // Opts out of MasterTest's default fake Digest Pass — these tests
+  // exercise the real LlmClient/LlmProxy path end-to-end deliberately.
+  void start_master_real_llm () { MasterTest::start_master (nullptr); }
+};
+
+// Two advisers registered → LLM must pick one of the two valid ids.
+TEST_F (MasterLlmTest, JobSubmit_TwoAdvisers_LlmSelectsOne)
+{
+  // Both advisers share the "code" domain tag so the goal below produces
+  // exactly two candidates (ADR-033 §1 Step 1), forcing selection into
+  // the Digest Pass's disambiguation sub-task rather than short-circuiting
+  // on a single candidate or falling back to zero-candidate 'planning'.
+  disable_builtin_advisers ();
+
+  // Advisers ship manifest.toml, not manifest.json (ADR-018) —
+  // registry.cpp's parse_adviser_manifest_toml reads a [meta] table.
+  // Note: named "code-writer-test" (not "code-writer") to avoid any
+  // ambiguity with the disabled builtin id of the same name, even
+  // though they're distinct rows and no collision would actually occur.
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning", "general", "code"]
+)");
+  db_->insert_agent ("code-writer-test", "adviser", "", R"(
+[meta]
+id = "code-writer-test"
+domains = ["code"]
+)");
+
+  start_master_real_llm ();
+  ASSERT_EQ (registry_->all_advisers ().size (), 2u);
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-llm-1";
+  // Goal must contain the exact word "code" (both advisers' shared domain
+  // tag) to actually reach 2 candidates — "python function to sort a list"
+  // alone tokenizes with no token matching "code", "planning", or
+  // "general", and would silently fall through to the zero-candidate path.
+  ev.payload_json
+    = R"({"goal":"write code to sort a list in python"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1, 60000));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  EXPECT_NE (orch_events_[0].payload_json.find ("spawn_adviser"),
+             std::string::npos);
+  const bool picked_one_of_two
+    = orch_events_[0].payload_json.find ("planning-adviser")
+        != std::string::npos
+      || orch_events_[0].payload_json.find ("code-writer-test")
+           != std::string::npos;
+  EXPECT_TRUE (picked_one_of_two);
+}
+
+// WorkerExhausted → LLM forge decision → either trigger_forge or job_failed,
+// never a hard crash / empty payload.
+TEST_F (MasterLlmTest, WorkerExhausted_ProducesForgeDecisionOrFailure)
+{
+  start_master_real_llm ();
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::WorkerExhausted;
+  ev.job_id = "job-llm-2";
+  ev.payload_json = R"({"command":"video.transcode"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1, 60000));
+  std::lock_guard<std::mutex> lk (mtx_);
+  ASSERT_EQ (orch_events_.size (), 1u);
+  const std::string &payload = orch_events_[0].payload_json;
+  const bool valid = payload.find ("trigger_forge") != std::string::npos
+                     || payload.find ("job_failed") != std::string::npos;
+  EXPECT_TRUE (valid) << "unexpected payload: " << payload;
+}

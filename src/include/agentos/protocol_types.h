@@ -1,0 +1,155 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace agentos
+{
+
+  // --- Schedule (embedded in Job when type=scheduled) ---
+
+  struct Schedule
+  {
+    std::string timer_id;             // associated timer id
+    int64_t interval_s = 0;           // execution interval in seconds
+    std::optional<int64_t> starts_at; // first fire time; null means immediately
+    std::optional<int64_t> last_run_at; // last execution start time
+    std::optional<int64_t> next_run_at; // next scheduled execution time
+  };
+
+  // --- Loop (embedded in Job when type=loop) ---
+
+  struct Loop
+  {
+    int max_iterations = 0;
+    int current_iteration = 0;
+    int max_repairs = 0;
+    int current_repairs = 0;
+    std::string reviewer_id;
+    std::string acceptance_criteria;
+    std::optional<std::string>
+    last_feedback; // Reviewer feedback from last rejection
+  };
+
+  // --- Job (top-level entity) ---
+
+  struct Job
+  {
+    std::string id;
+    std::string type; // oneshot | scheduled | loop
+    std::string goal; // original natural language goal
+    std::vector<std::string> tags;
+
+    std::string user_id = "0"; // ADR-029
+
+    std::string
+    phase; // planning | executing | repairing | done | failed | human_review
+    int64_t created_at = 0;
+    int64_t updated_at = 0;
+    std::optional<std::string> error; // failure reason
+
+    // Which adviser Master routed this job to at entry (set once, at
+    // spawn_adviser time — see Orchestrator's handle_master_decision).
+    // Absent for jobs that failed before an adviser was ever selected.
+    std::optional<std::string> adviser_id;
+
+    // ADR-012 (amended): Master's Digest Pass classification for this job
+    // — "artifact" | "result". Set once, at the same spawn_adviser point
+    // adviser_id above is set (Database::set_job_deliverable_kind).
+    // Absent for jobs that failed before Digest Pass ran, or predating
+    // this field; every reader treats absence as "result" (matching
+    // DigestResult's own default), so this stays backward-compatible.
+    std::optional<std::string> deliverable_kind;
+
+    // Embedded entity for type=scheduled (std::nullopt otherwise)
+    std::optional<Schedule> schedule;
+    // Embedded entity for type=loop (std::nullopt otherwise)
+    std::optional<Loop> loop;
+  };
+
+  // --- Step (pipeline execution unit) ---
+
+  struct Step
+  {
+    std::string id;
+    std::string job_id;
+    int step_order = 0;
+    std::string description;
+    std::string status; // pending | running | done | failed
+    std::optional<int64_t> queued_at;    // when step was added to the plan
+    std::optional<int64_t> started_at;   // when worker dispatch began
+    std::optional<int64_t> completed_at; // when worker finished
+    std::optional<std::string> error; // failure summary, if failed
+    std::string result_json;          // ADR-016 result payload, set on done
+    int tokens_prompt     = 0;        // LLM input tokens for this step
+    int tokens_completion = 0;        // LLM output tokens for this step
+
+    // ADR-031: capability method name (target_type "worker") or adviser id
+    // (target_type "adviser") this step invokes. Stored as `method` in the
+    // tasks table from the start, but never previously read back out by
+    // load_steps_for_job/load_step — job.status had no way to show which
+    // capability a step actually used, or which steps were gaps
+    // (needs_forge) versus already-available.
+    std::string command;
+    std::string target_type; // "worker" | "adviser"
+    bool needs_forge = false;
+  };
+
+
+  // --- Worker (Executor) ---
+
+  struct Worker
+  {
+    std::string id;
+    std::vector<std::string> capabilities; // method names this Worker provides
+    std::string tier;                      // tier0 | tier1
+    std::string provenance;                // forge | manual
+    bool enabled = true;
+    int64_t registered_at = 0;
+  };
+
+  // --- Adviser ---
+
+  struct Adviser
+  {
+    std::string id;
+    std::string description;
+    std::string skill_path; // path to skill.md
+    std::string model;      // effective LLM model
+    bool active = false;
+  };
+
+  // --- ForgeJob ---
+
+  struct ForgeJob
+  {
+    std::string id;
+    std::string requirement;
+    std::string
+      phase; // drafting | reviewing | promoted | rejected | human_review
+    int attempt = 0;
+    int max_attempts = 0;
+    std::optional<std::string> last_feedback;
+    int64_t created_at = 0;
+    int64_t updated_at = 0;
+  };
+
+  // --- HumanReview ---
+
+  struct HumanReview
+  {
+    std::string id;
+    std::string type; // auto | human
+    std::optional<std::string> forge_id;
+    std::optional<std::string> job_id;
+    std::string reason;
+    std::string artifacts; // JSON summary of attempt records
+    std::string status;    // pending | approved | rejected
+    std::optional<std::string> decision;
+    int64_t created_at = 0;
+    std::optional<int64_t> reviewed_at;
+  };
+
+} // namespace agentos

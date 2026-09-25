@@ -1,0 +1,88 @@
+file(GLOB AGENTOS_CORE_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
+)
+
+add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
+
+add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
+
+target_include_directories(sqlite3 SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
+
+target_compile_definitions(sqlite3 PRIVATE
+  SQLITE_OMIT_LOAD_EXTENSION
+  SQLITE_OMIT_COMPLETE
+)
+
+set_source_files_properties(${SQLITE3_SRC_DIR}/sqlite3.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")
+
+target_include_directories(agentos_core PUBLIC
+  ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_include_directories(agentos_core SYSTEM PUBLIC
+  ${RAPIDJSON_INC}
+  ${SPDLOG_INC}
+  ${HTTPLIB_INC}
+  ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
+  ${CPPZMQ_INC}
+  ${TOMLPLUSPLUS_INC}
+  ${SECCOMP_INCLUDE_DIR}
+  ${CAP_INCLUDE_DIR}
+  ${OPENSSL_STATIC_INC}
+  ${LIBTPMS_INC}
+)
+
+target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
+
+target_compile_definitions(agentos_core PRIVATE
+  SQLITE_ENABLE_JSON1
+  SQLITE_ENABLE_FTS5
+  SQLITE_ENABLE_RTREE
+  CPPHTTPLIB_OPENSSL_SUPPORT
+)
+
+target_compile_options(agentos_core PRIVATE
+  -Wall -Wextra -Wpedantic -Wno-unused-parameter
+  -Wno-deprecated-declarations
+  -Wno-class-memaccess
+  -Wno-array-bounds
+  -Wno-stringop-overflow
+  $<$<CONFIG:Release>:-O2>
+  $<$<CONFIG:Debug>:-g>
+  $<$<CONFIG:Debug>:-O0>
+)
+
+target_link_libraries(agentos_core PUBLIC
+  pthread
+  dl
+  ${SPDLOG_LIB}
+  ${ZMQ_LIB}
+  ${SECCOMP_LIB}
+  ${CAP_LIB}
+  ${OPENSSL_STATIC_SSL}
+  ${OPENSSL_STATIC_CRYPTO}
+)
+
+target_include_directories(agentos_core PUBLIC
+  ${SECCOMP_INCLUDE_DIR}
+  ${CAP_INCLUDE_DIR}
+)
+
+add_dependencies(
+  agentos_core
+  libseccomp_ext
+  libcap_ext
+  spdlog_ext
+  httplib_ext
+  rapidjson_ext
+  libzmq_ext
+  cppzmq_ext
+  openssl_ext
+  libtpms_ext)
+
+target_link_libraries(agentos_core PRIVATE sqlite3)
+
+if(AGENTOS_COVERAGE)
+  target_compile_options(agentos_core PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+  target_link_options(agentos_core PRIVATE --coverage)
+endif()

@@ -15,7 +15,10 @@ struct Config {
         int         max_tokens = 1024;
         int         timeout_s  = 120;
         std::string api_key;   // from env, not TOML
-        int         max_concurrent = 0;   // 0 = auto (hardware_concurrency - 1, min 1)
+        int         max_concurrent = 0;   // 0 = auto (kDefaultLlmConcurrency, see llm_proxy.h);
+                                          // pool threads block on network I/O, not CPU, so
+                                          // this is sized to typical provider concurrency
+                                          // limits rather than the host's core count
 
         // ADR-017 (DeepSeek-specific 429 handling): cap on total time spent
         // retrying a single request that hit DeepSeek's concurrency-limit

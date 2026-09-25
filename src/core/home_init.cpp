@@ -533,6 +533,9 @@ if __name__ == "__main__":
         out << "model = \"claude-opus-4-5\"\n";
         out << "max_tokens = 1024\n";
         out << "timeout_s = 120\n";
+        out << "# 0 = auto (a fixed default sized for network I/O concurrency,\n";
+        out << "# not the host's core count). Set explicitly to match your\n";
+        out << "# LLM provider's account-level concurrent-request ceiling.\n";
         out << "max_concurrent = 0\n\n";
         out << "[daemon]\n";
         out << "log_level = \"info\"\n";

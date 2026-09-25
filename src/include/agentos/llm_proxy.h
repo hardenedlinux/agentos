@@ -14,7 +14,6 @@
 #include "agentos/llm_client.h" // LlmRequest, LlmResponse
 #include "agentos/types.h"      // Result, Error
 
-#include <algorithm>
 #include <condition_variable>
 #include <future>
 #include <mutex>
@@ -33,13 +32,27 @@ namespace agentos
     std::promise<Result<LlmResponse>> promise;
   };
 
-  /// Translate config value 0 → auto (max(1, hardware_concurrency - 1)).
+  /// Default pool size when `max_concurrent` is left at 0 ("auto").
+  ///
+  /// Chosen independently of hardware_concurrency(): every pool thread
+  /// spends its time blocked on network I/O (an LLM HTTP call typically
+  /// takes seconds to minutes) rather than doing CPU work, so sizing the
+  /// pool off the core count starves it on small machines. A 2-core box
+  /// previously auto-resolved to 1 thread, serialising every Adviser and
+  /// Master LLM call in the daemon; a single DeepSeek 429 retry could then
+  /// block all LLM traffic for up to rate_limit_max_wait_s (ADR-017).
+  /// 16 is a starting point sized to typical provider account concurrency
+  /// ceilings, not to the host's CPU; operators with a higher provider
+  /// limit should set `max_concurrent` explicitly rather than rely on auto.
+  inline constexpr int kDefaultLlmConcurrency = 16;
+
+  /// Translate config value 0 → auto (kDefaultLlmConcurrency); any positive
+  /// value is used unchanged.
   inline int resolve_concurrency (int cfg)
   {
     if (cfg > 0)
       return cfg;
-    const int hw = static_cast<int> (std::thread::hardware_concurrency ());
-    return std::max (1, hw - 1);
+    return kDefaultLlmConcurrency;
   }
 
   class LlmProxy

@@ -20,14 +20,15 @@ using namespace agentos;
 // Tests
 // ----------------------------------------------------------------------
 TEST(LlmProxyTest, ResolveConcurrency) {
-    // `0`  →  max(1, hardware_concurrency - 1)
-    const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    const int expected = std::max(1, hw - 1);
-    EXPECT_EQ(resolve_concurrency(0), expected);
+    // `0` -> the fixed I/O-oriented default, independent of core count.
+    // LLM calls are network-bound waits, not CPU work, so the pool must
+    // not be sized off hardware_concurrency() (see llm_proxy.h).
+    EXPECT_EQ(resolve_concurrency(0), kDefaultLlmConcurrency);
 
-    // explicit value is used unchanged
+    // explicit value is used unchanged, including values below the default
     EXPECT_EQ(resolve_concurrency(5), 5);
     EXPECT_EQ(resolve_concurrency(1), 1);
+    EXPECT_EQ(resolve_concurrency(64), 64);
 }
 
 TEST(LlmProxyTest, ConstructAndDestroy) {

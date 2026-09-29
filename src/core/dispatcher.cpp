@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -98,6 +99,16 @@ namespace agentos
       spdlog::info (
         "[dispatcher] reaped pid={} job_id={} run_id={} exit_code={}", pid,
         entry.job_id, entry.run_id, exit_code);
+
+      if (WIFSIGNALED (status))
+      {
+        const int sig = WTERMSIG (status);
+        spdlog::warn ("[dispatcher] run_id={} killed by signal {} ({}){}",
+                      entry.run_id, sig, strsignal (sig),
+                      sig == SIGSYS ? " -- seccomp denied a syscall not in "
+                                      "syscall_whitelist.h"
+                                    : "");
+      }
 
       if (exit_code != 0)
       {

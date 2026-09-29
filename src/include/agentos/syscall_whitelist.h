@@ -157,4 +157,18 @@ int syscalls[] = {
   SCMP_SYS (clone3),
   SCMP_SYS (pread64),
   SCMP_SYS (pwrite64),
+  // Python subprocess: `import subprocess` probes epoll via selectors
+  // (epoll_create1), communicate()/capture_output waits with poll, and
+  // the _posixsubprocess child closes inherited fds with close_range.
+  // Without these, any Python Worker that spawns a helper binary is
+  // killed with SIGSYS before printing a single line.
+  SCMP_SYS (epoll_create1),
+  SCMP_SYS (poll),
+  SCMP_SYS (close_range),
+  // ffmpeg (Auteur voice.render / media.mix loudnorm, ADR-015 Worker
+  // helper binaries): statfs on the output path, pselect6 in the
+  // interactive-stdin check, getrusage for benchmark accounting.
+  SCMP_SYS (statfs),
+  SCMP_SYS (pselect6),
+  SCMP_SYS (getrusage),
 };

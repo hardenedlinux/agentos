@@ -67,6 +67,37 @@ namespace agentos
   namespace
   {
 
+    // Trim leading/trailing ASCII whitespace (incl. CR/LF). Keys and URLs
+    // read from files / `echo`ed into env vars commonly carry a trailing
+    // newline; left in place it makes httplib reject the request with
+    // Error::InvalidHeaders ("Invalid headers") before anything is sent.
+    std::string trim_ws (const std::string &s)
+    {
+      const char *ws = " \t\r\n\v\f";
+      const auto b = s.find_first_not_of (ws);
+      if (b == std::string::npos)
+        return "";
+      const auto e = s.find_last_not_of (ws);
+      return s.substr (b, e - b + 1);
+    }
+
+    // RFC 9110 field-value characters as httplib checks them (visible ASCII
+    // or obs-text; interior SP/HTAB allowed). Returns the offending index,
+    // or npos if the value is acceptable.
+    size_t bad_header_char (const std::string &v)
+    {
+      for (size_t i = 0; i < v.size (); ++i)
+        {
+          const unsigned char c = static_cast<unsigned char> (v[i]);
+          const bool vchar = (c >= 33 && c <= 126) || c >= 128;
+          const bool inner_ws
+            = (c == ' ' || c == '\t') && i > 0 && i + 1 < v.size ();
+          if (!vchar && !inner_ws)
+            return i;
+        }
+      return std::string::npos;
+    }
+
     // Strip scheme prefix so httplib::SSLClient receives only the host.
     std::string strip_scheme (const std::string &url)
     {
@@ -326,15 +357,50 @@ namespace agentos
                                               int timeout_s,
                                               int rate_limit_max_wait_s)
   {
+    // Sanitize/validate the values that end up in HTTP headers (Host,
+    // Authorization / x-api-key) up front. A bad value is a configuration
+    // error: fail once with a precise message instead of surfacing
+    // httplib's opaque "Invalid headers" as a retried network error.
+    const std::string api_key = trim_ws (req.api_key);
+    const std::string base_url = trim_ws (req.base_url);
+    if (api_key.size () != req.api_key.size ())
+      spdlog::warn ("[llm_proxy] API key had leading/trailing whitespace "
+                    "(e.g. a trailing newline) — trimmed");
+    if (api_key.empty ())
+      return Result<LlmResponse> (
+        Error{"LLM API key is empty — set AGENTOS_LLM_API_KEY (Master / "
+              "daemon default) or AGENTOS_ADVISER_API_KEY (Advisers, Forge)"},
+        ErrorTag{});
+    if (const auto i = bad_header_char (api_key); i != std::string::npos)
+      return Result<LlmResponse> (
+        Error{"LLM API key contains an invalid character (byte 0x"
+              + [] (unsigned char c) {
+                  static constexpr char hx[] = "0123456789abcdef";
+                  return std::string{hx[c >> 4], hx[c & 0xf]};
+                } (static_cast<unsigned char> (api_key[i]))
+              + " at position " + std::to_string (i)
+              + ") — check the key's env var / file for stray control "
+                "characters or embedded whitespace"},
+        ErrorTag{});
+
     const bool is_anthropic
-      = req.base_url.find ("anthropic.com") != std::string::npos;
+      = base_url.find ("anthropic.com") != std::string::npos;
     // ADR-017 (DeepSeek-specific 429 handling) -- see retry_deepseek_429
     // above for why this provider gets a carve-out from the generic
     // "4xx: no retry" rule.
     const bool is_deepseek
-      = req.base_url.find ("deepseek.com") != std::string::npos;
+      = base_url.find ("deepseek.com") != std::string::npos;
 
-    const std::string host = strip_scheme (req.base_url);
+    std::string host = strip_scheme (base_url);
+    while (!host.empty () && host.back () == '/')
+      host.pop_back ();
+    if (host.empty () || bad_header_char (host) != std::string::npos
+        || host.find ('/') != std::string::npos)
+      return Result<LlmResponse> (
+        Error{"LLM base_url is invalid: '" + base_url
+              + "' — expected scheme + host only, e.g. "
+                "https://api.deepseek.com"},
+        ErrorTag{});
     const std::string path = is_anthropic ? "/v1/messages" : req.api_path;
     const std::string body
       = is_anthropic ? build_anthropic_body (req)
@@ -343,11 +409,11 @@ namespace agentos
     httplib::Headers headers;
     if (is_anthropic)
       headers = {{"Content-Type", "application/json"},
-                 {"x-api-key", req.api_key},
+                 {"x-api-key", api_key},
                  {"anthropic-version", "2023-06-01"}};
     else
       headers = {{"Content-Type", "application/json"},
-                 {"Authorization", "Bearer " + req.api_key}};
+                 {"Authorization", "Bearer " + api_key}};
 
     // CA bundle: AGENTOS_CA_CERT_PATH env var → system default
     const char *ca_env = std::getenv ("AGENTOS_CA_CERT_PATH");
@@ -393,6 +459,13 @@ namespace agentos
       {
         const std::string err = httplib::to_string (res.error ());
         spdlog::warn ("[llm_proxy] network error: {}", err);
+        // Request-construction errors are deterministic — retrying the
+        // identical request cannot succeed.
+        if (res.error () == httplib::Error::InvalidHeaders)
+          return Result<LlmResponse> (
+            Error{"Invalid request headers (check model/base_url/api_key "
+                  "configuration): " + err},
+            ErrorTag{});
         if (attempt < kMaxAttempts - 1)
         {
           std::this_thread::sleep_for (std::chrono::milliseconds (500));

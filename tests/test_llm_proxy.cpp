@@ -111,4 +111,57 @@ TEST(LlmProxyTest, DeepSeekUserId_InvalidIdsAreHashedStably) {
     EXPECT_NE(deepseek_user_id(std::string(513, 'a')), std::string(513, 'a'));
 }
 
+// Header-bound config values are validated before any I/O, so a bad API
+// key or base_url fails fast with a precise message instead of httplib's
+// opaque "Invalid headers" retried as a network error.
+namespace {
+Result<LlmResponse> run_once(const std::string& base_url,
+                             const std::string& api_key) {
+    LlmProxy proxy(1, 1);
+    LlmRequest req;
+    req.base_url = base_url;
+    req.api_key = api_key;
+    req.model = "m";
+    req.user_prompt = "hi";
+    auto fut = proxy.enqueue(req);
+    EXPECT_EQ(fut.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    return fut.get();
+}
+} // namespace
+
+TEST(LlmProxyTest, EmptyApiKey_FailsFastWithClearError) {
+    auto res = run_once("https://api.deepseek.com", "");
+    EXPECT_FALSE(res.ok);
+    EXPECT_NE(res.error.find("API key is empty"), std::string::npos) << res.error;
+}
+
+TEST(LlmProxyTest, WhitespaceOnlyApiKey_TreatedAsEmpty) {
+    auto res = run_once("https://api.deepseek.com", " \n");
+    EXPECT_FALSE(res.ok);
+    EXPECT_NE(res.error.find("API key is empty"), std::string::npos) << res.error;
+}
+
+TEST(LlmProxyTest, ApiKeyWithEmbeddedControlChar_FailsWithoutLeakingKey) {
+    auto res = run_once("https://api.deepseek.com", "sk-abc\ndef");
+    EXPECT_FALSE(res.ok);
+    EXPECT_NE(res.error.find("invalid character (byte 0x0a at position 6)"),
+              std::string::npos) << res.error;
+    EXPECT_EQ(res.error.find("sk-abc"), std::string::npos);
+}
+
+TEST(LlmProxyTest, TrailingNewlineInKeyAndUrl_IsTrimmedAndRequestIsSent) {
+    // Trimmed values pass validation; the request then reaches the network
+    // layer (nothing listening) instead of failing with "Invalid headers".
+    auto res = run_once("http://127.0.0.1:1\n", "dummy\n");
+    EXPECT_FALSE(res.ok);
+    EXPECT_EQ(res.error.find("Invalid"), std::string::npos) << res.error;
+    EXPECT_EQ(res.error.find("API key"), std::string::npos) << res.error;
+}
+
+TEST(LlmProxyTest, BaseUrlWithPath_Rejected) {
+    auto res = run_once("https://api.deepseek.com/v1", "k");
+    EXPECT_FALSE(res.ok);
+    EXPECT_NE(res.error.find("base_url is invalid"), std::string::npos) << res.error;
+}
+
 } // namespace

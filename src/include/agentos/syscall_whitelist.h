@@ -171,4 +171,13 @@ int syscalls[] = {
   SCMP_SYS (statfs),
   SCMP_SYS (pselect6),
   SCMP_SYS (getrusage),
+  // CUDA runtime/driver init (Velum GPU backend, observed via strace):
+  // sysinfo for host memory sizing, eventfd2 for driver worker-thread
+  // wakeups, sched_get_priority_{min,max} when creating its helper
+  // threads, and gettimeofday called as a real syscall (not via vDSO).
+  SCMP_SYS (sysinfo),
+  SCMP_SYS (eventfd2),
+  SCMP_SYS (sched_get_priority_min),
+  SCMP_SYS (sched_get_priority_max),
+  SCMP_SYS (gettimeofday),
 };

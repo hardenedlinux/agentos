@@ -51,6 +51,10 @@ namespace agentos
     std::string run_id;  // set when Worker is forked
     std::string job_dir; // set when Worker is forked
     int attempts = 0;
+    // Set at dispatch: the Worker or Adviser that runs this step, and
+    // whether it is a declared reviewer (ADR-031 §14.2, agents.is_reviewer).
+    std::string agent_id;
+    bool reviewer = false;
   };
 
   struct ActiveJob
@@ -449,6 +453,12 @@ namespace agentos
     // Re-emit every job whose state_seq is ahead of notified_seq.
     // Triggered on each heartbeat and once at startup.
     void reemit_pending_outbox ();
+
+    // ADR-031 §14.4: a declared reviewer rejected the step's input. Persists
+    // the step result, fails the step and the job with failure_kind
+    // "review_rejected" and the job-level review object. Never retried.
+    void reject_step_by_review (ActiveJob &job, const std::string &result_json,
+                                const std::string &findings_json);
 
     // Generate a UUID for run_id / job_id.
     static std::string new_uuid ();

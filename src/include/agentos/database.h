@@ -307,6 +307,19 @@ namespace agentos
     // ADR-038: set the supports_continuation flag for a registered agent
     // (typically an adviser).  Silently no-ops if the id is unknown.
     void set_agent_supports_continuation (const std::string &id, bool value);
+    // ADR-031 §14.2: declared reviewer flag. Set on every registration
+    // (insert_agent's upsert leaves it untouched).
+    void set_agent_reviewer (const std::string &id, bool value);
+    bool agent_is_reviewer (const std::string &id);
+    // ADR-031 §14.5: jobs.failure_kind / jobs.review_json.
+    struct JobFailure
+    {
+      std::string kind;        // "review_rejected"
+      std::string review_json; // {step_id, reviewer_id, verdict, findings}
+    };
+    void set_job_review_rejected (const std::string &job_id,
+                                  const std::string &review_json);
+    std::optional<JobFailure> load_job_failure (const std::string &job_id);
 
     // -- ADR-038 interaction continuations ----------------------------------
 

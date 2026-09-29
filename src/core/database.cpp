@@ -422,6 +422,11 @@ namespace agentos
         "ALTER TABLE jobs ADD COLUMN state_seq INTEGER NOT NULL DEFAULT 0");
       maybe_add_column (
         "ALTER TABLE jobs ADD COLUMN notified_seq INTEGER NOT NULL DEFAULT 0");
+      // ADR-031 §14.5: why a failed job failed, when it is a declared
+      // reviewer's rejection ("review_rejected"), and the reviewer's review
+      // object. NULL for every other failure and for non-failed jobs.
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN failure_kind TEXT");
+      maybe_add_column ("ALTER TABLE jobs ADD COLUMN review_json TEXT");
     }
 
     // ADR-040: forge_pipeline_jobs.user_id — who triggered the Forge run.
@@ -490,6 +495,9 @@ namespace agentos
       maybe_add_column ("ALTER TABLE agents ADD COLUMN description TEXT");
       // ADR-038: adds support for optional interaction continuation.
       maybe_add_column ("ALTER TABLE agents ADD COLUMN supports_continuation INTEGER NOT NULL DEFAULT 0");
+      // ADR-031 §14.2: declared reviewer (Adviser manifest.toml
+      // [review] enabled = true; Worker manifest.json "reviewer": true).
+      maybe_add_column ("ALTER TABLE agents ADD COLUMN is_reviewer INTEGER NOT NULL DEFAULT 0");
     }
 
     // Suite installation tracking (ADR-030, worker.register/adviser.register/
@@ -1374,7 +1382,16 @@ namespace agentos
   // trigger never re-fires a trigger on jobs.
   bool Database::create_outbox_seq_triggers ()
   {
+    // Dropped and recreated on every open so a changed definition (e.g. a
+    // column newly part of job.status) takes effect on existing databases.
     static const char *ddl = R"(
+      DROP TRIGGER IF EXISTS trg_jobs_seq_insert;
+      DROP TRIGGER IF EXISTS trg_jobs_seq_update;
+      DROP TRIGGER IF EXISTS trg_tasks_seq_insert;
+      DROP TRIGGER IF EXISTS trg_tasks_seq_update;
+      DROP TRIGGER IF EXISTS trg_tasks_seq_delete;
+      DROP TRIGGER IF EXISTS trg_forge_seq_insert;
+      DROP TRIGGER IF EXISTS trg_forge_seq_update;
       CREATE TRIGGER IF NOT EXISTS trg_jobs_seq_insert
         AFTER INSERT ON jobs
       BEGIN
@@ -1382,7 +1399,8 @@ namespace agentos
       END;
       CREATE TRIGGER IF NOT EXISTS trg_jobs_seq_update
         AFTER UPDATE OF phase, error, goal, user_id, adviser_id,
-                        deliverable_kind, updated_at ON jobs
+                        deliverable_kind, failure_kind, review_json,
+                        updated_at ON jobs
       BEGIN
         UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.id;
       END;
@@ -3223,6 +3241,68 @@ namespace agentos
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] set_agent_supports_continuation: {}",
                      sqlite3_errmsg (db_));
+  }
+
+  void Database::set_agent_reviewer (const std::string &id, bool value)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE agents SET is_reviewer=? WHERE id=?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_int (stmt, 1, value ? 1 : 0);
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_agent_reviewer: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  bool Database::agent_is_reviewer (const std::string &id)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("SELECT is_reviewer FROM agents WHERE id=?"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_ROW
+           && sqlite3_column_int (stmt, 0) != 0;
+  }
+
+  void Database::set_job_review_rejected (const std::string &job_id,
+                                          const std::string &review_json)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE jobs SET failure_kind='review_rejected', "
+                        "review_json=? WHERE id=?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, review_json.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_job_review_rejected: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  std::optional<Database::JobFailure>
+  Database::load_job_failure (const std::string &job_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare ("SELECT failure_kind, review_json FROM jobs "
+                        "WHERE id=? AND failure_kind IS NOT NULL"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+    JobFailure f;
+    if (const auto *t = sqlite3_column_text (stmt, 0))
+      f.kind = reinterpret_cast<const char *> (t);
+    if (const auto *t = sqlite3_column_text (stmt, 1))
+      f.review_json = reinterpret_cast<const char *> (t);
+    return f;
   }
 
   void Database::insert_interaction_continuation (const InteractionContinuationRow &row)

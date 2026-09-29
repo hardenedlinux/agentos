@@ -759,6 +759,223 @@ TEST_F (OrchestratorTest, PlanReady_NoWorkerForCommand_ReportsExhaustedToMaster)
 // Pipeline: plan_ready with a registered worker → WorkerDone → job done
 // ---------------------------------------------------------------------------
 
+// ADR-031 §14.2: the reviewer flag comes only from an explicit declaration
+// and is re-evaluated on every registration.
+TEST_F (OrchestratorTest, Register_ReviewerDeclaration)
+{
+  const std::string key = insert_key ("admin");
+  const fs::path w = home_ / "src-rev-w";
+  const fs::path a = home_ / "src-rev-a";
+  fs::create_directories (w);
+  fs::create_directories (a);
+  std::ofstream (w / "worker.py") << "";
+  std::ofstream (a / "skill.md") << "s";
+
+  auto call = [&] (const std::string &id, const std::string &method,
+                   const fs::path &path) -> std::string
+  {
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id + R"(","method":")"
+                  + method + R"(","key":")" + key
+                  + R"(","params":{"path":")" + path.string () + R"("}})");
+    if (!wait_gateway (1))
+      return "timeout";
+    std::lock_guard<std::mutex> lk (mtx_);
+    return gateway_events_[0].outbound.message;
+  };
+  auto worker_manifest = [&] (const std::string &extra)
+  {
+    std::ofstream (w / "manifest.json")
+      << R"({"id":"rw",)" + extra
+           + R"("capabilities":[{"method":"rw.run","description":"d"}]})";
+  };
+  auto adviser_manifest = [&] (const std::string &extra)
+  {
+    std::ofstream (a / "manifest.toml")
+      << "[meta]\nid = \"ra\"\ndescription = \"d\"\n" + extra;
+  };
+
+  worker_manifest (R"("reviewer":true,)");
+  EXPECT_NE (call ("1", "worker.register", w).find ("\"result\""), std::string::npos);
+  EXPECT_TRUE (db_->agent_is_reviewer ("rw"));
+  worker_manifest ("");
+  EXPECT_NE (call ("2", "worker.register", w).find ("\"result\""), std::string::npos);
+  EXPECT_FALSE (db_->agent_is_reviewer ("rw")) << "dropping the flag clears it";
+  worker_manifest (R"("reviewer":"yes",)");
+  EXPECT_NE (call ("3", "worker.register", w).find ("-32602"), std::string::npos);
+
+  adviser_manifest ("[review]\nenabled = true\n");
+  const auto r = call ("4", "adviser.register", a);
+  EXPECT_NE (r.find ("\"result\""), std::string::npos) << r;
+  EXPECT_TRUE (db_->agent_is_reviewer ("ra"));
+  adviser_manifest ("");
+  EXPECT_NE (call ("5", "adviser.register", a).find ("\"result\""), std::string::npos);
+  EXPECT_FALSE (db_->agent_is_reviewer ("ra"));
+}
+
+// ---------------------------------------------------------------------------
+// ADR-031 §14 / ADR-016: reviewer Workers
+// ---------------------------------------------------------------------------
+
+TEST_F (OrchestratorTest, ReviewerWorker_VerdictHandling)
+{
+  const std::string key = insert_key ("operator");
+  const fs::path worker_dir = home_ / "workers" / "rev-w";
+  fs::create_directories (worker_dir);
+  const fs::path script = worker_dir / "worker.sh";
+  std::ofstream (script) << "#!/bin/sh\nexit 0\n";
+  fs::permissions (script, fs::perms::owner_all);
+  db_->insert_agent ("rev-w", "worker", script.string (), "{}");
+  db_->insert_capability ("rev-w", "review.check", "d", "{}");
+  db_->set_agent_reviewer ("rev-w", true);
+  db_->insert_agent ("plain-w", "worker", script.string (), "{}");
+  db_->insert_capability ("plain-w", "plain.check", "d", "{}");
+  EXPECT_TRUE (db_->agent_is_reviewer ("rev-w"));
+  EXPECT_FALSE (db_->agent_is_reviewer ("plain-w"));
+
+  orch_->stop ();
+  registry_ = std::make_unique<Registry> ();
+  registry_->init (*db_);
+  orch_ = std::make_unique<Orchestrator> (
+    *db_, *llm_, *registry_, dispatcher_, *forge_, config_, *cred_vault_,
+    [this] (MasterEvent ev)
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      master_events_.push_back (std::move (ev));
+      cv_.notify_all ();
+    },
+    [this] (GatewayEvent ev)
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.push_back (std::move (ev));
+      cv_.notify_all ();
+    });
+  orch_->init ();
+  orch_->start ();
+
+  // Runs one single-step job and feeds the given result.json to its step
+  // as if the Worker had exited 0. Returns the terminal phase.
+  auto run = [&] (const std::string &job_id, const std::string &command,
+                  const std::string &result_file) -> std::string
+  {
+    Task task;
+    task.id = TaskId (job_id);
+    task.goal = "g";
+    task.user_id = "0";
+    db_->store_job (task);
+
+    OrchestratorEvent ev;
+    ev.kind = OrchestratorEvent::Kind::MasterDecision;
+    ev.job_id = job_id;
+    ev.payload_json = R"({"type":"plan_ready","job_id":")" + job_id
+                      + R"(","job_type":"oneshot","steps":[{"id":"step-0",)"
+                        R"("target_type":"worker","command":")"
+                      + command + R"(","description":"d"}]})";
+    orch_->enqueue (std::move (ev));
+
+    bool running = false;
+    for (int i = 0; i < 80 && !running; ++i)
+    {
+      std::this_thread::sleep_for (std::chrono::milliseconds (25));
+      for (const auto &st : db_->load_steps_for_job (job_id))
+        running = running || st.status == "running";
+    }
+    if (!running)
+      return "not dispatched";
+
+    const fs::path run_dir = home_ / ("fake-run-" + job_id);
+    fs::create_directories (run_dir);
+    std::ofstream (run_dir / "result.json") << result_file;
+
+    OrchestratorEvent done;
+    done.kind = OrchestratorEvent::Kind::WorkerDone;
+    done.job_id = job_id;
+    done.payload_json = R"({"run_id":"fake","exit_code":0,"run_dir":")"
+                        + run_dir.string () + R"("})";
+    orch_->enqueue (std::move (done));
+
+    for (int i = 0; i < 80; ++i)
+    {
+      std::this_thread::sleep_for (std::chrono::milliseconds (25));
+      auto j = db_->load_job (job_id);
+      if (j && (j->phase == "done" || j->phase == "failed"))
+        return j->phase;
+    }
+    return "stuck";
+  };
+
+  // Declared reviewer, "rejected" + verdict reject → review_rejected.
+  EXPECT_EQ (run ("job-rev-reject", "review.check",
+                  R"({"status":"rejected","result":{"review":{"verdict":"reject",)"
+                  R"("findings":[{"code":"c1","message":"m1"}]}}})"),
+             "failed");
+  {
+    auto f = db_->load_job_failure ("job-rev-reject");
+    ASSERT_TRUE (f);
+    EXPECT_EQ (f->kind, "review_rejected");
+    EXPECT_EQ (f->review_json,
+               R"({"step_id":"step-0","reviewer_id":"rev-w","verdict":"reject",)"
+               R"("findings":[{"code":"c1","message":"m1"}]})");
+    auto steps = db_->load_steps_for_job ("job-rev-reject");
+    ASSERT_EQ (steps.size (), 1u);
+    EXPECT_EQ (steps[0].status, "failed");
+    EXPECT_NE (steps[0].result_json.find ("\"verdict\":\"reject\""),
+               std::string::npos)
+      << "the reviewer's result is persisted";
+    auto j = db_->load_job ("job-rev-reject");
+    ASSERT_TRUE (j && j->error);
+    EXPECT_EQ (*j->error, "review rejected by rev-w");
+
+    // Wire shape (ADR-039 §B).
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":"s1","method":"job.status","key":")"
+                  + key + R"(","params":{"job_id":"job-rev-reject","user_id":"0"}})");
+    ASSERT_TRUE (wait_gateway (1));
+    std::lock_guard<std::mutex> lk (mtx_);
+    const std::string &m = gateway_events_[0].outbound.message;
+    EXPECT_NE (m.find (R"("failure_kind":"review_rejected")"), std::string::npos) << m;
+    EXPECT_NE (m.find (R"("review":{"step_id":"step-0","reviewer_id":"rev-w")"),
+               std::string::npos) << m;
+  }
+
+  // Declared reviewer, "ok" + verdict pass → done, no failure_kind.
+  EXPECT_EQ (run ("job-rev-pass", "review.check",
+                  R"({"status":"ok","result":{"review":{"verdict":"pass"},"x":1}})"),
+             "done");
+  EXPECT_FALSE (db_->load_job_failure ("job-rev-pass"));
+
+  // Declared reviewer, "ok" without a review object → invalid output.
+  EXPECT_EQ (run ("job-rev-noreview", "review.check",
+                  R"({"status":"ok","result":{"x":1}})"),
+             "failed");
+  EXPECT_FALSE (db_->load_job_failure ("job-rev-noreview"));
+
+  // Not a reviewer: "rejected" is a Worker Contract violation, not a verdict.
+  EXPECT_EQ (run ("job-plain-reject", "plain.check",
+                  R"({"status":"rejected","result":{"review":{"verdict":"reject"}}})"),
+             "failed");
+  EXPECT_FALSE (db_->load_job_failure ("job-plain-reject"));
+
+  // A job that failed for another reason reports failure_kind null.
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    gateway_events_.clear ();
+  }
+  send_inbound (R"({"jsonrpc":"2.0","id":"s2","method":"job.status","key":")"
+                + key + R"(","params":{"job_id":"job-plain-reject","user_id":"0"}})");
+  ASSERT_TRUE (wait_gateway (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  const std::string &m = gateway_events_[0].outbound.message;
+  EXPECT_NE (m.find (R"("failure_kind":null)"), std::string::npos) << m;
+  EXPECT_EQ (m.find (R"("review":)"), std::string::npos) << m;
+}
+
 TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
 {
   // Write a minimal worker script conforming to the Result File Wire Format

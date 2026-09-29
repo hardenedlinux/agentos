@@ -80,6 +80,11 @@ struct CollectResult
   int         exit_code = -1;
   std::string result_json;
   std::string error;
+  // ADR-016 amendment: result.json reported status "rejected". ok is false
+  // and result_json carries `result`; only the Orchestrator knows whether
+  // the Worker is a declared reviewer, so it decides whether this is a
+  // review verdict (ADR-031 §14) or a Worker Contract violation.
+  bool        rejected  = false;
 };
 
 // ---------------------------------------------------------------------------

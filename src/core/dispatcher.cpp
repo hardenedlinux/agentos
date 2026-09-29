@@ -325,6 +325,8 @@ namespace agentos
     //   violation) exit_code == 0, status == "error"  -> failed; `error`
     //   becomes feedback exit_code == 0, status == "ok"     -> done; `result`
     //   field is returned
+    //   exit_code == 0, status == "rejected" -> not ok, rejected = true,
+    //   `result` returned; the Orchestrator applies ADR-031 §14
     if (exit_code != 0)
     {
       const std::string err
@@ -380,6 +382,24 @@ namespace agentos
                     err);
       warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
+    }
+
+    if (status == "rejected")
+    {
+      rapidjson::StringBuffer rbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> rw (rbuf);
+      if (doc.HasMember ("result"))
+        doc["result"].Accept (rw);
+      else
+      {
+        rapidjson::Value empty (rapidjson::kObjectType);
+        empty.Accept (rw);
+      }
+      spdlog::info ("[dispatcher] collected run_id={} status=rejected", run_id);
+      CollectResult r{false, exit_code, rbuf.GetString (),
+                      "worker reported status=rejected"};
+      r.rejected = true;
+      return r;
     }
 
     if (status != "ok")

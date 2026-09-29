@@ -132,6 +132,25 @@ TEST_F (DispatcherTest, Collect_ResultJsonPresent_ReturnsContent)
   EXPECT_EQ (res.exit_code, 0);
 }
 
+// ADR-016 amendment: status "rejected" is surfaced, not collapsed into a
+// generic failure; the Orchestrator decides what it means.
+TEST_F (DispatcherTest, Collect_StatusRejected_CarriesResult)
+{
+  const std::string run_id  = "run-collect-rejected";
+  const std::string job_dir = (home_ / "layers" / "runs" / run_id).string ();
+  fs::create_directories (job_dir);
+  std::ofstream (job_dir + "/result.json")
+    << R"({"status":"rejected","result":{"review":{"verdict":"reject"}}})";
+
+  auto res = dispatcher_.collect (run_id, job_dir, 0);
+  EXPECT_FALSE (res.ok);
+  EXPECT_TRUE (res.rejected);
+  EXPECT_EQ (res.result_json, R"({"review":{"verdict":"reject"}})");
+
+  std::ofstream (job_dir + "/result.json") << R"({"status":"error","error":"x"})";
+  EXPECT_FALSE (dispatcher_.collect (run_id, job_dir, 0).rejected);
+}
+
 TEST_F (DispatcherTest, Collect_NonZeroExitCode_Propagated)
 {
   const std::string run_id  = "run-collect-fail";

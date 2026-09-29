@@ -28,6 +28,7 @@
 #include "agentos/home_init.h"
 #include "agentos/time_utils.h"
 #include "agentos/memory_curve.h"
+#include "agentos/review.h"
 #include "agentos/user_facts.h"
 #include "agentos/user_manager.h"
 #include "agentos/uuid.h"
@@ -1323,6 +1324,27 @@ namespace agentos
       w.Key ("adviser_id");
       w.String (job->adviser_id->c_str ());
     }
+    // ADR-031 §14.5 / ADR-039 §B: failure_kind is always present (null
+    // unless a declared reviewer rejected the job); review is present iff
+    // failure_kind == "review_rejected".
+    {
+      auto failure = db_.load_job_failure (job_id);
+      w.Key ("failure_kind");
+      if (failure && !failure->kind.empty ())
+        w.String (failure->kind.c_str ());
+      else
+        w.Null ();
+      if (failure && failure->kind == "review_rejected")
+      {
+        rapidjson::Document review;
+        if (!review.Parse (failure->review_json.c_str ()).HasParseError ()
+            && review.IsObject ())
+        {
+          w.Key ("review");
+          review.Accept (w);
+        }
+      }
+    }
     // ADR-012 (amended) + ADR-039 §B: always present, defaults to
     // "result" for jobs predating this field (matches DigestResult's own
     // default and ActiveJob::deliverable_kind's default).
@@ -2062,6 +2084,18 @@ namespace agentos
       return false;
     }
 
+    // ADR-031 §14.2: top-level "reviewer": true declares a reviewer Worker.
+    bool worker_is_reviewer = false;
+    if (manifest.HasMember ("reviewer"))
+    {
+      if (!manifest["reviewer"].IsBool ())
+      {
+        out_error = "manifest 'reviewer' must be a boolean";
+        return false;
+      }
+      worker_is_reviewer = manifest["reviewer"].GetBool ();
+    }
+
     for (auto &cap : manifest["capabilities"].GetArray ())
     {
       if (!cap.IsObject () || !cap.HasMember ("method")
@@ -2115,6 +2149,9 @@ namespace agentos
 
     db_.insert_agent (worker_id, "worker", installed_entrypoint.string (),
                       manifest_raw, /*description=*/"", "operator");
+    // ADR-031 §14.2: explicit reviewer declaration; recorded on every
+    // registration so that dropping the flag clears it.
+    db_.set_agent_reviewer (worker_id, worker_is_reviewer);
 
     for (auto &cap : manifest["capabilities"].GetArray ())
     {
@@ -2255,6 +2292,15 @@ namespace agentos
     }
     db_.insert_agent (adviser_id, "adviser", installed_skill_path, manifest_raw,
                       description, "operator");
+
+    // ADR-031 §14.2: [review] enabled = true declares a reviewer Adviser;
+    // recorded on every registration so that dropping it clears the flag.
+    {
+      bool is_reviewer = false;
+      if (auto review_node = manifest["review"]; review_node.is_table ())
+        is_reviewer = review_node["enabled"].value_or (false);
+      db_.set_agent_reviewer (adviser_id, is_reviewer);
+    }
 
     // ADR-038 — read [continuation] section and store supports flag
     {
@@ -4036,6 +4082,30 @@ namespace agentos
         if (doc.HasMember ("tokens_completion")
             && doc["tokens_completion"].IsInt ())
           step_tokens_completion = doc["tokens_completion"].GetInt ();
+      }
+
+      // ADR-031 §14.4: a declared reviewer Adviser reports its verdict in
+      // the reserved top-level "review" field of its output object.
+      if (job.pending_steps.front ().reviewer)
+      {
+        const ReviewCheck rc = check_review (result_json);
+        if (!rc.valid)
+        {
+          spdlog::warn ("[orchestrator] reviewer adviser {} (job {} step {}) "
+                        "invalid output: {}",
+                        job.pending_steps.front ().agent_id, job.job_id,
+                        job.pending_steps.front ().step.id, rc.error);
+          on_step_failed (ev.job_id, /*run_id=*/"", /*exit_code=*/-1);
+          return;
+        }
+        if (rc.rejected)
+        {
+          db_.update_step_tokens (job.job_id,
+                                  job.pending_steps.front ().step.id,
+                                  step_tokens_prompt, step_tokens_completion);
+          reject_step_by_review (job, result_json, rc.findings_json);
+          return;
+        }
       }
 
       // ADR-038 post‑completion: check for "updated_context" in the
@@ -5981,6 +6051,8 @@ namespace agentos
     WorkerRun run;
     run.run_id = run_id;
     run.worker_id = worker->id.value ();
+    step.agent_id = run.worker_id;
+    step.reviewer = db_.agent_is_reviewer (step.agent_id);
     run.pid = 0; // filled after fork
     run.started_at = static_cast<int64_t> (
       std::chrono::duration_cast<std::chrono::seconds> (
@@ -6079,6 +6151,8 @@ namespace agentos
     const std::string job_id = job.job_id;
     const std::string step_id = step.step.id;
     const std::string adviser_id = step.step.command;
+    step.agent_id = adviser_id;
+    step.reviewer = db_.agent_is_reviewer (adviser_id);
     const std::string step_description = step.step.description;
 
     // ADR-038: consume a mid‑pipeline continuation_id (section 4).
@@ -6293,6 +6367,41 @@ namespace agentos
 
     // Collect result.
     auto collected = dispatcher_.collect (run_id, run_dir, exit_code);
+
+    // ADR-016 amendment / ADR-031 §14.4: reviewer Worker outcomes.
+    const bool reviewer
+      = !job.pending_steps.empty () && job.pending_steps.front ().reviewer;
+    if (collected.rejected)
+    {
+      const ReviewCheck rc = check_review (collected.result_json);
+      if (reviewer && rc.valid && rc.rejected)
+      {
+        reject_step_by_review (job, collected.result_json, rc.findings_json);
+        return;
+      }
+      spdlog::warn ("[orchestrator] run_id={} reported status=rejected but "
+                    "{}; Worker Contract violation",
+                    run_id,
+                    !reviewer ? "the Worker is not a declared reviewer"
+                    : !rc.valid ? rc.error
+                                : "review.verdict is not \"reject\"");
+      on_step_failed (job_id, run_id, exit_code);
+      return;
+    }
+    if (collected.ok && reviewer)
+    {
+      const ReviewCheck rc = check_review (collected.result_json);
+      if (!rc.valid || rc.rejected)
+      {
+        spdlog::warn ("[orchestrator] run_id={} invalid reviewer output: {}",
+                      run_id,
+                      !rc.valid ? rc.error
+                                : "status \"ok\" requires verdict \"pass\"");
+        on_step_failed (job_id, run_id, exit_code);
+        return;
+      }
+    }
+
     if (!collected.ok)
     {
       spdlog::warn ("[orchestrator] collect failed for run_id={}: {}", run_id,
@@ -6372,6 +6481,32 @@ namespace agentos
                "step " + step.step.id + " (" + step.step.command
                  + ") failed after " + std::to_string (step.attempts)
                  + " attempt(s)");
+  }
+
+  void Orchestrator::reject_step_by_review (ActiveJob &job,
+                                            const std::string &result_json,
+                                            const std::string &findings_json)
+  {
+    if (job.pending_steps.empty ())
+      return;
+    const ActiveStep &step = job.pending_steps.front ();
+    const std::string job_id = job.job_id;
+    const std::string step_id = step.step.id;
+    const std::string reviewer_id = step.agent_id;
+    const std::string reason = "review rejected by " + reviewer_id;
+
+    // The reviewer ran correctly; its result (including the review) is
+    // kept for audit, but the step is failed, not done.
+    db_.update_step_result (job_id, step_id, result_json);
+    db_.update_step_status (job_id, step_id, db::step_status::failed, reason);
+    db_.set_job_review_rejected (
+      job_id, make_job_review_json (step_id, reviewer_id, findings_json));
+
+    spdlog::info ("[orchestrator] job {} step {}: {}", job_id, step_id,
+                  reason);
+    job.current_run_id.clear ();
+    // Not retried (ADR-031 §11/§14.4); no further steps are dispatched.
+    finish_job (job_id, false, reason);
   }
 
   void Orchestrator::finish_job (const std::string &job_id, bool success,

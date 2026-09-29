@@ -280,6 +280,156 @@ namespace agentos
       return uid;
     }
 
+    // ADR-030 "atomic installation": a package directory under
+    // agentos_home()/{workers,advisers}/<id> is never modified in place.
+    // The new content is copied in full to <parent>/.staging/<id>-<tag>
+    // and then swapped in with one rename, so a reader (a Worker being
+    // forked, an Adviser being spawned) sees either the complete old
+    // package or the complete new one, never a mix, and files the new
+    // version no longer ships do not linger. An existing package is
+    // exchanged atomically (renameat2 RENAME_EXCHANGE) and parked in
+    // <parent>/.old/, which is removed at the next daemon start, when no
+    // process can still be running from it (ADR-030 "GC after drain").
+    // Where the filesystem cannot exchange, it falls back to the two
+    // renames of ADR-030's update sequence and restores the old package
+    // if the second one fails.
+    bool install_package_dir (const fs::path &src_dir,
+                              const fs::path &dest_dir, std::string &out_error)
+    {
+      const fs::path parent = dest_dir.parent_path ();
+      const std::string name = dest_dir.filename ().string ();
+      if (name.empty () || name.front () == '.')
+      {
+        out_error = "invalid package id '" + name + "'";
+        return false;
+      }
+      const auto now_ms
+        = std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::system_clock::now ().time_since_epoch ())
+            .count ();
+      const std::string tag = std::to_string (now_ms) + "-" + gen_uuid ();
+      const fs::path staging = parent / ".staging" / (name + "-" + tag);
+      const fs::path old_dir = parent / ".old" / (name + "." + tag);
+
+      std::error_code ec;
+      fs::create_directories (staging.parent_path (), ec);
+      if (!ec)
+        fs::create_directories (old_dir.parent_path (), ec);
+      if (ec)
+      {
+        out_error = "cannot create staging area under " + parent.string ()
+                    + ": " + ec.message ();
+        return false;
+      }
+
+      fs::copy (src_dir, staging, fs::copy_options::recursive, ec);
+      if (ec)
+      {
+        out_error = "cannot copy " + src_dir.string () + " to "
+                    + staging.string () + ": " + ec.message ();
+        std::error_code rm_ec;
+        fs::remove_all (staging, rm_ec);
+        return false;
+      }
+
+      auto discard_staging = [&]
+      {
+        std::error_code rm_ec;
+        fs::remove_all (staging, rm_ec);
+      };
+
+      if (!fs::exists (dest_dir, ec))
+      {
+        if (::rename (staging.c_str (), dest_dir.c_str ()) != 0)
+        {
+          out_error = "cannot install " + dest_dir.string () + ": "
+                      + std::strerror (errno);
+          discard_staging ();
+          return false;
+        }
+        return true;
+      }
+
+      if (::renameat2 (AT_FDCWD, staging.c_str (), AT_FDCWD, dest_dir.c_str (),
+                       RENAME_EXCHANGE)
+          == 0)
+      {
+        // staging now holds the previous version; park it for GC. If
+        // even that fails it stays under .staging/, also GC'd at start.
+        if (::rename (staging.c_str (), old_dir.c_str ()) != 0)
+          spdlog::warn ("[orchestrator] cannot park old package {}: {}",
+                        staging.string (), std::strerror (errno));
+        return true;
+      }
+      if (errno != EINVAL && errno != ENOSYS && errno != EOPNOTSUPP)
+      {
+        out_error = "cannot replace " + dest_dir.string () + ": "
+                    + std::strerror (errno);
+        discard_staging ();
+        return false;
+      }
+
+      // Fallback (no RENAME_EXCHANGE): current -> .old, staging -> current.
+      if (::rename (dest_dir.c_str (), old_dir.c_str ()) != 0)
+      {
+        out_error = "cannot move aside " + dest_dir.string () + ": "
+                    + std::strerror (errno);
+        discard_staging ();
+        return false;
+      }
+      if (::rename (staging.c_str (), dest_dir.c_str ()) != 0)
+      {
+        out_error = "cannot install " + dest_dir.string () + ": "
+                    + std::strerror (errno);
+        if (::rename (old_dir.c_str (), dest_dir.c_str ()) != 0)
+          spdlog::error ("[orchestrator] cannot restore {} from {}: {}",
+                         dest_dir.string (), old_dir.string (),
+                         std::strerror (errno));
+        discard_staging ();
+        return false;
+      }
+      return true;
+    }
+
+    // Single-file variant: copy to a temporary sibling, then rename over
+    // the destination.
+    bool install_file_atomic (const fs::path &src, const fs::path &dest,
+                              std::error_code &ec)
+    {
+      const fs::path tmp
+        = dest.parent_path () / ("." + dest.filename ().string () + "."
+                                 + gen_uuid () + ".tmp");
+      fs::copy_file (src, tmp, fs::copy_options::overwrite_existing, ec);
+      if (!ec)
+        fs::rename (tmp, dest, ec);
+      if (ec)
+      {
+        std::error_code rm_ec;
+        fs::remove (tmp, rm_ec);
+        return false;
+      }
+      return true;
+    }
+
+    // Remove leftovers of install_package_dir from a previous daemon run.
+    void gc_package_staging (const fs::path &parent)
+    {
+      for (const char *sub : {".staging", ".old"})
+      {
+        std::error_code ec;
+        const fs::path dir = parent / sub;
+        if (!fs::exists (dir, ec))
+          continue;
+        const auto n = fs::remove_all (dir, ec);
+        if (ec)
+          spdlog::warn ("[orchestrator] cannot clean {}: {}", dir.string (),
+                        ec.message ());
+        else if (n > 1)
+          spdlog::info ("[orchestrator] removed {} ({} entries)",
+                        dir.string (), n - 1);
+      }
+    }
+
     // Role permission matrix (ADR-025).
     bool role_permitted (const std::string &role, const std::string &method)
     {
@@ -581,6 +731,12 @@ namespace agentos
     if (auto res = user_manager_.register_user ("0"); !res)
       spdlog::warn ("[orchestrator] failed to seed default user: {}",
                     res.error ());
+
+    // ADR-030: packages replaced during the previous run were parked for
+    // removal once nothing could still run from them; at startup nothing
+    // can.
+    gc_package_staging (agentos_home () / "workers");
+    gc_package_staging (agentos_home () / "advisers");
 
     // ADR-039 §H2a: once at startup, re-emit every job whose newest state
     // did not reach the outbox before the previous shutdown or crash.
@@ -1952,22 +2108,8 @@ namespace agentos
     }
 
     const fs::path dest_dir = agentos_home () / "workers" / worker_id;
-    std::error_code ec;
-    fs::create_directories (dest_dir, ec);
-    if (ec)
-    {
-      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+    if (!install_package_dir (src_dir, dest_dir, out_error))
       return false;
-    }
-    fs::copy (
-      src_dir, dest_dir,
-      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec)
-    {
-      out_error = "cannot copy " + src_dir.string () + " to "
-                  + dest_dir.string () + ": " + ec.message ();
-      return false;
-    }
 
     const fs::path installed_entrypoint = dest_dir / entrypoint.filename ();
 
@@ -2097,22 +2239,8 @@ namespace agentos
     }
 
     const fs::path dest_dir = agentos_home () / "advisers" / adviser_id;
-    std::error_code ec;
-    fs::create_directories (dest_dir, ec);
-    if (ec)
-    {
-      out_error = "cannot create " + dest_dir.string () + ": " + ec.message ();
+    if (!install_package_dir (src_dir, dest_dir, out_error))
       return false;
-    }
-    fs::copy (
-      src_dir, dest_dir,
-      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec)
-    {
-      out_error = "cannot copy " + src_dir.string () + " to "
-                  + dest_dir.string () + ": " + ec.message ();
-      return false;
-    }
 
     const std::string installed_skill_path = (dest_dir / "skill.md").string ();
     // agents.manifest stores the manifest.toml text verbatim (ADR-018's
@@ -2422,8 +2550,8 @@ namespace agentos
       std::error_code ec;
       fs::create_directories (knowledge_dir, ec);
       if (!ec)
-        fs::copy_file (suite_dir / pipeline_doc, knowledge_dir / "pipeline.md",
-                       fs::copy_options::overwrite_existing, ec);
+        install_file_atomic (suite_dir / pipeline_doc,
+                             knowledge_dir / "pipeline.md", ec);
       if (ec)
         spdlog::warn ("[orchestrator] suite {} install: could not copy "
                       "pipeline doc: {}",

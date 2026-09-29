@@ -468,6 +468,72 @@ TEST_F (OrchestratorTest, Outbox_WriteFailure_NoBroadcast_ThenReemitted)
 }
 
 // ---------------------------------------------------------------------------
+// ADR-030: re-registering a package replaces it whole, never in place
+// ---------------------------------------------------------------------------
+
+TEST_F (OrchestratorTest, WorkerRegister_ReplacesPackageAtomically)
+{
+  const std::string key = insert_key ("admin");
+  const fs::path src1 = home_ / "src-v1";
+  const fs::path src2 = home_ / "src-v2";
+  const std::string manifest
+    = R"({"id":"pkg-w","capabilities":[{"method":"pkg.run","description":"d"}]})";
+  for (const auto &d : {src1, src2})
+  {
+    fs::create_directories (d);
+    std::ofstream (d / "manifest.json") << manifest;
+  }
+  std::ofstream (src1 / "worker.py") << "v1";
+  std::ofstream (src1 / "stale.txt") << "only in v1";
+  std::ofstream (src2 / "worker.py") << "v2";
+
+  auto reg = [&] (const std::string &id, const fs::path &src)
+  {
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id
+                  + R"(","method":"worker.register","key":")" + key
+                  + R"(","params":{"path":")" + src.string () + R"("}})");
+  };
+  reg ("r1", src1);
+  ASSERT_TRUE (wait_gateway (1));
+  reg ("r2", src2);
+  ASSERT_TRUE (wait_gateway (2));
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    for (const auto &e : gateway_events_)
+      EXPECT_NE (e.outbound.message.find (R"("worker_id":"pkg-w")"),
+                 std::string::npos)
+        << e.outbound.message;
+  }
+
+  const fs::path workers = home_ / "workers";
+  EXPECT_EQ (slurp (workers / "pkg-w" / "worker.py"), "v2");
+  EXPECT_FALSE (fs::exists (workers / "pkg-w" / "stale.txt"))
+    << "files the new version does not ship must not linger";
+  EXPECT_TRUE (outbox_entries (workers / ".staging").empty ());
+  const auto parked = outbox_entries (workers / ".old");
+  ASSERT_EQ (parked.size (), 1u) << "previous version parked until restart";
+  EXPECT_EQ (slurp (parked[0] / "worker.py"), "v1");
+
+  // Registering the installed directory itself is also a whole replace.
+  reg ("r3", workers / "pkg-w");
+  ASSERT_TRUE (wait_gateway (3));
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    EXPECT_NE (gateway_events_.back ().outbound.message.find ("\"result\""),
+               std::string::npos)
+      << gateway_events_.back ().outbound.message;
+  }
+  EXPECT_EQ (slurp (workers / "pkg-w" / "worker.py"), "v2");
+
+  // Next daemon start: nothing can run from the parked copy any more.
+  orch_->stop ();
+  orch_->init ();
+  EXPECT_FALSE (fs::exists (workers / ".old"));
+  EXPECT_EQ (slurp (workers / "pkg-w" / "worker.py"), "v2");
+  orch_->start ();
+}
+
+// ---------------------------------------------------------------------------
 // job.submit: valid operator key → reply with job_id, forward to Master
 // ---------------------------------------------------------------------------
 

@@ -33,6 +33,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 #include "agentos/central.h" // for Config (avoids guessing config.h path)
 #include "agentos/cred_vault.h"
@@ -362,7 +363,7 @@ TEST_F (OrchestratorTest, JobSubmit_ValidKey_RepliesAndForwardsToMaster)
 
   send_inbound (R"({"jsonrpc":"2.0","id":"req-1","method":"job.submit",)"
                 R"("key":")"
-                + key + R"(","params":{"goal":"summarise a document"}})");
+                + key + R"(","params":{"goal":"summarise a document","user_id":"0"}})");
 
   ASSERT_TRUE (wait_gateway (1));
 
@@ -392,6 +393,126 @@ TEST_F (OrchestratorTest, JobSubmit_ValidKey_RepliesAndForwardsToMaster)
     EXPECT_NE (master_events_[0].payload_json.find ("summarise a document"),
                std::string::npos);
     EXPECT_FALSE (master_events_[0].job_id.empty ());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-033 Step 0S / ADR-039 §D2: strict_ability_name
+// ---------------------------------------------------------------------------
+
+namespace
+{
+  int count_jobs (Database &db)
+  {
+    sqlite3_stmt *st = nullptr;
+    sqlite3_prepare_v2 (db.db_handle (), "SELECT COUNT(*) FROM jobs", -1, &st,
+                        nullptr);
+    int n = -1;
+    if (sqlite3_step (st) == SQLITE_ROW)
+      n = sqlite3_column_int (st, 0);
+    sqlite3_finalize (st);
+    return n;
+  }
+}
+
+TEST_F (OrchestratorTest, StrictAbility_Submit)
+{
+  const std::string key = insert_key ("operator");
+  db_->insert_agent ("ability-ok", "adviser", (home_ / "advisers/ability-ok").string (),
+                     "", "an ability");
+  db_->insert_agent ("ability-revoked", "adviser",
+                     (home_ / "advisers/ability-revoked").string (), "",
+                     "a revoked ability");
+  registry_->init (*db_);
+  // Revoked after the Registry snapshot was taken: the table is
+  // authoritative for strict submissions.
+  db_->set_worker_enabled ("ability-revoked", false);
+  orch_->stop ();
+  orch_->init ();
+  orch_->start ();
+
+  const int jobs_before = count_jobs (*db_);
+  auto submit = [&] (const std::string &id, const std::string &extra)
+  {
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id
+                  + R"(","method":"job.submit","key":")" + key
+                  + R"(","params":{"goal":"g","user_id":"0")" + extra + "}}");
+  };
+  submit ("missing", R"(,"strict_ability_name":"no-such-ability")");
+  submit ("revoked", R"(,"strict_ability_name":"ability-revoked")");
+  submit ("both", R"(,"strict_ability_name":"ability-ok","adviser_id":"ability-ok")");
+  submit ("ok", R"(,"strict_ability_name":"ability-ok")");
+
+  ASSERT_TRUE (wait_gateway (4));
+  ASSERT_TRUE (wait_master (1));
+  std::lock_guard<std::mutex> lk (mtx_);
+  auto reply = [&] (const std::string &id) -> std::string
+  {
+    for (const auto &e : gateway_events_)
+      if (e.outbound.message.find (R"("id":")" + id + "\"") != std::string::npos)
+        return e.outbound.message;
+    return "";
+  };
+  EXPECT_NE (reply ("missing").find ("-32041"), std::string::npos) << reply ("missing");
+  EXPECT_NE (reply ("missing").find (R"("ability_name":"no-such-ability")"),
+             std::string::npos) << reply ("missing");
+  EXPECT_NE (reply ("revoked").find ("-32041"), std::string::npos) << reply ("revoked");
+  EXPECT_NE (reply ("both").find ("-32602"), std::string::npos) << reply ("both");
+  EXPECT_NE (reply ("ok").find ("\"job_id\""), std::string::npos) << reply ("ok");
+
+  // Only the accepted submission created a job, and it is marked strict.
+  EXPECT_EQ (count_jobs (*db_), jobs_before + 1);
+  ASSERT_EQ (master_events_.size (), 1u) << "rejected submissions must not reach Master";
+  EXPECT_TRUE (db_->job_is_strict_ability (master_events_[0].job_id));
+  EXPECT_NE (master_events_[0].payload_json.find (R"("known_adviser_id":"ability-ok")"),
+             std::string::npos);
+  EXPECT_NE (master_events_[0].payload_json.find (R"("strict_ability":true)"),
+             std::string::npos);
+}
+
+// ADR-031 §5: a strict-ability job whose Plan names an unregistered Worker
+// fails; it never reaches WorkerExhausted / Forge, whatever needs_forge says.
+TEST_F (OrchestratorTest, StrictAbility_RegistryMiss_FailsWithoutForge)
+{
+  for (const bool needs_forge : {false, true})
+  {
+    const std::string job_id
+      = std::string ("job-strict-") + (needs_forge ? "nf" : "plain");
+    Task task;
+    task.id = TaskId (job_id);
+    task.goal = "g";
+    db_->store_job (task);
+    db_->set_job_strict_ability (job_id);
+
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      master_events_.clear ();
+    }
+    OrchestratorEvent ev;
+    ev.kind = OrchestratorEvent::Kind::MasterDecision;
+    ev.job_id = job_id;
+    ev.payload_json
+      = R"({"type":"plan_ready","job_id":")" + job_id
+        + R"(","job_type":"oneshot","steps":[{"id":"step-0","target_type":"worker",)"
+          R"("command":"nonexistent.command","description":"d","needs_forge":)"
+        + std::string (needs_forge ? "true" : "false") + "}]}";
+    orch_->enqueue (std::move (ev));
+
+    bool failed = false;
+    for (int i = 0; i < 40 && !failed; ++i)
+    {
+      std::this_thread::sleep_for (std::chrono::milliseconds (25));
+      auto j = db_->load_job (job_id);
+      failed = j && j->phase == "failed";
+    }
+    EXPECT_TRUE (failed) << job_id;
+    auto j = db_->load_job (job_id);
+    ASSERT_TRUE (j && j->error);
+    EXPECT_NE (j->error->find ("nonexistent.command"), std::string::npos);
+    std::lock_guard<std::mutex> lk (mtx_);
+    for (const auto &me : master_events_)
+      EXPECT_NE (me.kind, MasterEvent::Kind::WorkerExhausted)
+        << "strict job must not reach WorkerExhausted/Forge";
   }
 }
 

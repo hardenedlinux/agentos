@@ -408,6 +408,11 @@ namespace agentos
       // DigestResult's own default — this keeps existing rows and any
       // reader that doesn't SELECT this column behaviorally unchanged.
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN deliverable_kind TEXT");
+      // ADR-033 Step 0S / ADR-039 §D2: the job was submitted with
+      // strict_ability_name — run exactly that ability or fail; never
+      // re-plan, never Forge (ADR-031 §5, §12).
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN strict_ability INTEGER NOT NULL DEFAULT 0");
     }
 
     // ADR-040: forge_pipeline_jobs.user_id — who triggered the Forge run.
@@ -1830,6 +1835,43 @@ namespace agentos
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] set_job_adviser_id: {}",
                      sqlite3_errmsg (db_));
+  }
+
+  void Database::set_job_strict_ability (const std::string &job_id)
+  {
+    if (!db_)
+      return;
+    Stmt stmt (prepare ("UPDATE jobs SET strict_ability = 1 WHERE id = ?"));
+    if (!stmt.s)
+      return;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      spdlog::error ("[database] set_job_strict_ability: {}",
+                     sqlite3_errmsg (db_));
+  }
+
+  bool Database::job_is_strict_ability (const std::string &job_id)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("SELECT strict_ability FROM jobs WHERE id = ?"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_ROW
+           && sqlite3_column_int (stmt, 0) != 0;
+  }
+
+  bool Database::agent_is_enabled_adviser (const std::string &id)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("SELECT 1 FROM agents WHERE id = ? AND role = "
+                        "'adviser' AND enabled = 1"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_ROW;
   }
 
   void Database::set_job_deliverable_kind (const std::string &job_id,

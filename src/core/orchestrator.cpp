@@ -221,7 +221,8 @@ namespace agentos
     }
 
     std::string make_error_response (const std::string &id, int code,
-                                     const std::string &message)
+                                     const std::string &message,
+                                     const std::string &data_json = {})
     {
       rapidjson::StringBuffer buf;
       rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -236,6 +237,11 @@ namespace agentos
       w.Int (code);
       w.Key ("message");
       w.String (message.c_str ());
+      if (!data_json.empty ())
+      {
+        w.Key ("data");
+        w.RawValue (data_json.c_str (), data_json.size (), rapidjson::kObjectType);
+      }
       w.EndObject ();
       w.EndObject ();
       return buf.GetString ();
@@ -442,6 +448,11 @@ namespace agentos
           job.type = j->type;
         job.goal = j->goal;
         job.user_id = j->user_id; // ADR-040/038: survive daemon restart
+        // ADR-039 §D2: the strict flag survives restart as well.
+        job.strict_ability = db_.job_is_strict_ability (job.job_id);
+        if (j->deliverable_kind)
+          job.deliverable_kind
+            = job.strict_ability ? "result" : *j->deliverable_kind;
         if (j->loop)
         {
           job.current_iteration = j->loop->current_iteration;
@@ -852,6 +863,69 @@ namespace agentos
     if (params.HasMember ("continuation_id") && params["continuation_id"].IsString ())
       continuation_id = params["continuation_id"].GetString ();
 
+    // ADR-033 Step 0S / ADR-039 §D2: strict_ability_name pins the job to
+    // exactly one already-registered ability. Validated here, before any
+    // side effect (no job row, no asset copy, no LLM call), so a refused
+    // submission costs the caller nothing and can be undone in the same
+    // round-trip. Independent of adviser_id, whose hint semantics
+    // (silent fallthrough) are unchanged.
+    std::string strict_ability_name;
+    if (params.HasMember ("strict_ability_name"))
+    {
+      if (!params["strict_ability_name"].IsString ()
+          || std::string (params["strict_ability_name"].GetString ()).empty ())
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: 'strict_ability_name' must be a "
+                     "non-empty string");
+        return;
+      }
+      strict_ability_name = params["strict_ability_name"].GetString ();
+      if (params.HasMember ("adviser_id") && params["adviser_id"].IsString ()
+          && std::string (params["adviser_id"].GetString ()).size () > 0)
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: 'strict_ability_name' and 'adviser_id' "
+                     "are mutually exclusive");
+        return;
+      }
+
+      auto ability_unavailable = [&] ()
+      {
+        rapidjson::StringBuffer dbuf;
+        rapidjson::Writer<rapidjson::StringBuffer> dw (dbuf);
+        dw.StartObject ();
+        dw.Key ("ability_name");
+        dw.String (strict_ability_name.c_str ());
+        dw.EndObject ();
+        spdlog::info ("[orchestrator] job.submit rejected: ability '{}' is "
+                      "unavailable (user {})",
+                      strict_ability_name, user_id);
+        reply_error (identity, request_id, -32041,
+                     "Capability unavailable: ability '" + strict_ability_name
+                       + "' is not available",
+                     dbuf.GetString ());
+      };
+
+      if (!registry_.find_adviser_by_id (strict_ability_name)
+          || !db_.agent_is_enabled_adviser (strict_ability_name))
+      {
+        ability_unavailable ();
+        return;
+      }
+      if (!continuation_id.empty ())
+      {
+        // A continuation of a strict job must stay with the same, still
+        // enabled ability; a revoked owner is refused, never rerouted.
+        auto owner = db_.peek_continuation_owner (continuation_id, user_id);
+        if (!owner || *owner != strict_ability_name)
+        {
+          ability_unavailable ();
+          return;
+        }
+      }
+    }
+
     if (!continuation_id.empty ())
       pending_continuation_ids_[job_id] = continuation_id;
 
@@ -953,6 +1027,8 @@ namespace agentos
     db_.store_job (task);
     db_.update_job_phase (TaskId (job_id), "planning");
     db_.update_job_type (job_id, type);
+    if (!strict_ability_name.empty ())
+      db_.set_job_strict_ability (job_id);
 
     spdlog::info ("[orchestrator] job.submit job_id={} user_id={} assets={} "
                  "goal='{}'",
@@ -990,7 +1066,9 @@ namespace agentos
     // short-circuit Master already validates (registry_.find_adviser_by_id)
     // for the continuation-peek case below — Master doesn't need to know
     // or care which source resolved it.
-    if (params.HasMember ("adviser_id") && params["adviser_id"].IsString ())
+    if (!strict_ability_name.empty ())
+      known_adviser_id = strict_ability_name;
+    else if (params.HasMember ("adviser_id") && params["adviser_id"].IsString ())
       known_adviser_id = params["adviser_id"].GetString ();
 
     if (known_adviser_id.empty () && !continuation_id.empty ())
@@ -1024,6 +1102,11 @@ namespace agentos
       {
         w.Key ("known_adviser_id");
         w.String (known_adviser_id.c_str ());
+      }
+      if (!strict_ability_name.empty ())
+      {
+        w.Key ("strict_ability");
+        w.Bool (true);
       }
       w.EndObject ();
       me.payload_json = buf.GetString ();
@@ -4036,7 +4119,10 @@ namespace agentos
       spdlog::info ("[orchestrator] spawning adviser {} for job {}", adviser_id,
                     job_id);
       db_.set_job_adviser_id (job_id, adviser_id);
-      db_.set_job_deliverable_kind (job_id, deliverable_kind);
+      // ADR-031 §12: a strict-ability job is always "result", whatever the
+      // Digest Pass inferred from the goal text.
+      db_.set_job_deliverable_kind (
+        job_id, db_.job_is_strict_ability (job_id) ? "result" : deliverable_kind);
 
       // Read skill.md as system prompt (ADR-018).
       auto home = agentos_home ();
@@ -4749,6 +4835,9 @@ namespace agentos
         // NULL column (job predates this field) is a no-op here.
         if (j->deliverable_kind)
           job.deliverable_kind = *j->deliverable_kind;
+        job.strict_ability = db_.job_is_strict_ability (job_id);
+        if (job.strict_ability)
+          job.deliverable_kind = "result";
       }
       else
       {
@@ -5141,7 +5230,8 @@ namespace agentos
           // Skip the normal "promote then execute" continuation — same
           // helper dispatch_next_step's already-registered-worker branch
           // uses, so both code paths behave identically.
-          if (job.deliverable_kind == "artifact" && !job.pending_steps.empty ()
+          if (job.deliverable_kind == "artifact" && !job.strict_ability
+              && !job.pending_steps.empty ()
               && complete_step_as_generated_code (job, worker_id))
           {
             // handled inside complete_step_as_generated_code, which
@@ -5492,6 +5582,24 @@ namespace agentos
     //   needs_forge=false + Registry miss  → anomaly; log WARNING then fall
     //                                        through to WorkerExhausted so
     //                                        Master can decide.
+    if (!worker && job.strict_ability)
+    {
+      // ADR-031 §5 (strict-ability jobs): a sold ability must run exactly
+      // as designed. A missing Worker is an ability defect -- fail the job
+      // with the missing command named; never WorkerExhausted, decide_forge,
+      // Forge or Adviser re-selection. Terminal, not retried (§11).
+      spdlog::error ("[orchestrator] strict-ability job {}: no registered "
+                     "worker for '{}' (step {}); failing job",
+                     job.job_id, step.step.command, step.step.id);
+      const std::string job_id = job.job_id;
+      const std::string command = step.step.command;
+      db_.update_step_status (job_id, step.step.id, db::step_status::failed,
+                              "no registered worker for '" + command + "'");
+      finish_job (job_id, false,
+                  "ability defect: no registered worker for '" + command + "'");
+      return;
+    }
+
     if (!worker)
     {
       if (step.step.needs_forge)
@@ -5539,7 +5647,7 @@ namespace agentos
     // complete_step_as_generated_code helper) or is an already-registered
     // Worker reused from a prior job — deliverable_kind's effect must not
     // depend on which of the two brought this Worker into existence.
-    if (job.deliverable_kind == "artifact")
+    if (job.deliverable_kind == "artifact" && !job.strict_ability)
     {
       if (complete_step_as_generated_code (job, worker->id.value ()))
         return;
@@ -5801,6 +5909,12 @@ namespace agentos
     ActiveStep &step = job.pending_steps.front ();
 
     auto adviser = registry_.find_adviser_by_id (step.step.command);
+    // ADR-031 §5 (strict-ability jobs): the Registry is a startup snapshot;
+    // a strict job also requires the Adviser to still be enabled in the
+    // agents table, so a revoked Adviser fails the job rather than running.
+    if (adviser && job.strict_ability
+        && !db_.agent_is_enabled_adviser (step.step.command))
+      adviser.reset ();
     if (!adviser)
     {
       // No Forge fallback exists for Advisers (Forge only ever generates
@@ -5813,9 +5927,12 @@ namespace agentos
                     "Plan-authoring Adviser violated the Available-advisers "
                     "constraint (ADR-031 §9)",
                     step.step.id, step.step.command, job.job_id);
-      finish_job (job.job_id, false,
-                 "step " + step.step.id + " targets unknown adviser '"
-                   + step.step.command + "'");
+      // Copy before finish_job() erases the ActiveJob that owns them.
+      const std::string job_id = job.job_id;
+      const std::string error = "step " + step.step.id
+                                + " targets unknown adviser '"
+                                + step.step.command + "'";
+      finish_job (job_id, false, error);
       return;
     }
 
@@ -6154,12 +6271,14 @@ namespace agentos
 
   void Orchestrator::reply_error (const std::string &identity,
                                   const std::string &request_id, int code,
-                                  const std::string &message)
+                                  const std::string &message,
+                                  const std::string &data_json)
   {
     GatewayEvent ev;
     ev.kind = GatewayEvent::Kind::Outbound;
     ev.outbound.identity = identity;
-    ev.outbound.message = make_error_response (request_id, code, message);
+    ev.outbound.message
+      = make_error_response (request_id, code, message, data_json);
     send_to_gateway_ (std::move (ev));
   }
 

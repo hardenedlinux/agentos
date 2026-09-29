@@ -71,6 +71,10 @@ namespace agentos
     // "result" so a job predating this field (or any load_job() miss)
     // behaves exactly as before this change.
     std::string deliverable_kind = "result";
+    // ADR-033 Step 0S / ADR-039 §D2: submitted with strict_ability_name.
+    // A Registry miss fails the job instead of reaching Forge (ADR-031 §5)
+    // and deliverable_kind is always "result" (ADR-031 §12).
+    bool strict_ability = false;
   };
 
   // ---------------------------------------------------------------------------
@@ -426,9 +430,12 @@ namespace agentos
     void reply_ok (const std::string &identity, const std::string &request_id,
                    const std::string &result_json);
 
+    // data_json, if non-empty, must be a serialized JSON value; it is
+    // attached as the JSON-RPC error's "data" member.
     void reply_error (const std::string &identity,
                       const std::string &request_id, int code,
-                      const std::string &message);
+                      const std::string &message,
+                      const std::string &data_json = {});
 
     // Broadcast a notification to all connected clients (no identity).
     // params_json: broadcast to all connected clients over ZMQ, kept

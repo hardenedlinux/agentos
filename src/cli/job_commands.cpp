@@ -98,6 +98,7 @@ void register_job_commands (CLI::App &app)
     auto user_id = std::make_shared<std::string> ("0");
     auto asset_paths = std::make_shared<std::vector<std::string>> ();
     auto asset_ids = std::make_shared<std::vector<std::string>> ();
+    auto strict_ability = std::make_shared<std::string> ();
 
     submit->add_option ("--goal", *goal)->required ();
     submit->add_option ("--input", *input_str);
@@ -108,6 +109,10 @@ void register_job_commands (CLI::App &app)
     submit->add_option ("--reviewer", *reviewer_id);
     submit->add_option ("--acceptance-criteria", *acceptance_criteria);
     submit->add_option ("--user", *user_id)->default_val ("0");
+    submit->add_option ("--strict-ability", *strict_ability)
+      ->description ("Run exactly this ability (entry Adviser id) or fail: "
+                    "rejected with -32041 if it is not registered and "
+                    "enabled; never re-planned, never Forge (ADR-039 §D2).");
     submit->add_option ("--asset", *asset_paths)
       ->description ("Local file path to register and attach. --goal must "
                     "reference it by basename as \"[file: <name>]\" — "
@@ -128,7 +133,7 @@ void register_job_commands (CLI::App &app)
     submit->callback (
       [timeout_ms, socket_path, json_flag, access_key, goal, input_str, type, interval_s,
        starts_at, max_iterations, reviewer_id, acceptance_criteria, user_id,
-       asset_paths, asset_ids]
+       asset_paths, asset_ids, strict_ability]
       {
         try
         {
@@ -282,6 +287,9 @@ void register_job_commands (CLI::App &app)
             auto &alloc = params.GetAllocator ();
             params.AddMember ("user_id", Value (user_id->c_str (), alloc),
                               alloc);
+            if (!strict_ability->empty ())
+              params.AddMember ("strict_ability_name",
+                                Value (strict_ability->c_str (), alloc), alloc);
           }
           auto result = client.send ("job.submit", std::move (params));
           if (*json_flag)

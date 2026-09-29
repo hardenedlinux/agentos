@@ -114,6 +114,7 @@ namespace agentos
     rapidjson::Document doc;
     std::string goal;
     std::string known_adviser_id;
+    bool strict_ability = false;
     if (!doc.Parse (msg.payload_json.c_str ()).HasParseError ())
     {
       if (doc.HasMember ("goal") && doc["goal"].IsString ())
@@ -121,6 +122,36 @@ namespace agentos
       if (doc.HasMember ("known_adviser_id")
           && doc["known_adviser_id"].IsString ())
         known_adviser_id = doc["known_adviser_id"].GetString ();
+      if (doc.HasMember ("strict_ability") && doc["strict_ability"].IsBool ())
+        strict_ability = doc["strict_ability"].GetBool ();
+    }
+
+    // ADR-033 Step 0S: Orchestrator validated the ability synchronously at
+    // job.submit. If it disappeared since (revoked in between), a strict job
+    // fails -- it never falls through to domain selection (Steps 1-3).
+    if (strict_ability
+        && (known_adviser_id.empty ()
+            || !registry_.find_adviser_by_id (known_adviser_id)))
+    {
+      spdlog::error ("[master] strict-ability job {}: ability '{}' is no "
+                     "longer registered; failing job",
+                     job_id, known_adviser_id);
+      rapidjson::StringBuffer fbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> fw (fbuf);
+      fw.StartObject ();
+      fw.Key ("type");
+      fw.String ("job_failed");
+      fw.Key ("job_id");
+      fw.String (job_id.c_str ());
+      fw.Key ("reason");
+      fw.String (("ability unavailable: " + known_adviser_id).c_str ());
+      fw.EndObject ();
+      OrchestratorEvent ev;
+      ev.kind = OrchestratorEvent::Kind::MasterDecision;
+      ev.job_id = job_id;
+      ev.payload_json = fbuf.GetString ();
+      send_to_orchestrator_ (std::move (ev));
+      return;
     }
 
     if (goal.empty ())
@@ -149,10 +180,13 @@ namespace agentos
     // unit — there is exactly one thread, one LLM round-trip, regardless
     // of which branch is taken internally.
     std::thread (
-      [this, job_id, user_id, goal, known_adviser_id] ()
+      [this, job_id, user_id, goal, known_adviser_id, strict_ability] ()
       {
         SelectionResult sel
           = select_adviser (job_id, user_id, goal, known_adviser_id);
+        // ADR-031 §12: a strict-ability job is always "result".
+        if (strict_ability)
+          sel.digest.deliverable_kind = "result";
 
         // Build internal result payload.
         rapidjson::StringBuffer buf;

@@ -183,6 +183,13 @@ namespace agentos
     // "artifact" | "result" — consumed by Orchestrator's post-Forge-
     // promotion dispatch decision (ADR-031 §12). Set once, at the same
     // spawn_adviser point set_job_adviser_id already fires from.
+    // ADR-033 Step 0S / ADR-039 §D2: strict-ability job flag (persisted so
+    // it survives daemon restart).
+    void set_job_strict_ability (const std::string &job_id);
+    bool job_is_strict_ability (const std::string &job_id);
+    // True iff an agents row with this id exists, is an Adviser and is
+    // enabled. Authoritative (reads the table, not the Registry snapshot).
+    bool agent_is_enabled_adviser (const std::string &id);
     void set_job_deliverable_kind (const std::string &job_id,
                                    const std::string &deliverable_kind);
     std::optional<Job> load_job (const std::string &id);

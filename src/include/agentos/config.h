@@ -85,6 +85,11 @@ struct Config {
     // weak but practical guarantee, not an enforced one.
     struct TrustedWorkers {
         std::vector<std::string> network_exempt;
+        // ADR-015 amendment (GPU device grant): Workers allowed to receive
+        // the fixed GPU grant set when their manifest declares
+        // requires.gpu = true. Same rules as network_exempt: operator-only,
+        // read once at startup, empty = fail closed.
+        std::vector<std::string> gpu;
     } trusted_workers;
 
     // ADR-028: Credential vault configuration

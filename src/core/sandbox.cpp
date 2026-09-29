@@ -17,7 +17,10 @@
 #include "agentos/sandbox.h"
 #include "agentos/database.h"
 #include "agentos/home_init.h"
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -131,6 +134,7 @@ namespace agentos
   static bool
   apply_landlock (const std::vector<std::string> &allowed_read_paths,
                   const std::vector<std::string> &allowed_write_paths,
+                  const std::vector<std::string> &allowed_device_paths,
                   const std::vector<int> &allowed_tcp_ports)
   {
     // Create ruleset
@@ -259,6 +263,41 @@ namespace agentos
         spdlog::warn ("[sandbox] landlock_add_rule for {} failed: {}", path,
                       strerror (errno));
       }
+      close (path_attr.parent_fd);
+    }
+
+    // Add allowed character devices (read + write). Only the ADR-015 GPU
+    // grant populates this list; fs_read/fs_write deliberately keep
+    // rejecting device nodes, so a manifest cannot name /dev paths itself.
+    // ioctl on these fds is not mediated: this ruleset does not handle
+    // LANDLOCK_ACCESS_FS_IOCTL_DEV (ABI v5). If it ever does, that right
+    // must be added here too or every CUDA call fails.
+    for (const auto &path : allowed_device_paths)
+    {
+      struct landlock_path_beneath_attr path_attr = {};
+      path_attr.parent_fd = open (path.c_str (), O_PATH | O_CLOEXEC);
+      if (path_attr.parent_fd < 0)
+      {
+        spdlog::warn ("[sandbox] open {} for landlock failed: {}", path,
+                      strerror (errno));
+        continue;
+      }
+      struct stat st {};
+      if (fstat (path_attr.parent_fd, &st) < 0 || !S_ISCHR (st.st_mode))
+      {
+        spdlog::warn ("[sandbox] device grant {} is not a character device; "
+                      "skipped",
+                      path);
+        close (path_attr.parent_fd);
+        continue;
+      }
+      path_attr.allowed_access
+        = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE;
+      if (syscall (SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_PATH_BENEATH,
+                   &path_attr, 0)
+          != 0)
+        spdlog::warn ("[sandbox] landlock_add_rule for {} failed: {}", path,
+                      strerror (errno));
       close (path_attr.parent_fd);
     }
 
@@ -668,13 +707,70 @@ namespace agentos
     return true;
   }
 
+  // ADR-015 amendment (GPU device grant): the fixed set of host paths a
+  // CUDA process needs, derived from the host at dispatch time rather
+  // than declared by any manifest. Established by tracing a CUDA
+  // (ggml/cudart 12) run on Ubuntu 24.04 with the NVIDIA proprietary
+  // driver; anything not listed here is either a probe that tolerates
+  // ENOENT/EACCES (application profiles, /dev/char symlinks) or is
+  // deliberately withheld (~/.nv/ComputeCache: binaries must ship SASS for
+  // the target GPU instead of relying on PTX JIT).
+  static void collect_gpu_grant (std::vector<std::string> &read_paths,
+                                 std::vector<std::string> &device_paths)
+  {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // Device nodes, read+write: control, UVM, and one per GPU.
+    for (const char *p : {"/dev/nvidiactl", "/dev/nvidia-uvm"})
+      if (fs::exists (p, ec))
+        device_paths.emplace_back (p);
+    for (const auto &e : fs::directory_iterator ("/dev", ec))
+    {
+      const std::string name = e.path ().filename ().string ();
+      if (name.size () > 6 && name.compare (0, 6, "nvidia") == 0
+          && std::all_of (name.begin () + 6, name.end (),
+                          [] (unsigned char c) { return std::isdigit (c); }))
+        device_paths.push_back (e.path ().string ());
+    }
+    if (device_paths.empty ())
+    {
+      spdlog::warn ("[sandbox] GPU grant requested but no /dev/nvidia* "
+                    "nodes exist on this host; worker will run without "
+                    "GPU");
+      return;
+    }
+
+    // Read-only: driver state, CPU/NUMA topology, the worker's own /proc
+    // entry (covers /proc/self/{maps,status,cmdline}; this child's pid is
+    // the worker's pid after execve), and each GPU's PCI device directory.
+    for (const char *p :
+         {"/proc/driver/nvidia", "/proc/devices", "/proc/cpuinfo",
+          "/proc/sys/vm/mmap_min_addr", "/sys/devices/system"})
+      if (fs::exists (p, ec))
+        read_paths.emplace_back (p);
+    read_paths.push_back ("/proc/" + std::to_string (getpid ()));
+    for (const auto &e :
+         fs::directory_iterator ("/proc/driver/nvidia/gpus", ec))
+    {
+      // Entry names are PCI addresses (e.g. 0000:01:00.0). Landlock
+      // checks the resolved path, so grant the canonical device dir that
+      // /sys/bus/pci/devices/<addr> links to.
+      const auto dev = fs::canonical (
+        fs::path ("/sys/bus/pci/devices") / e.path ().filename (), ec);
+      if (!ec)
+        read_paths.push_back (dev.string ());
+    }
+  }
+
   bool apply_worker_sandbox (const std::string &job_dir,
                              const std::string &run_dir,
                              const std::string &worker_id,
                              const std::vector<std::string> &fs_read,
                              const std::vector<std::string> &fs_write,
                              const std::vector<int> &tcp_connect_ports,
-                             bool network, const std::string &run_id)
+                             bool network, bool gpu,
+                             const std::string &run_id)
   {
     spdlog::info ("[sandbox] applying worker sandbox job_dir={} run_dir={}", job_dir, run_dir);
 
@@ -813,7 +909,28 @@ namespace agentos
     // Forge-generated (Tier-1) worker binaries live here.
     read_paths.push_back ((agentos_home () / "workers").string ());
 
-    if (!apply_landlock (read_paths, write_paths, tcp_connect_ports))
+    // ADR-015 amendment (GPU device grant). Only the --unsafe tier is
+    // supported: the privileged tier pivot_roots into an overlay that has
+    // no /dev/nvidia* nodes, so granting paths there would be meaningless.
+    // Refuse loudly instead of silently running on CPU.
+    std::vector<std::string> device_paths;
+    if (gpu)
+    {
+      if (privileged)
+      {
+        spdlog::error ("[sandbox] GPU grant is not supported in privileged "
+                       "mode yet (no device nodes inside the worker root)");
+        return false;
+      }
+      collect_gpu_grant (read_paths, device_paths);
+      std::string devs;
+      for (const auto &d : device_paths)
+        devs += d + "; ";
+      spdlog::info ("[sandbox] GPU grant: devices=[{}]", devs);
+    }
+
+    if (!apply_landlock (read_paths, write_paths, device_paths,
+                         tcp_connect_ports))
     {
       spdlog::error ("[sandbox] Landlock setup failed");
       return false;

@@ -417,7 +417,7 @@ namespace agentos
   {
     return apply_worker_sandbox (
       job_dir, run_dir_path, req.worker_id, req.fs_read, req.fs_write,
-      req.tcp_connect_ports, req.network, req.run_id);
+      req.tcp_connect_ports, req.network, req.gpu, req.run_id);
   }
 
 } // namespace agentos

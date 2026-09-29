@@ -96,6 +96,13 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
                     }
                 }
             }
+            if (auto* arr = tw_tbl->at_path("gpu").as_array()) {
+                for (const auto& elem : *arr) {
+                    if (auto v = elem.as_string()) {
+                        cfg.trusted_workers.gpu.push_back(v->get());
+                    }
+                }
+            }
         }
 
         // [database]

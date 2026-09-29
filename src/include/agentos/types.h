@@ -192,6 +192,10 @@ namespace agentos
     std::vector<std::string> fs_read;
     std::vector<std::string> fs_write;
     bool network = false;
+    // ADR-015 amendment (GPU device grant): manifest requires.gpu. Like
+    // `network`, necessary but not sufficient -- the Worker must also be
+    // named in config.toml [trusted_workers].gpu.
+    bool gpu = false;
   };
 
   // Sandbox tiers (ADR-006)

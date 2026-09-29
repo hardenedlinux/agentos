@@ -97,6 +97,7 @@ bool apply_worker_sandbox(const std::string& job_dir,
                           const std::vector<std::string>& fs_write,
                           const std::vector<int>& tcp_connect_ports,
                           bool network,
+                          bool gpu,
                           const std::string& run_id);
 
 } // namespace agentos

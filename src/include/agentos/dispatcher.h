@@ -55,6 +55,7 @@ struct DispatchRequest
   std::vector<std::string> fs_write;
   std::vector<int>         tcp_connect_ports;
   bool                     network = false;
+  bool                     gpu     = false; // ADR-015 amendment: GPU grant
 };
 
 // ---------------------------------------------------------------------------

@@ -199,6 +199,8 @@ namespace agentos
             out_worker.fs_write.push_back (p.GetString ());
       if (req.HasMember ("network") && req["network"].IsBool ())
         out_worker.network = req["network"].GetBool ();
+      if (req.HasMember ("gpu") && req["gpu"].IsBool ())
+        out_worker.gpu = req["gpu"].GetBool ();
     }
 
     if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())

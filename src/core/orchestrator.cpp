@@ -5525,6 +5525,21 @@ namespace agentos
                    "not in [trusted_workers].network_exempt — dispatching "
                    "with network disabled for run {}",
                    worker->name, run_id);
+
+    // ADR-015 amendment (GPU device grant): same AND-gate as network --
+    // manifest requires.gpu AND operator [trusted_workers].gpu.
+    {
+      const auto &gpu_list = config_.trusted_workers.gpu;
+      const bool gpu_trusted
+        = std::find (gpu_list.begin (), gpu_list.end (), worker->name)
+          != gpu_list.end ();
+      req.gpu = worker->gpu && gpu_trusted;
+      if (worker->gpu && !gpu_trusted)
+        spdlog::info ("[orchestrator] worker '{}' declares gpu=true but is "
+                     "not in [trusted_workers].gpu -- dispatching without "
+                     "GPU access for run {}",
+                     worker->name, run_id);
+    }
     // Build task_json with all step data the worker needs (ADR-019).
     // command and description give the worker its semantic context.
     // $prev_result carries the previous step's output (ADR-022).

@@ -120,8 +120,10 @@ void register_asset_commands(CLI::App& app) {
     {
         auto* show = asset->add_subcommand("show", "Show asset details");
         auto asset_id = std::make_shared<std::string>();
+        auto user_id = std::make_shared<std::string>("0");
         show->add_option("asset_id", *asset_id)->required();
-        show->callback([timeout_ms, socket_path, json_flag, access_key, asset_id] {
+        show->add_option("--user", *user_id, "Owning user_id")->default_val("0");
+        show->callback([timeout_ms, socket_path, json_flag, access_key, asset_id, user_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!access_key->empty()) client.set_access_key(*access_key);
@@ -130,6 +132,7 @@ void register_asset_commands(CLI::App& app) {
                 rapidjson::Document params(rapidjson::kObjectType);
                 auto& alloc = params.GetAllocator();
                 params.AddMember("asset_id", rapidjson::Value(asset_id->c_str(), alloc), alloc);
+                params.AddMember("user_id", rapidjson::Value(user_id->c_str(), alloc), alloc);
 
                 auto result = client.send("asset.show", std::move(params));
                 if (*json_flag) { print_json(result); }
@@ -155,8 +158,10 @@ void register_asset_commands(CLI::App& app) {
     {
         auto* revoke = asset->add_subcommand("revoke", "Revoke (soft-delete) an asset");
         auto asset_id = std::make_shared<std::string>();
+        auto user_id = std::make_shared<std::string>("0");
         revoke->add_option("asset_id", *asset_id)->required();
-        revoke->callback([timeout_ms, socket_path, json_flag, access_key, asset_id] {
+        revoke->add_option("--user", *user_id, "Owning user_id")->default_val("0");
+        revoke->callback([timeout_ms, socket_path, json_flag, access_key, asset_id, user_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!access_key->empty()) client.set_access_key(*access_key);
@@ -165,6 +170,7 @@ void register_asset_commands(CLI::App& app) {
                 rapidjson::Document params(rapidjson::kObjectType);
                 auto& alloc = params.GetAllocator();
                 params.AddMember("asset_id", rapidjson::Value(asset_id->c_str(), alloc), alloc);
+                params.AddMember("user_id", rapidjson::Value(user_id->c_str(), alloc), alloc);
 
                 auto result = client.send("asset.revoke", std::move(params));
                 if (*json_flag) { print_json(result); }
@@ -239,7 +245,9 @@ void register_asset_commands(CLI::App& app) {
         extract->add_option("asset_id", *asset_id)->required();
         extract->add_option("--dest", *dest_dir)->required()
             ->description("Directory to extract into (created if missing)");
-        extract->callback([timeout_ms, socket_path, json_flag, access_key, asset_id, dest_dir] {
+        auto user_id = std::make_shared<std::string>("0");
+        extract->add_option("--user", *user_id, "Owning user_id")->default_val("0");
+        extract->callback([timeout_ms, socket_path, json_flag, access_key, asset_id, dest_dir, user_id] {
             try {
                 agentos::cli::CliClient client(*timeout_ms);
                 if (!access_key->empty()) client.set_access_key(*access_key);
@@ -248,6 +256,7 @@ void register_asset_commands(CLI::App& app) {
                 rapidjson::Document params(rapidjson::kObjectType);
                 auto& alloc = params.GetAllocator();
                 params.AddMember("asset_id", rapidjson::Value(asset_id->c_str(), alloc), alloc);
+                params.AddMember("user_id", rapidjson::Value(user_id->c_str(), alloc), alloc);
                 std::string abs_dest = std::filesystem::absolute(*dest_dir).string();
                 params.AddMember("dest_dir", rapidjson::Value(abs_dest.c_str(), alloc), alloc);
 

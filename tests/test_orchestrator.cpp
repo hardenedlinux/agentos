@@ -287,6 +287,67 @@ TEST_F (OrchestratorTest, ReadonlyKey_JobStatus_Permitted)
 }
 
 // ---------------------------------------------------------------------------
+// ADR-029 ownership: job.status requires user_id; a foreign job reads as not
+// found; the default user "0" is a real owner.
+// ---------------------------------------------------------------------------
+
+TEST_F (OrchestratorTest, JobStatus_Ownership)
+{
+  const std::string key = insert_key ("operator");
+  orch_->stop ();
+  orch_->init ();
+  orch_->start ();
+
+  Task alice_job;
+  alice_job.id = TaskId ("job-alice");
+  alice_job.goal = "g";
+  alice_job.user_id = "alice";
+  db_->store_job (alice_job);
+
+  Task zero_job;
+  zero_job.id = TaskId ("job-zero");
+  zero_job.goal = "g";
+  zero_job.user_id = "0";
+  db_->store_job (zero_job);
+
+  auto status = [&] (const std::string &id, const std::string &params)
+  {
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id
+                  + R"(","method":"job.status","key":")" + key
+                  + R"(","params":)" + params + "}");
+  };
+  status ("1", R"({"job_id":"job-alice"})");                  // no user_id
+  status ("2", R"({"job_id":"job-alice","user_id":"bob"})");  // foreign
+  status ("3", R"({"job_id":"job-alice","user_id":"alice"})");// owner
+  status ("4", R"({"job_id":"job-zero","user_id":"0"})");     // user "0"
+  status ("5", R"({"job_id":"nope","user_id":"bob"})");       // missing
+
+  ASSERT_TRUE (wait_gateway (5));
+  std::lock_guard<std::mutex> lk (mtx_);
+  auto reply = [&] (const std::string &id) -> std::string
+  {
+    for (const auto &e : gateway_events_)
+      if (e.outbound.message.find (R"("id":")" + id + "\"")
+          != std::string::npos)
+        return e.outbound.message;
+    return "";
+  };
+  EXPECT_NE (reply ("1").find ("-32602"), std::string::npos) << reply ("1");
+  EXPECT_NE (reply ("2").find ("-32020"), std::string::npos) << reply ("2");
+  EXPECT_NE (reply ("3").find ("\"result\""), std::string::npos) << reply ("3");
+  EXPECT_NE (reply ("4").find ("\"result\""), std::string::npos) << reply ("4");
+  // Foreign and missing are indistinguishable.
+  auto strip_id = [] (std::string m)
+  {
+    auto p = m.find ("\"id\":\"");
+    if (p != std::string::npos)
+      m.erase (p, m.find ('"', p + 6) - p + 1);
+    return m;
+  };
+  EXPECT_EQ (strip_id (reply ("2")), strip_id (reply ("5")));
+}
+
+// ---------------------------------------------------------------------------
 // job.submit: valid operator key → reply with job_id, forward to Master
 // ---------------------------------------------------------------------------
 

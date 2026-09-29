@@ -105,7 +105,7 @@ class RpcClient:
 
 
 def submit_job(client, goal, continuation_id=None):
-    params = {"goal": goal}
+    params = {"goal": goal, "user_id": "0"}
     if continuation_id:
         params["continuation_id"] = continuation_id
     result = client.call("job.submit", params)
@@ -119,7 +119,7 @@ def poll_until_done(client, job_id):
     deadline = time.time() + POLL_TIMEOUT_S
     last_phase = None
     while time.time() < deadline:
-        result = client.call("job.status", {"job_id": job_id})
+        result = client.call("job.status", {"job_id": job_id, "user_id": "0"})
         phase = result.get("phase")
         if phase != last_phase:
             print(f"  [job {job_id}] phase -> {phase}")

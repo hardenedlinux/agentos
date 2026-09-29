@@ -121,10 +121,18 @@ TEST(JobParamsTest, SubmitWithInvalidJsonInput_InputOmitted)
 // job.status
 // ---------------------------------------------------------------------------
 
-TEST(JobParamsTest, Status_HasJobId)
+TEST(JobParamsTest, Status_HasJobIdAndUserId)
 {
-    auto doc = build_job_status_params("job-abc-123");
+    auto doc = build_job_status_params("job-abc-123", "alice");
     EXPECT_TRUE(has_string(doc, "job_id", "job-abc-123"));
+    EXPECT_TRUE(has_string(doc, "user_id", "alice"));
+}
+
+// ADR-029: the default user "0" is a real value and must be sent verbatim.
+TEST(JobParamsTest, Status_DefaultUserZeroIsSent)
+{
+    auto doc = build_job_status_params("job-abc-123", "0");
+    EXPECT_TRUE(has_string(doc, "user_id", "0"));
 }
 
 // ---------------------------------------------------------------------------
@@ -155,14 +163,15 @@ TEST(JobParamsTest, List_WithFilters)
 
 TEST(JobParamsTest, Cancel_StopScheduleTrue)
 {
-    auto doc = build_job_cancel_params("job-xyz", true);
+    auto doc = build_job_cancel_params("job-xyz", "0", true);
     EXPECT_TRUE(has_string(doc, "job_id", "job-xyz"));
+    EXPECT_TRUE(has_string(doc, "user_id", "0"));
     EXPECT_TRUE(has_bool(doc, "stop_schedule", true));
 }
 
 TEST(JobParamsTest, Cancel_StopScheduleFalse)
 {
-    auto doc = build_job_cancel_params("job-xyz", false);
+    auto doc = build_job_cancel_params("job-xyz", "0", false);
     EXPECT_TRUE(has_bool(doc, "stop_schedule", false));
 }
 

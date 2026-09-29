@@ -161,7 +161,7 @@ def main():
     sock = make_socket(ctx)
 
     try:
-        submit_reply = rpc_call(sock, "job.submit", {"goal": args.goal})
+        submit_reply = rpc_call(sock, "job.submit", {"goal": args.goal, "user_id": "0"})
     except TimeoutError as e:
         fail(str(e))
 
@@ -181,7 +181,7 @@ def main():
     last_phase = None
     while time.time() < deadline:
         try:
-            reply = rpc_call(sock, "job.status", {"job_id": job_id})
+            reply = rpc_call(sock, "job.status", {"job_id": job_id, "user_id": "0"})
         except TimeoutError as e:
             fail(str(e))
         if "error" in reply:

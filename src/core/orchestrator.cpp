@@ -258,6 +258,21 @@ namespace agentos
       return buf.GetString ();
     }
 
+    // ADR-029 ownership rule: methods that address a user's job or asset
+    // take a required, non-empty user_id. "0" is a real user (the default
+    // single-user id), so only emptiness counts as absent.
+    std::optional<std::string>
+    required_user_id (const rapidjson::Document &params)
+    {
+      if (!params.IsObject () || !params.HasMember ("user_id")
+          || !params["user_id"].IsString ())
+        return std::nullopt;
+      std::string uid = params["user_id"].GetString ();
+      if (uid.empty ())
+        return std::nullopt;
+      return uid;
+    }
+
     // Role permission matrix (ADR-025).
     bool role_permitted (const std::string &role, const std::string &method)
     {
@@ -1249,6 +1264,21 @@ namespace agentos
       return;
     }
     const std::string job_id = params["job_id"].GetString ();
+    const auto user_id = required_user_id (params);
+    if (!user_id)
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+
+    // ADR-029: a job owned by another user is reported exactly like one
+    // that does not exist.
+    if (!job_owned_by (job_id, *user_id))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
 
     const std::string result_json = build_job_status_json (job_id);
     if (result_json.empty ())
@@ -1383,6 +1413,20 @@ namespace agentos
       return;
     }
     const std::string job_id = params["job_id"].GetString ();
+    const auto user_id = required_user_id (params);
+    if (!user_id)
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    // ADR-029: ownership is checked before any state change; a foreign job
+    // is indistinguishable from a missing one.
+    if (!job_owned_by (job_id, *user_id))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
 
     // Job actively executing — remove from active_jobs_.
     auto it = active_jobs_.find (job_id);
@@ -2458,6 +2502,14 @@ namespace agentos
     const std::string user_id = params["user_id"].GetString ();
     const fs::path source_path = params["path"].GetString ();
 
+    // ADR-029: an asset may only be registered to a registered, enabled
+    // user; unknown and disabled are not distinguished.
+    if (user_id.empty () || !user_manager_.validate_user (user_id))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
     if (source_path.string ().find ("://") != std::string::npos
         || !source_path.is_absolute ())
     {
@@ -2545,11 +2597,19 @@ namespace agentos
     }
     const std::string asset_id = params["asset_id"].GetString ();
 
-    auto asset = db_.load_asset (asset_id);
-    if (!asset)
+    // ADR-029: user_id is required; a missing asset and one owned by
+    // another user get the same reply.
+    const auto user_id = required_user_id (params);
+    if (!user_id)
     {
-      reply_error (identity, request_id, -32011,
-                   "asset not found: " + asset_id);
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    auto asset = db_.load_asset (asset_id);
+    if (!asset || asset->user_id != *user_id)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
       return;
     }
 
@@ -2642,11 +2702,19 @@ namespace agentos
     }
     const std::string asset_id = params["asset_id"].GetString ();
 
-    auto asset = db_.load_asset (asset_id);
-    if (!asset)
+    // ADR-029: user_id is required; a missing asset and one owned by
+    // another user get the same reply.
+    const auto user_id = required_user_id (params);
+    if (!user_id)
     {
-      reply_error (identity, request_id, -32011,
-                   "asset not found: " + asset_id);
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    auto asset = db_.load_asset (asset_id);
+    if (!asset || asset->user_id != *user_id)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
       return;
     }
 
@@ -2834,11 +2902,19 @@ namespace agentos
       return;
     }
 
-    auto asset = db_.load_asset (asset_id);
-    if (!asset)
+    // ADR-029: user_id is required; a missing asset and one owned by
+    // another user get the same reply.
+    const auto user_id = required_user_id (params);
+    if (!user_id)
     {
-      reply_error (identity, request_id, -32011,
-                   "asset not found: " + asset_id);
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: 'user_id' is required");
+      return;
+    }
+    auto asset = db_.load_asset (asset_id);
+    if (!asset || asset->user_id != *user_id)
+    {
+      reply_error (identity, request_id, -32020, "Not found");
       return;
     }
 
@@ -3852,6 +3928,19 @@ namespace agentos
   // ADR-040: the owning user of a job, from the in-memory ActiveJob if
   // the job is active, else from the jobs row. Empty only when the job is
   // unknown -- never for user "0", which is a real (default) user.
+  bool Orchestrator::job_owned_by (const std::string &job_id,
+                                   const std::string &user_id)
+  {
+    if (user_id.empty ())
+      return false;
+    if (auto it = active_jobs_.find (job_id); it != active_jobs_.end ()
+        && !it->second.user_id.empty ())
+      return it->second.user_id == user_id;
+    if (auto j = db_.load_job (job_id); j)
+      return j->user_id == user_id;
+    return false;
+  }
+
   std::string Orchestrator::owning_user_id (const std::string &job_id)
   {
     if (auto it = active_jobs_.find (job_id); it != active_jobs_.end ()

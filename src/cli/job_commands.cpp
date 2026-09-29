@@ -305,10 +305,13 @@ void register_job_commands (CLI::App &app)
   {
     auto *status = job->add_subcommand ("status", "Get job status");
     auto job_id = std::make_shared<std::string> ();
+    auto status_user = std::make_shared<std::string> ("0");
     status->add_option ("job_id", *job_id)->required ();
+    status->add_option ("--user", *status_user, "Owning user_id")
+      ->default_val ("0");
 
     status->callback (
-      [timeout_ms, socket_path, json_flag, access_key, job_id]
+      [timeout_ms, socket_path, json_flag, access_key, job_id, status_user]
       {
         try
         {
@@ -317,7 +320,8 @@ void register_job_commands (CLI::App &app)
             client.set_access_key (*access_key);
           if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
-          auto params = agentos::cli::build_job_status_params (*job_id);
+          auto params
+            = agentos::cli::build_job_status_params (*job_id, *status_user);
           auto result = client.send ("job.status", std::move (params));
           if (*json_flag)
           {
@@ -709,11 +713,15 @@ void register_job_commands (CLI::App &app)
     auto *cancel = job->add_subcommand ("cancel", "Cancel a job");
     auto job_id = std::make_shared<std::string> ();
     auto keep_schedule = std::make_shared<bool> (false);
+    auto cancel_user = std::make_shared<std::string> ("0");
     cancel->add_option ("job_id", *job_id)->required ();
+    cancel->add_option ("--user", *cancel_user, "Owning user_id")
+      ->default_val ("0");
     cancel->add_flag ("--keep-schedule", *keep_schedule);
 
     cancel->callback (
-      [timeout_ms, socket_path, json_flag, access_key, job_id, keep_schedule]
+      [timeout_ms, socket_path, json_flag, access_key, job_id, keep_schedule,
+       cancel_user]
       {
         try
         {
@@ -723,7 +731,8 @@ void register_job_commands (CLI::App &app)
           if (!socket_path->empty ())
             client.set_socket_path (*socket_path);
           auto params
-            = agentos::cli::build_job_cancel_params (*job_id, !*keep_schedule);
+            = agentos::cli::build_job_cancel_params (*job_id, *cancel_user,
+                                                     !*keep_schedule);
           auto result = client.send ("job.cancel", std::move (params));
           if (*json_flag)
           {

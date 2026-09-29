@@ -120,6 +120,9 @@ namespace agentos
     void handle_adviser_failed (const OrchestratorEvent &ev);
     // ADR-040: owning job's user_id (ActiveJob, else jobs row).
     std::string owning_user_id (const std::string &job_id);
+    // ADR-029: true iff job_id exists and is owned by user_id (exact match;
+    // "0" is a real user). Used so a foreign job reads as not found.
+    bool job_owned_by (const std::string &job_id, const std::string &user_id);
 
     // Master has made a decision (e.g. TriggerForge, JobFailed).
     void handle_master_decision (const OrchestratorEvent &ev);

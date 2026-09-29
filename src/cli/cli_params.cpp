@@ -87,11 +87,14 @@ namespace agentos::cli
     return doc;
   }
 
-  rapidjson::Document build_job_status_params (const std::string &job_id)
+  rapidjson::Document build_job_status_params (const std::string &job_id,
+                                               const std::string &user_id)
   {
     rapidjson::Document doc (rapidjson::kObjectType);
     auto &a = doc.GetAllocator ();
     doc.AddMember ("job_id", rapidjson::Value (job_id.c_str (), a).Move (), a);
+    doc.AddMember ("user_id", rapidjson::Value (user_id.c_str (), a).Move (),
+                   a);
     return doc;
   }
 
@@ -112,11 +115,14 @@ namespace agentos::cli
   }
 
   rapidjson::Document build_job_cancel_params (const std::string &job_id,
+                                               const std::string &user_id,
                                                bool stop_schedule)
   {
     rapidjson::Document doc (rapidjson::kObjectType);
     auto &a = doc.GetAllocator ();
     doc.AddMember ("job_id", rapidjson::Value (job_id.c_str (), a).Move (), a);
+    doc.AddMember ("user_id", rapidjson::Value (user_id.c_str (), a).Move (),
+                   a);
     doc.AddMember ("stop_schedule", stop_schedule, a);
     return doc;
   }

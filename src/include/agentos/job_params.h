@@ -15,7 +15,9 @@ rapidjson::Document build_job_submit_params(
     const std::string& reviewer_id,
     const std::string& acceptance_criteria);
 
-rapidjson::Document build_job_status_params(const std::string& job_id);
+// ADR-029: user_id is required; the CLI passes "0" unless --user is given.
+rapidjson::Document build_job_status_params(const std::string& job_id,
+                                            const std::string& user_id);
 
 rapidjson::Document build_job_list_params(
     const std::string& phase,
@@ -25,6 +27,7 @@ rapidjson::Document build_job_list_params(
 
 rapidjson::Document build_job_cancel_params(
     const std::string& job_id,
+    const std::string& user_id,
     bool               stop_schedule);
 
 } // namespace agentos::cli

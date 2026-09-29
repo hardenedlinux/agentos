@@ -4050,7 +4050,11 @@ namespace agentos
       // a continuation_id at job.submit time reaches the DB lookup below.
       std::string context_payload_consumed;
       bool has_consumed_continuation = false;
-      std::string job_user_id;
+      // ADR-040: every Adviser LLM call carries the job owner, not only
+      // continuation-opted-in Advisers (ADR-038). Previously this was
+      // fetched solely inside the opt-in branch below, so e.g. a
+      // non-opted-in domain Adviser went out with user_id=''.
+      std::string job_user_id = owning_user_id (job_id);
 
       auto reg_adviser_for_cont = registry_.find_adviser_by_id (adviser_id);
       if (!reg_adviser_for_cont || !reg_adviser_for_cont->supports_continuation)
@@ -4065,14 +4069,9 @@ namespace agentos
       }
       else
       {
-        // job_user_id is needed regardless of whether an incoming
-        // continuation_id is present: turn 1 of a chain (no incoming
-        // continuation_id yet, just about to produce the first
-        // updated_context below) still needs it for the post-completion
-        // write. Only fetched here, inside the opt-in branch, so
-        // non-opted-in Advisers still incur zero extra DB hits.
-        if (auto maybe_job = db_.load_job (job_id))
-          job_user_id = maybe_job->user_id;
+        // job_user_id (resolved above) is also needed here regardless of
+        // whether an incoming continuation_id is present: turn 1 of a chain
+        // still needs it for the post-completion continuation write.
 
         auto it = pending_continuation_ids_.find (job_id);
         if (it != pending_continuation_ids_.end ())
@@ -4146,7 +4145,10 @@ namespace agentos
           req.system_prompt = std::move (system_prompt);
           // ADR-040: propagate the AgentOS tenant identity to the LLM layer.
           // DeepSeek maps this field to its provider-side user_id isolation.
-          req.user_id = std::move (job_user_id);
+          // Copy, not move: job_user_id is used again below for the ADR-038
+          // continuation row; a moved-from (empty) owner made every
+          // continuation unconsumable on the next turn.
+          req.user_id = job_user_id;
 
           std::string user;
           if (has_consumed_continuation && !context_payload_consumed.empty ())

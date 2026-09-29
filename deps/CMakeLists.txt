@@ -165,38 +165,98 @@ set(CPPZMQ_INC "${CMAKE_SOURCE_DIR}/deps-src/cppzmq-src"
 # ---------------------------------------------------------------------------
 # CLI11 (header-only, extracted at configure time)
 # ---------------------------------------------------------------------------
-set(CLI11_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/cli11-src"
-  CACHE INTERNAL "CLI11 source directory")
-set(CLI11_DOWNLOAD_PATH
-  "${CMAKE_SOURCE_DIR}/deps-src/downloads/cli11-v2.4.2.tar.gz")
+#
+# Configure-time fetch + extract for deps not managed by ExternalProject.
+#
+#   agentos_fetch_archive(<name> <url> <sha256> <archive-path> <dest-dir> <sentinel>)
+#
+# - A cached archive is re-verified against <sha256>; a mismatch (e.g. the
+#   zero-byte file a failed file(DOWNLOAD) leaves behind) is deleted and
+#   re-fetched.  libarchive happily "extracts" an empty file as an empty
+#   archive, which previously surfaced as a confusing file(RENAME) error.
+# - Extraction goes into a scratch dir; the archive must contain exactly one
+#   top-level directory, which is moved to <dest-dir>.  No hard-coded
+#   top-level names.
+# - <sentinel> is a path relative to <dest-dir> that must exist afterwards.
+#
+function(agentos_fetch_archive name url sha256 archive dest sentinel)
+  if(EXISTS "${dest}/${sentinel}")
+    return()
+  endif()
 
-if(NOT EXISTS "${CLI11_SRC_DIR}/include/CLI/CLI.hpp")
-  if(NOT EXISTS "${CLI11_DOWNLOAD_PATH}")
-    file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/deps-src/downloads")
-    message(STATUS "Downloading CLI11...")
-    file(DOWNLOAD
-      https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.4.2.tar.gz
-      "${CLI11_DOWNLOAD_PATH}"
-      EXPECTED_HASH SHA256=f2d893a65c3b1324c50d4e682c0cdc021dd0477ae2c048544f39eed6654b699a
-      STATUS download_status
-      LOG    download_log
-    )
-    list(GET download_status 0 download_code)
-    if(NOT download_code EQUAL 0)
-      message(FATAL_ERROR "Failed to download CLI11: ${download_log}")
+  get_filename_component(_dl_dir "${archive}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_dl_dir}")
+
+  if(EXISTS "${archive}")
+    file(SHA256 "${archive}" _have)
+    if(NOT _have STREQUAL sha256)
+      message(WARNING "${name}: cached ${archive} has wrong SHA256 (${_have}); re-downloading")
+      file(REMOVE "${archive}")
     endif()
   endif()
-  set(_cli11_extracted "${CMAKE_SOURCE_DIR}/deps-src/CLI11-2.4.2")
-  if(EXISTS "${_cli11_extracted}")
-    file(REMOVE_RECURSE "${_cli11_extracted}")
+
+  if(NOT EXISTS "${archive}")
+    message(STATUS "Downloading ${name}...")
+    # No EXPECTED_HASH here: it hard-errors on a failed transfer before we
+    # can clean up or print the manual-placement hint.  Verified below.
+    file(DOWNLOAD "${url}" "${archive}.part"
+      STATUS _st
+      LOG    _log
+    )
+    list(GET _st 0 _code)
+    list(GET _st 1 _msg)
+    set(_why "")
+    if(NOT _code EQUAL 0)
+      set(_why "download failed (${_code}: ${_msg})")
+    else()
+      file(SHA256 "${archive}.part" _got)
+      if(NOT _got STREQUAL sha256)
+        set(_why "SHA256 mismatch (got ${_got})")
+      endif()
+    endif()
+    if(_why)
+      file(REMOVE "${archive}.part")
+      message(FATAL_ERROR
+        "${name}: ${_why}\n"
+        "  url: ${url}\n"
+        "  If the network is restricted, place the archive manually at:\n"
+        "    ${archive}\n"
+        "  (sha256 ${sha256})")
+    endif()
+    file(RENAME "${archive}.part" "${archive}")
   endif()
-  message(STATUS "Extracting CLI11...")
-  file(ARCHIVE_EXTRACT
-    INPUT       "${CLI11_DOWNLOAD_PATH}"
-    DESTINATION "${CMAKE_SOURCE_DIR}/deps-src"
-  )
-  file(RENAME "${_cli11_extracted}" "${CLI11_SRC_DIR}")
-endif()
+
+  set(_tmp "${dest}.extract-tmp")
+  file(REMOVE_RECURSE "${_tmp}")
+  message(STATUS "Extracting ${name}...")
+  file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${_tmp}")
+
+  file(GLOB _top LIST_DIRECTORIES true "${_tmp}/*")
+  list(LENGTH _top _n)
+  if(NOT _n EQUAL 1 OR NOT IS_DIRECTORY "${_top}")
+    file(REMOVE_RECURSE "${_tmp}")
+    message(FATAL_ERROR
+      "${name}: expected exactly one top-level directory in ${archive}, got: [${_top}]")
+  endif()
+
+  file(REMOVE_RECURSE "${dest}")
+  file(RENAME "${_top}" "${dest}")
+  file(REMOVE_RECURSE "${_tmp}")
+
+  if(NOT EXISTS "${dest}/${sentinel}")
+    message(FATAL_ERROR "${name}: ${sentinel} missing after extraction into ${dest}")
+  endif()
+endfunction()
+
+set(CLI11_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/cli11-src"
+  CACHE INTERNAL "CLI11 source directory")
+agentos_fetch_archive(CLI11
+  https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.4.2.tar.gz
+  f2d893a65c3b1324c50d4e682c0cdc021dd0477ae2c048544f39eed6654b699a
+  "${CMAKE_SOURCE_DIR}/deps-src/downloads/cli11-v2.4.2.tar.gz"
+  "${CLI11_SRC_DIR}"
+  include/CLI/CLI.hpp
+)
 
 set(CLI11_INC "${CLI11_SRC_DIR}/include" CACHE INTERNAL "CLI11 include path")
 
@@ -205,18 +265,26 @@ set(CLI11_INC "${CLI11_SRC_DIR}/include" CACHE INTERNAL "CLI11 include path")
 # ---------------------------------------------------------------------------
 set(TOMLPLUSPLUS_DOWNLOAD_DIR "${CMAKE_SOURCE_DIR}/deps-src/downloads")
 set(TOMLPLUSPLUS_FILE "${TOMLPLUSPLUS_DOWNLOAD_DIR}/toml.hpp")
+if(EXISTS "${TOMLPLUSPLUS_FILE}")
+  file(SIZE "${TOMLPLUSPLUS_FILE}" _toml_size)
+  if(_toml_size EQUAL 0)
+    file(REMOVE "${TOMLPLUSPLUS_FILE}")   # left over from a failed download
+  endif()
+endif()
 if(NOT EXISTS "${TOMLPLUSPLUS_FILE}")
   file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DOWNLOAD_DIR}")
   file(DOWNLOAD
     https://raw.githubusercontent.com/marzer/tomlplusplus/v3.4.0/toml.hpp
-    "${TOMLPLUSPLUS_FILE}"
+    "${TOMLPLUSPLUS_FILE}.part"
     STATUS download_status
     LOG    download_log
   )
   list(GET download_status 0 download_code)
   if(NOT download_code EQUAL 0)
+    file(REMOVE "${TOMLPLUSPLUS_FILE}.part")
     message(FATAL_ERROR "Failed to download toml.hpp: ${download_log}")
   endif()
+  file(RENAME "${TOMLPLUSPLUS_FILE}.part" "${TOMLPLUSPLUS_FILE}")
 endif()
 set(TOMLPLUSPLUS_DIR "${CMAKE_SOURCE_DIR}/deps-src/tomlplusplus")
 file(MAKE_DIRECTORY "${TOMLPLUSPLUS_DIR}")
@@ -228,35 +296,13 @@ set(TOMLPLUSPLUS_INC "${TOMLPLUSPLUS_DIR}" CACHE INTERNAL "tomlplusplus include 
 # ---------------------------------------------------------------------------
 set(SQLITE3_SRC_DIR "${CMAKE_SOURCE_DIR}/deps-src/sqlite3_amalgamation-src"
   CACHE INTERNAL "sqlite3 source directory")
-set(SQLITE3_DOWNLOAD_PATH
-  "${CMAKE_SOURCE_DIR}/deps-src/downloads/sqlite3-amalgamation-3490100.zip")
-
-if(NOT EXISTS "${SQLITE3_SRC_DIR}/sqlite3.c")
-  if(NOT EXISTS "${SQLITE3_DOWNLOAD_PATH}")
-    file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/deps-src/downloads")
-    message(STATUS "Downloading sqlite3 amalgamation...")
-    file(DOWNLOAD
-      https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip
-      "${SQLITE3_DOWNLOAD_PATH}"
-      EXPECTED_HASH SHA256=6cebd1d8403fc58c30e93939b246f3e6e58d0765a5cd50546f16c00fd805d2c3
-      STATUS download_status
-      LOG    download_log
-    )
-    list(GET download_status 0 download_code)
-    if(NOT download_code EQUAL 0)
-      message(FATAL_ERROR "Failed to download sqlite3: ${download_log}")
-    endif()
-  endif()
-  message(STATUS "Extracting sqlite3 amalgamation...")
-  file(ARCHIVE_EXTRACT
-    INPUT "${SQLITE3_DOWNLOAD_PATH}"
-    DESTINATION "${CMAKE_SOURCE_DIR}/deps-src"
-  )
-  file(RENAME
-    "${CMAKE_SOURCE_DIR}/deps-src/sqlite-amalgamation-3490100"
-    "${SQLITE3_SRC_DIR}"
-  )
-endif()
+agentos_fetch_archive("sqlite3 amalgamation"
+  https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip
+  6cebd1d8403fc58c30e93939b246f3e6e58d0765a5cd50546f16c00fd805d2c3
+  "${CMAKE_SOURCE_DIR}/deps-src/downloads/sqlite3-amalgamation-3490100.zip"
+  "${SQLITE3_SRC_DIR}"
+  sqlite3.c
+)
 
 # ---------------------------------------------------------------------------
 # libseccomp (C only, autoconf/make)

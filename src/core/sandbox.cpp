@@ -747,7 +747,10 @@ namespace agentos
     // the worker's pid after execve), and each GPU's PCI device directory.
     for (const char *p :
          {"/proc/driver/nvidia", "/proc/devices", "/proc/cpuinfo",
-          "/proc/sys/vm/mmap_min_addr", "/sys/devices/system"})
+          "/proc/sys/vm/mmap_min_addr", "/sys/devices/system",
+          // Kernel module state (initstate), read by CUDA at init with
+          // the NVIDIA open kernel modules.
+          "/sys/module/nvidia", "/sys/module/nvidia_uvm"})
       if (fs::exists (p, ec))
         read_paths.emplace_back (p);
     read_paths.push_back ("/proc/" + std::to_string (getpid ()));

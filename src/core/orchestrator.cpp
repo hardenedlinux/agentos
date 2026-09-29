@@ -1677,6 +1677,32 @@ namespace agentos
       return value;
     }
 
+    // Output budget for Adviser completions (Plan authoring and
+    // Adviser-target steps). Previously a hard-coded 4096, which long
+    // structured outputs (multi-shot storyboards, CJK-heavy copy) exceed;
+    // the truncated JSON then failed to parse and was retried at the same
+    // budget. Same env var and default as Code Writer (code_writer.cpp).
+    int adviser_max_tokens ()
+    {
+      static const int value = [] {
+        const char *env = std::getenv ("AGENTOS_ADVISER_MAX_TOKENS");
+        if (!env || !*env)
+          return 8192;
+        int n = 0;
+        const char *end = env + std::strlen (env);
+        auto [ptr, ec] = std::from_chars (env, end, n);
+        if (ec != std::errc () || ptr != end || n <= 0)
+        {
+          spdlog::warn ("[orchestrator] ignoring invalid "
+                        "AGENTOS_ADVISER_MAX_TOKENS='{}'; using 8192",
+                        env);
+          return 8192;
+        }
+        return n;
+      }();
+      return value;
+    }
+
     // ADR-031 §1: namespace.verb, all lowercase, one dot, max 64 chars.
     bool is_valid_capability_method (const std::string &method)
     {
@@ -4227,7 +4253,7 @@ namespace agentos
                "Advisers).\n";
 
           req.user_prompt = user;
-          req.max_tokens = 4096;
+          req.max_tokens = adviser_max_tokens ();
 
           auto result = client.complete (req);
 
@@ -5768,7 +5794,7 @@ namespace agentos
         req.user_prompt = std::move (user_prompt);
         // ADR-040: keep the tenant identity attached to every LLM request.
         req.user_id = std::move (job_user_id);
-        req.max_tokens = 4096;
+        req.max_tokens = adviser_max_tokens ();
 
         auto result = client.complete (req);
 

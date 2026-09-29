@@ -466,6 +466,27 @@ namespace agentos
             Error{"Invalid request headers (check model/base_url/api_key "
                   "configuration): " + err},
             ErrorTag{});
+        // Only retry when the request provably never reached the provider
+        // (connect/TLS-handshake phase, or the body was not fully sent).
+        // A read timeout or a connection dropped mid-response means the
+        // provider already accepted the request and keeps generating --
+        // and billing -- whether or not we are still listening; resending
+        // it pays for the same completion again. Slow long completions
+        // hitting timeout_s were retried exactly this way, three times.
+        const auto e = res.error ();
+        const bool never_reached
+          = e == httplib::Error::Connection
+            || e == httplib::Error::ConnectionTimeout
+            || e == httplib::Error::SSLConnection
+            || e == httplib::Error::ProxyConnection
+            || e == httplib::Error::BindIPAddress
+            || e == httplib::Error::Write;
+        if (!never_reached)
+          return Result<LlmResponse> (
+            Error{"Network error after the request was sent (not retried, "
+                  "the provider may have billed it; raise [llm] timeout_s "
+                  "if this is a timeout): " + err},
+            ErrorTag{});
         if (attempt < kMaxAttempts - 1)
         {
           std::this_thread::sleep_for (std::chrono::milliseconds (500));
@@ -517,6 +538,39 @@ namespace agentos
       // Extract token usage (OpenAI-compatible only; Anthropic TBD).
       if (!is_anthropic)
         extract_openai_usage (d, resp.prompt_tokens, resp.completion_tokens);
+
+      // A completion cut off at max_tokens is not a usable result: every
+      // caller parses it as JSON, fails, and (before this check) the step
+      // was retried with the identical budget -- deterministic truncation,
+      // paid for on every attempt. Surface it as an explicit error instead.
+      {
+        const char *truncated_by = nullptr;
+        if (is_anthropic)
+        {
+          if (d.HasMember ("stop_reason") && d["stop_reason"].IsString ()
+              && std::string (d["stop_reason"].GetString ()) == "max_tokens")
+            truncated_by = "stop_reason=max_tokens";
+        }
+        else if (d.HasMember ("choices") && d["choices"].IsArray ()
+                 && d["choices"].Size () > 0
+                 && d["choices"][0].HasMember ("finish_reason")
+                 && d["choices"][0]["finish_reason"].IsString ()
+                 && std::string (d["choices"][0]["finish_reason"].GetString ())
+                      == "length")
+          truncated_by = "finish_reason=length";
+        if (truncated_by)
+        {
+          spdlog::error ("[llm_proxy] completion truncated ({}): "
+                         "max_tokens={} completion_tokens={}",
+                         truncated_by, req.max_tokens,
+                         resp.completion_tokens);
+          return Result<LlmResponse> (
+            Error{"LLM output truncated at max_tokens="
+                  + std::to_string (req.max_tokens) + " ("
+                  + truncated_by + ")"},
+            ErrorTag{});
+        }
+      }
 
       spdlog::debug ("[llm_proxy] response ({} chars, tokens: {}p+{}c)",
                      resp.content.size (),

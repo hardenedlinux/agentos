@@ -307,6 +307,13 @@ void PeriodicExecutor::fire (const Task &t)
           {
             const std::string payload = build_heartbeat_payload ();
             gateway_push_ (payload);
+
+            // ADR-039 §H2a: on every heartbeat, have the Orchestrator (the
+            // sole DB writer) re-emit jobs whose outbox watermark is behind.
+            OrchestratorEvent reemit;
+            reemit.kind         = OrchestratorEvent::Kind::TimerFired;
+            reemit.payload_json = R"({"kind":"outbox_reemit"})";
+            send_to_orchestrator_ (std::move (reemit));
           }
         else
           {

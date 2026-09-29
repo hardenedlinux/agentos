@@ -26,6 +26,7 @@
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <string>
+#include <cstdint>
 #include <vector>
 
 namespace agentos
@@ -190,6 +191,12 @@ namespace agentos
     // True iff an agents row with this id exists, is an Adviser and is
     // enabled. Authoritative (reads the table, not the Registry snapshot).
     bool agent_is_enabled_adviser (const std::string &id);
+    // ADR-039 §H2a outbox watermark. job_state_seq returns -1 if the job
+    // does not exist. mark_job_notified never moves the watermark back.
+    std::int64_t job_state_seq (const std::string &job_id);
+    bool mark_job_notified (const std::string &job_id, std::int64_t state_seq);
+    // Jobs whose newest state has not been durably written to the outbox.
+    std::vector<std::string> jobs_pending_notify ();
     void set_job_deliverable_kind (const std::string &job_id,
                                    const std::string &deliverable_kind);
     std::optional<Job> load_job (const std::string &id);
@@ -926,6 +933,8 @@ namespace agentos
     // ADR-031 §13.1: rebuild a pre-existing tasks table whose primary key is
     // `id` alone into one keyed by (job_id, id). No-op when already migrated.
     [[nodiscard]] bool migrate_tasks_primary_key ();
+    // ADR-039 §H2a: triggers that advance jobs.state_seq.
+    [[nodiscard]] bool create_outbox_seq_triggers ();
 
     // Seed built-in adviser rows into the agents table (INSERT OR IGNORE).
     // Called at the end of open() so advisers are always available without

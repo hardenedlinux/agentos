@@ -217,6 +217,53 @@ TEST_F (DatabasePipelineTest, SameStepLabelInTwoJobs_IsIsolated)
     << "job-a's only step is done; job-b's pending row must not leak in";
 }
 
+// ADR-039 §H2a: jobs.state_seq advances with every change to the job's
+// job.status shape (job row and its steps); moving notified_seq does not.
+TEST_F (DatabasePipelineTest, OutboxWatermark_StateSeqAndNotifiedSeq)
+{
+  agentos::Task task;
+  task.id = agentos::TaskId ("job-w");
+  task.goal = "g";
+  task.input_json = "{}";
+  task.user_id = "0";
+  db_->store_job (task);
+
+  const auto s0 = db_->job_state_seq ("job-w");
+  EXPECT_GT (s0, 0) << "a new job is a state not yet in the outbox";
+  EXPECT_EQ (db_->job_state_seq ("missing"), -1);
+  auto pending = db_->jobs_pending_notify ();
+  ASSERT_EQ (pending.size (), 1u);
+  EXPECT_EQ (pending[0], "job-w");
+
+  ASSERT_TRUE (db_->mark_job_notified ("job-w", s0));
+  EXPECT_EQ (db_->job_state_seq ("job-w"), s0)
+    << "advancing the watermark is not a job.status change";
+  EXPECT_TRUE (db_->jobs_pending_notify ().empty ());
+
+  agentos::PipelinePlanStep step;
+  step.id = "step-0";
+  step.command = "x.y";
+  step.description = "d";
+  db_->store_pipeline_task (task.id, step, 0);
+  const auto s1 = db_->job_state_seq ("job-w");
+  EXPECT_GT (s1, s0) << "step insert";
+
+  db_->update_step_status ("job-w", "step-0", "running");
+  const auto s2 = db_->job_state_seq ("job-w");
+  EXPECT_GT (s2, s1) << "step status";
+
+  db_->update_job_phase (task.id, "executing");
+  const auto s3 = db_->job_state_seq ("job-w");
+  EXPECT_GT (s3, s2) << "job phase";
+
+  ASSERT_EQ (db_->jobs_pending_notify ().size (), 1u);
+
+  // The watermark never moves backwards.
+  ASSERT_TRUE (db_->mark_job_notified ("job-w", s3));
+  ASSERT_TRUE (db_->mark_job_notified ("job-w", s0));
+  EXPECT_TRUE (db_->jobs_pending_notify ().empty ());
+}
+
 // -------------------------------------------------------------------------
 // Schema migration – tasks table has the new columns
 // -------------------------------------------------------------------------

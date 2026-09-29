@@ -437,17 +437,18 @@ namespace agentos
                       const std::string &message,
                       const std::string &data_json = {});
 
-    // Broadcast a notification to all connected clients (no identity).
-    // params_json: broadcast to all connected clients over ZMQ, kept
-    // deliberately small (job_id + the one changed field). outbox_params_json:
-    // what gets persisted to agentos_home()/events/ instead -- decoupled from
-    // the broadcast payload so the durable outbox copy can carry the full
-    // job.status shape (build_job_status_json's output) without bloating the
-    // live broadcast with it. Defaults to params_json (old single-payload
-    // behavior) if omitted, so a hypothetical future non-job notify() call
-    // doesn't need to pass a redundant second argument.
-    void notify (const std::string &method, const std::string &params_json,
-                const std::string &outbox_params_json = "");
+    // ADR-039 §H2a: durably write the job's full job.status shape to the
+    // outbox (agentos_home()/events/), advance jobs.notified_seq, then
+    // broadcast params_json (small: job_id + the changed field) to all
+    // connected clients. Returns false, without broadcasting, if the job is
+    // unknown or the write failed; reemit_pending_outbox() recovers.
+    bool notify_job (const std::string &method, const std::string &job_id,
+                     const std::string &params_json);
+    // Atomic, fsync'd write of one outbox file (tmp + rename + dir fsync).
+    bool write_outbox_file (const std::string &message);
+    // Re-emit every job whose state_seq is ahead of notified_seq.
+    // Triggered on each heartbeat and once at startup.
+    void reemit_pending_outbox ();
 
     // Generate a UUID for run_id / job_id.
     static std::string new_uuid ();

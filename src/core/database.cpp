@@ -413,6 +413,15 @@ namespace agentos
       // re-plan, never Forge (ADR-031 §5, §12).
       maybe_add_column (
         "ALTER TABLE jobs ADD COLUMN strict_ability INTEGER NOT NULL DEFAULT 0");
+      // ADR-039 §H2a: outbox watermark. state_seq advances with every change
+      // to the job's job.status shape (maintained by triggers, see
+      // create_outbox_seq_triggers); notified_seq is the newest state_seq
+      // durably written to the outbox. Existing rows start at 0/0, so an
+      // upgrade does not re-emit history.
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN state_seq INTEGER NOT NULL DEFAULT 0");
+      maybe_add_column (
+        "ALTER TABLE jobs ADD COLUMN notified_seq INTEGER NOT NULL DEFAULT 0");
     }
 
     // ADR-040: forge_pipeline_jobs.user_id — who triggered the Forge run.
@@ -685,6 +694,11 @@ namespace agentos
     // Runs after every other migration: the table rename re-validates views
     // (user_profile) that depend on columns added above.
     if (!migrate_tasks_primary_key ())
+      return false;
+
+    // After the tasks rebuild above: dropping the old tasks table drops its
+    // triggers with it.
+    if (!create_outbox_seq_triggers ())
       return false;
 
     // Must run after all migrations above (needs agents.description) and
@@ -1348,6 +1362,119 @@ namespace agentos
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] increment_job_repairs: {}",
                      sqlite3_errmsg (db_));
+  }
+
+  // ADR-039 §H2a: jobs.state_seq must advance in the same transaction as
+  // every change that alters the job's job.status shape. Triggers give that
+  // atomicity for every write path (job row, its steps, and the Forge run
+  // that feeds a step's forge_status) without each writer having to
+  // remember it. Over-counting is harmless: an extra increment only causes
+  // one extra full-state snapshot, which Bridge applies idempotently.
+  // SQLite's recursive_triggers is off by default, so the UPDATE inside a
+  // trigger never re-fires a trigger on jobs.
+  bool Database::create_outbox_seq_triggers ()
+  {
+    static const char *ddl = R"(
+      CREATE TRIGGER IF NOT EXISTS trg_jobs_seq_insert
+        AFTER INSERT ON jobs
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_jobs_seq_update
+        AFTER UPDATE OF phase, error, goal, user_id, adviser_id,
+                        deliverable_kind, updated_at ON jobs
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_tasks_seq_insert
+        AFTER INSERT ON tasks
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.job_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_tasks_seq_update
+        AFTER UPDATE ON tasks
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1
+          WHERE id IN (OLD.job_id, NEW.job_id);
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_tasks_seq_delete
+        AFTER DELETE ON tasks
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = OLD.job_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_forge_seq_insert
+        AFTER INSERT ON forge_pipeline_jobs
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.task_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_forge_seq_update
+        AFTER UPDATE OF status, attempt, max_attempts ON forge_pipeline_jobs
+      BEGIN
+        UPDATE jobs SET state_seq = state_seq + 1 WHERE id = NEW.task_id;
+      END;
+      CREATE INDEX IF NOT EXISTS idx_jobs_outbox_pending
+        ON jobs(id) WHERE state_seq > notified_seq;
+    )";
+    char *err = nullptr;
+    if (sqlite3_exec (db_, ddl, nullptr, nullptr, &err) != SQLITE_OK)
+    {
+      spdlog::error ("[database] outbox seq triggers: {}",
+                     err ? err : "unknown error");
+      sqlite3_free (err);
+      return false;
+    }
+    return true;
+  }
+
+  std::int64_t Database::job_state_seq (const std::string &job_id)
+  {
+    if (!db_)
+      return -1;
+    Stmt stmt (prepare ("SELECT state_seq FROM jobs WHERE id = ?"));
+    if (!stmt.s)
+      return -1;
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return -1;
+    return sqlite3_column_int64 (stmt, 0);
+  }
+
+  bool Database::mark_job_notified (const std::string &job_id,
+                                    std::int64_t state_seq)
+  {
+    if (!db_)
+      return false;
+    // MAX(): the watermark never moves backwards.
+    Stmt stmt (prepare ("UPDATE jobs SET notified_seq = MAX(notified_seq, ?) "
+                        "WHERE id = ?"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_int64 (stmt, 1, state_seq);
+    sqlite3_bind_text (stmt, 2, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] mark_job_notified: {}", sqlite3_errmsg (db_));
+      return false;
+    }
+    return true;
+  }
+
+  std::vector<std::string> Database::jobs_pending_notify ()
+  {
+    std::vector<std::string> out;
+    if (!db_)
+      return out;
+    Stmt stmt (prepare ("SELECT id FROM jobs WHERE state_seq > notified_seq "
+                        "ORDER BY updated_at, id"));
+    if (!stmt.s)
+      return out;
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const auto *t = sqlite3_column_text (stmt, 0);
+      if (t)
+        out.emplace_back (reinterpret_cast<const char *> (t));
+    }
+    return out;
   }
 
   bool Database::migrate_tasks_primary_key ()

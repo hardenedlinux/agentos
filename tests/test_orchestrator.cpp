@@ -351,6 +351,123 @@ TEST_F (OrchestratorTest, JobStatus_Ownership)
 }
 
 // ---------------------------------------------------------------------------
+// ADR-039 §H2a: outbox — write the full snapshot, then broadcast
+// ---------------------------------------------------------------------------
+
+namespace
+{
+  std::vector<fs::path> outbox_entries (const fs::path &events_dir)
+  {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    if (!fs::is_directory (events_dir, ec))
+      return out;
+    for (const auto &e : fs::directory_iterator (events_dir))
+      out.push_back (e.path ());
+    return out;
+  }
+
+  std::string slurp (const fs::path &p)
+  {
+    std::ifstream f (p);
+    return std::string (std::istreambuf_iterator<char> (f), {});
+  }
+} // namespace
+
+TEST_F (OrchestratorTest, Outbox_WritesFullSnapshotThenBroadcasts)
+{
+  const std::string key = insert_key ("operator");
+  const fs::path events_dir = home_ / "events";
+  fs::remove_all (events_dir);
+
+  Task task;
+  task.id = TaskId ("job-outbox");
+  task.goal = "g";
+  task.user_id = "alice";
+  db_->store_job (task);
+
+  send_inbound (R"({"jsonrpc":"2.0","id":"c1","method":"job.cancel","key":")"
+                + key + R"(","params":{"job_id":"job-outbox","user_id":"alice"}})");
+  ASSERT_TRUE (wait_gateway (2));
+
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    bool broadcast = false;
+    for (const auto &e : gateway_events_)
+      if (e.outbound.identity.empty ()
+          && e.outbound.message.find ("job.phase_changed") != std::string::npos)
+      {
+        broadcast = true;
+        EXPECT_EQ (e.outbound.message.find ("\"steps\""), std::string::npos)
+          << "live broadcast stays small";
+      }
+    EXPECT_TRUE (broadcast);
+  }
+
+  const auto entries = outbox_entries (events_dir);
+  ASSERT_EQ (entries.size (), 1u) << "exactly one complete file, no temp left";
+  const std::string name = entries[0].filename ().string ();
+  EXPECT_NE (name.front (), '.');
+  EXPECT_EQ (entries[0].extension (), ".json");
+  const std::string body = slurp (entries[0]);
+  EXPECT_NE (body.find ("\"job.phase_changed\""), std::string::npos) << body;
+  EXPECT_NE (body.find (R"("job_id":"job-outbox")"), std::string::npos);
+  EXPECT_NE (body.find (R"("user_id":"alice")"), std::string::npos);
+  EXPECT_NE (body.find (R"("phase":"cancelled")"), std::string::npos);
+  EXPECT_NE (body.find ("\"updated_at\""), std::string::npos);
+  EXPECT_NE (body.find ("\"steps\""), std::string::npos);
+
+  EXPECT_TRUE (db_->jobs_pending_notify ().empty ())
+    << "notified_seq catches up with state_seq after a successful write";
+}
+
+TEST_F (OrchestratorTest, Outbox_WriteFailure_NoBroadcast_ThenReemitted)
+{
+  const std::string key = insert_key ("operator");
+  const fs::path events_dir = home_ / "events";
+  fs::remove_all (events_dir);
+  { std::ofstream blocker (events_dir); } // a file where the dir should be
+
+  Task task;
+  task.id = TaskId ("job-outbox-fail");
+  task.goal = "g";
+  task.user_id = "0";
+  db_->store_job (task);
+
+  send_inbound (R"({"jsonrpc":"2.0","id":"c1","method":"job.cancel","key":")"
+                + key
+                + R"(","params":{"job_id":"job-outbox-fail","user_id":"0"}})");
+  ASSERT_TRUE (wait_gateway (1));
+  std::this_thread::sleep_for (std::chrono::milliseconds (100));
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    ASSERT_EQ (gateway_events_.size (), 1u) << "only the RPC reply";
+    EXPECT_NE (gateway_events_[0].outbound.message.find ("\"ok\":true"),
+               std::string::npos);
+    gateway_events_.clear ();
+  }
+  auto pending = db_->jobs_pending_notify ();
+  ASSERT_EQ (pending.size (), 1u) << "a failed write leaves the watermark behind";
+  EXPECT_EQ (pending[0], "job-outbox-fail");
+
+  // Filesystem recovers; the next heartbeat re-emits the current state.
+  fs::remove (events_dir);
+  OrchestratorEvent tick;
+  tick.kind = OrchestratorEvent::Kind::TimerFired;
+  tick.payload_json = R"({"kind":"outbox_reemit"})";
+  orch_->enqueue (std::move (tick));
+  ASSERT_TRUE (wait_gateway (1));
+
+  const auto entries = outbox_entries (events_dir);
+  ASSERT_EQ (entries.size (), 1u);
+  const std::string body = slurp (entries[0]);
+  EXPECT_NE (body.find (R"("job_id":"job-outbox-fail")"), std::string::npos);
+  EXPECT_NE (body.find (R"("phase":"cancelled")"), std::string::npos);
+  EXPECT_NE (body.find (R"("user_id":"0")"), std::string::npos);
+  EXPECT_TRUE (db_->jobs_pending_notify ().empty ());
+}
+
+// ---------------------------------------------------------------------------
 // job.submit: valid operator key → reply with job_id, forward to Master
 // ---------------------------------------------------------------------------
 

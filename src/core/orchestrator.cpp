@@ -49,6 +49,7 @@
 #include <regex>
 #include <string_view>
 #include <toml.hpp>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -580,6 +581,14 @@ namespace agentos
     if (auto res = user_manager_.register_user ("0"); !res)
       spdlog::warn ("[orchestrator] failed to seed default user: {}",
                     res.error ());
+
+    // ADR-039 §H2a: once at startup, re-emit every job whose newest state
+    // did not reach the outbox before the previous shutdown or crash.
+    // Queued so it runs on the actor thread, after crash recovery.
+    OrchestratorEvent reemit;
+    reemit.kind = OrchestratorEvent::Kind::TimerFired;
+    reemit.payload_json = R"({"kind":"outbox_reemit"})";
+    enqueue (std::move (reemit));
   }
 
   // ---------------------------------------------------------------------------
@@ -1541,9 +1550,8 @@ namespace agentos
 
     // Mark as cancelled — distinct terminal state, not failed.
     db_.update_job_phase (TaskId (job_id), "cancelled");
-    notify ("job.phase_changed",
-            R"({"job_id":")" + job_id + R"(","new_phase":"cancelled"})",
-            build_job_status_json (job_id));
+    notify_job ("job.phase_changed", job_id,
+                R"({"job_id":")" + job_id + R"(","new_phase":"cancelled"})");
     spdlog::info ("[orchestrator] job {} cancelled", job_id);
     reply_ok (identity, request_id, R"({"ok":true})");
   }
@@ -3994,9 +4002,8 @@ namespace agentos
       job.last_step_result = result_json;
       job.pending_steps.pop_front ();
 
-      notify ("job.step_changed",
-              R"({"job_id":")" + ev.job_id + R"(","status":"done"})",
-              build_job_status_json (ev.job_id));
+      notify_job ("job.step_changed", ev.job_id,
+                R"({"job_id":")" + ev.job_id + R"(","status":"done"})");
 
       dispatch_next_step (job);
       return;
@@ -5286,6 +5293,12 @@ namespace agentos
 
     const std::string kind = doc["kind"].GetString ();
 
+    if (kind == "outbox_reemit")
+    {
+      reemit_pending_outbox ();
+      return;
+    }
+
     if (kind == "scheduled_job_fire")
     {
       // Create a new oneshot job instance for the scheduled template.
@@ -5512,9 +5525,8 @@ namespace agentos
     job.last_step_result = result_json;
     job.pending_steps.pop_front ();
 
-    notify ("job.step_changed",
-            R"({"job_id":")" + job.job_id + R"(","status":"done"})",
-            build_job_status_json (job.job_id));
+    notify_job ("job.step_changed", job.job_id,
+                R"({"job_id":")" + job.job_id + R"(","status":"done"})");
 
     // Handles both "more steps remain" (dispatches the next one) and
     // "this was the last step" (job.pending_steps.empty() → finish_job)
@@ -6178,9 +6190,8 @@ namespace agentos
     job.current_run_id.clear ();
 
     // Notify Gateway.
-    notify ("job.step_changed",
-            R"({"job_id":")" + job_id + R"(","status":"done"})",
-            build_job_status_json (job_id));
+    notify_job ("job.step_changed", job_id,
+                R"({"job_id":")" + job_id + R"(","status":"done"})");
 
     dispatch_next_step (job);
   }
@@ -6245,10 +6256,9 @@ namespace agentos
 
     active_jobs_.erase (job_id);
 
-    notify ("job.phase_changed",
-            R"({"job_id":")" + job_id + R"(","new_phase":")"
-              + (success ? "done" : "failed") + R"("})",
-            build_job_status_json (job_id));
+    notify_job ("job.phase_changed", job_id,
+                R"({"job_id":")" + job_id + R"(","new_phase":")"
+              + (success ? "done" : "failed") + R"("})");
 
     spdlog::info ("[orchestrator] job {} {}", job_id,
                   success ? "done" : ("failed: " + error));
@@ -6282,78 +6292,160 @@ namespace agentos
     send_to_gateway_ (std::move (ev));
   }
 
-  void Orchestrator::notify (const std::string &method,
-                             const std::string &params_json,
-                             const std::string &outbox_params_json)
+  // ADR-039 §H2a: write one outbox event file durably.
+  //   1. write the body to events/.<name>.tmp and fsync it;
+  //   2. rename() to events/<name> and fsync the events/ directory.
+  // Returns false (after logging at error level) if any step fails; the
+  // temporary file is removed on a best-effort basis. Bridge never sees a
+  // partial file: it only lists names without the leading dot.
+  bool Orchestrator::write_outbox_file (const std::string &message)
   {
-    const std::string message = make_notification (method, params_json);
+    std::error_code ec;
+    const fs::path events_dir = agentos_home () / "events";
+    fs::create_directories (events_dir, ec);
+    if (ec)
+    {
+      spdlog::error ("[orchestrator] outbox: cannot create {}: {}",
+                     events_dir.string (), ec.message ());
+      return false;
+    }
+
+    const auto now_ms
+      = std::chrono::duration_cast<std::chrono::milliseconds> (
+          std::chrono::system_clock::now ().time_since_epoch ())
+          .count ();
+    const std::string name
+      = std::to_string (now_ms) + "_" + new_uuid () + ".json";
+    const fs::path tmp_path = events_dir / ("." + name + ".tmp");
+    const fs::path final_path = events_dir / name;
+
+    auto fail = [&] (const char *what)
+    {
+      spdlog::error ("[orchestrator] outbox: {} {}: {}", what,
+                     tmp_path.string (), std::strerror (errno));
+      std::error_code rm_ec;
+      fs::remove (tmp_path, rm_ec);
+      return false;
+    };
+
+    const int fd = ::open (tmp_path.c_str (),
+                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+      return fail ("cannot create");
+
+    const char *p = message.data ();
+    std::size_t left = message.size ();
+    while (left > 0)
+    {
+      const ssize_t n = ::write (fd, p, left);
+      if (n < 0)
+      {
+        if (errno == EINTR)
+          continue;
+        ::close (fd);
+        return fail ("cannot write");
+      }
+      p += n;
+      left -= static_cast<std::size_t> (n);
+    }
+    if (::fsync (fd) != 0)
+    {
+      ::close (fd);
+      return fail ("cannot fsync");
+    }
+    if (::close (fd) != 0)
+      return fail ("cannot close");
+
+    if (::rename (tmp_path.c_str (), final_path.c_str ()) != 0)
+      return fail ("cannot rename");
+
+    const int dfd = ::open (events_dir.c_str (), O_RDONLY | O_DIRECTORY
+                                                  | O_CLOEXEC);
+    if (dfd < 0 || ::fsync (dfd) != 0)
+    {
+      // The file is complete and visible, but its directory entry may not
+      // survive a power loss. Treat as a failure so the watermark stays
+      // behind and the state is re-emitted; a duplicate snapshot is
+      // harmless (at-least-once).
+      spdlog::error ("[orchestrator] outbox: cannot fsync {}: {}",
+                     events_dir.string (), std::strerror (errno));
+      if (dfd >= 0)
+        ::close (dfd);
+      return false;
+    }
+    ::close (dfd);
+    return true;
+  }
+
+  // ADR-039 §H2a: write, then broadcast. The outbox file carries the
+  // complete job.status shape for the job at this moment; the live
+  // broadcast stays small (job_id + the changed field) and only tells a
+  // connected Bridge to scan the outbox. The broadcast is sent only after
+  // the file exists in full, and only then is jobs.notified_seq advanced.
+  // On failure nothing is broadcast and the watermark stays behind, so
+  // reemit_pending_outbox() (heartbeat, startup) writes the job's current
+  // state later. There is no RPC caller to report to: the state change was
+  // internal, and the job row stays the source of truth.
+  bool Orchestrator::notify_job (const std::string &method,
+                                 const std::string &job_id,
+                                 const std::string &params_json)
+  {
+    const std::int64_t seq = db_.job_state_seq (job_id);
+    const std::string status_json = build_job_status_json (job_id);
+    if (seq < 0 || status_json.empty ())
+    {
+      spdlog::error ("[orchestrator] outbox: job {} not found, {} not sent",
+                     job_id, method);
+      return false;
+    }
+
+    if (!write_outbox_file (make_notification (method, status_json)))
+    {
+      spdlog::error ("[orchestrator] outbox: {} for job {} (state_seq {}) "
+                     "not written; will re-emit",
+                     method, job_id, seq);
+      return false;
+    }
+
+    if (!db_.mark_job_notified (job_id, seq))
+      spdlog::error ("[orchestrator] outbox: job {} notified_seq not "
+                     "advanced; a duplicate snapshot will be re-emitted",
+                     job_id);
 
     GatewayEvent ev;
     ev.kind = GatewayEvent::Kind::Outbound;
     ev.outbound.identity = ""; // broadcast
-    ev.outbound.message = message;
+    ev.outbound.message = make_notification (method, params_json);
     send_to_gateway_ (std::move (ev));
+    return true;
+  }
 
-    // Amendment (Bridge event mailbox): persist a notification as a
-    // JSON file under agentos_home()/events/. This is a true mailbox,
-    // not durable storage -- low frequency (job.phase_changed/
-    // job.step_changed only), read-then-deleted by a single Bridge
-    // consumer, never read back by AgentOS itself. It exists so a
-    // Bridge that wasn't connected at the exact moment of the live
-    // broadcast above (or missed it to a network blip) can still catch
-    // up by draining this directory -- triggered by any live
-    // notification it DID receive (as a "go check outbox now" signal,
-    // not by parsing content out of the broadcast itself), or by a
-    // periodic timer as a safety net against a silently-lost broadcast.
-    //
-    // Deliberately NOT the same content as the live broadcast above.
-    // The broadcast stays small (job_id + one changed field) so it's
-    // cheap to fan out to every connected client; the outbox copy
-    // carries the full job.status shape instead (callers pass
-    // build_job_status_json's output as outbox_params_json), so a
-    // Bridge that receives the small broadcast trigger, then reads
-    // this file, gets a complete, directly-usable snapshot -- no
-    // separate job.status RPC round trip needed to fill in the fields
-    // the broadcast didn't carry. Falls back to params_json (old
-    // single-payload behavior) if the caller didn't supply a richer
-    // outbox_params_json.
-    //
-    // Filename is <epoch_ms>_<uuid>.json -- the millisecond prefix
-    // keeps a plain lexicographic directory listing in chronological
-    // order, which matters for a consumer replaying job.phase_changed/
-    // job.step_changed for the same job in the order they actually
-    // happened.
+  // ADR-039 §H2a recovery: for every job with state_seq > notified_seq,
+  // write one event carrying its current full job.status shape. Runs on
+  // every heartbeat and once at startup. The event uses job.phase_changed
+  // with the job's current phase; it is a full-state snapshot, so a
+  // re-delivered state is applied idempotently by the reader.
+  void Orchestrator::reemit_pending_outbox ()
+  {
+    for (const auto &job_id : db_.jobs_pending_notify ())
     {
-      const std::string outbox_payload_json
-        = outbox_params_json.empty () ? params_json : outbox_params_json;
-      const std::string outbox_message
-        = make_notification (method, outbox_payload_json);
-
-      std::error_code ec;
-      const fs::path events_dir = agentos_home () / "events";
-      fs::create_directories (events_dir, ec);
-      if (ec)
+      auto job = db_.load_job (job_id);
+      if (!job)
+        continue;
+      std::string params;
       {
-        spdlog::warn ("[orchestrator] cannot create events dir {}: {}",
-                      events_dir.string (), ec.message ());
-        return;
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        w.StartObject ();
+        w.Key ("job_id");
+        w.String (job_id.c_str ());
+        w.Key ("new_phase");
+        w.String (job->phase.c_str ());
+        w.EndObject ();
+        params = buf.GetString ();
       }
-
-      const auto now_ms
-        = std::chrono::duration_cast<std::chrono::milliseconds> (
-            std::chrono::system_clock::now ().time_since_epoch ())
-            .count ();
-      const fs::path event_path
-        = events_dir / (std::to_string (now_ms) + "_" + new_uuid () + ".json");
-
-      std::ofstream f (event_path, std::ios::trunc);
-      if (!f)
-      {
-        spdlog::warn ("[orchestrator] cannot write event file {}",
-                      event_path.string ());
-        return;
-      }
-      f << outbox_message;
+      if (!notify_job ("job.phase_changed", job_id, params))
+        break; // outbox unwritable; retry on the next heartbeat
     }
   }
 

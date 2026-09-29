@@ -77,7 +77,7 @@ TEST_F(ConfigTest, MissingFileReturnsDefaults) {
     EXPECT_EQ(cfg->llm.base_url, "https://api.anthropic.com");
     EXPECT_EQ(cfg->llm.model, "claude-opus-4-5");
     EXPECT_EQ(cfg->llm.max_tokens, 1024);
-    EXPECT_EQ(cfg->llm.timeout_s, 120);
+    EXPECT_EQ(cfg->llm.timeout_s, 3600);
     EXPECT_EQ(cfg->forge.max_attempts, 3);
     EXPECT_EQ(cfg->forge.promotion_threshold, 5);
     EXPECT_EQ(cfg->sandbox.memory_mb, 256);

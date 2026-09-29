@@ -6920,9 +6920,17 @@ namespace agentos
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    auto res = cred_vault_.grant (
-      params["worker_id"].GetString (), params["provider"].GetString (),
-      "admin"); // granted_by: use actual key id in production
+    // ADR-028 audit trail: record the id of the access key that made this
+    // grant (set by handle_gateway_inbound for the request being served),
+    // not a fixed role label. Never empty for a Gateway request.
+    if (current_caller_key_id_.empty ())
+    {
+      reply_error (identity, request_id, -32010, "Failed to authorize");
+      return;
+    }
+    auto res = cred_vault_.grant (params["worker_id"].GetString (),
+                                  params["provider"].GetString (),
+                                  current_caller_key_id_);
     if (!res)
     {
       reply_error (identity, request_id, -32030, res.error ());

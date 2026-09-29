@@ -816,6 +816,24 @@ TEST_F (OrchestratorTest, Register_ReviewerDeclaration)
   EXPECT_FALSE (db_->agent_is_reviewer ("ra"));
 }
 
+// ADR-028: a credential grant records the access key that made it.
+TEST_F (OrchestratorTest, CredGrant_RecordsCallerKeyId)
+{
+  const std::string key = insert_key ("admin");
+  send_inbound (R"({"jsonrpc":"2.0","id":"g1","method":"cred.grant","key":")"
+                + key + R"(","params":{"worker_id":"w1","provider":"p1"}})");
+  ASSERT_TRUE (wait_gateway (1));
+  {
+    std::lock_guard<std::mutex> lk (mtx_);
+    ASSERT_NE (gateway_events_[0].outbound.message.find ("grant_id"),
+               std::string::npos)
+      << gateway_events_[0].outbound.message;
+  }
+  auto g = db_->load_credential_grant ("w1", "p1");
+  ASSERT_TRUE (g);
+  EXPECT_EQ (g->granted_by, "key-admin");
+}
+
 // ---------------------------------------------------------------------------
 // ADR-031 §13.3: Plan-ingestion validation of step ids and references
 // ---------------------------------------------------------------------------

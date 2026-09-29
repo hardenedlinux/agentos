@@ -424,10 +424,16 @@ namespace agentos
     // for the remainder of the function. Constructs a fresh SSLClient per
     // call, matching the previous per-attempt construction -- shared now
     // by both the outer attempt loop and retry_deepseek_429's inner loop.
+    constexpr int kConnectTimeoutS = 15;
     auto send_once = [&] () -> httplib::Result {
       httplib::SSLClient cli (host, 443);
       cli.set_ca_cert_path (ca_path);
-      cli.set_connection_timeout (timeout_s, 0);
+      // Connect and read are bounded separately: timeout_s is sized for
+      // how long the provider may take to generate a long completion
+      // (default 3600s), which is far too long to wait on a host that is
+      // simply unreachable. A failed connect is retried (never reached
+      // the provider); a read timeout is not (see perform_call).
+      cli.set_connection_timeout (kConnectTimeoutS, 0);
       cli.set_read_timeout (timeout_s, 0);
       return cli.Post (path, headers, body, "application/json");
     };

@@ -13,7 +13,7 @@ struct Config {
         std::string base_url   = "https://api.anthropic.com";
         std::string model      = "claude-opus-4-5";
         int         max_tokens = 1024;
-        int         timeout_s  = 120;
+        int         timeout_s  = 3600; // read timeout; long completions routinely exceed 10 min
         std::string api_key;   // from env, not TOML
         int         max_concurrent = 0;   // 0 = auto (kDefaultLlmConcurrency, see llm_proxy.h);
                                           // pool threads block on network I/O, not CPU, so

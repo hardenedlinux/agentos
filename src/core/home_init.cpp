@@ -122,7 +122,7 @@ Forge generates Workers, never Advisers — a target_type:adviser step must neve
 # base_url    = ""
 # api_key_env = ""
 # max_tokens  = 4096
-# timeout_s   = 180
+# timeout_s   = 3600
 )";
 
     // -------- Code‑writer adviser --------
@@ -246,7 +246,7 @@ The implementation IS the worker code. run() executes it and returns results.
 # base_url    = ""
 # api_key_env = ""
 # max_tokens  = 4096
-# timeout_s   = 180
+# timeout_s   = 3600
 )";
 
     // -------- Code‑reviewer adviser --------
@@ -350,7 +350,7 @@ Those are handled by worker.py. Code without those is CORRECT.
 # base_url    = ""
 # api_key_env = ""
 # max_tokens  = 4096
-# timeout_s   = 180
+# timeout_s   = 3600
 )";
 
     // -------- Worker runtime template (ADR-031 two-file structure) --------
@@ -532,7 +532,7 @@ if __name__ == "__main__":
         out << "api_key = \"\"\n";
         out << "model = \"claude-opus-4-5\"\n";
         out << "max_tokens = 1024\n";
-        out << "timeout_s = 120\n";
+        out << "timeout_s = 3600\n";
         out << "# 0 = auto (a fixed default sized for network I/O concurrency,\n";
         out << "# not the host's core count). Set explicitly to match your\n";
         out << "# LLM provider's account-level concurrent-request ceiling.\n";

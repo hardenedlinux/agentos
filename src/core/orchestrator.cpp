@@ -5222,6 +5222,39 @@ namespace agentos
         }
       }
 
+      // ADR-031 §13.3: step ids and reference tokens are validated before
+      // anything is persisted or dispatched; a violation rejects the whole
+      // Plan with the same handling as the guards above.
+      if (doc.HasMember ("steps") && doc["steps"].IsArray ())
+      {
+        const std::string ref_error
+          = validate_plan_references (doc["steps"], job_id, job.user_id);
+        if (!ref_error.empty ())
+        {
+          const std::string author = originating_adviser_id.empty ()
+                                       ? "(unknown)"
+                                       : originating_adviser_id;
+          spdlog::error ("[orchestrator] job {} rejected: Plan from adviser "
+                         "{} is invalid: {} — entire Plan rejected, not "
+                         "dispatched",
+                         job_id, author, ref_error);
+          if (should_retry_plan_rejection (job_id, author,
+                                           "invalid Plan: " + ref_error)
+              && !originating_adviser_id.empty ())
+          {
+            OrchestratorEvent retry_ev;
+            retry_ev.kind = OrchestratorEvent::Kind::MasterDecision;
+            retry_ev.job_id = job_id;
+            retry_ev.payload_json = build_spawn_adviser_payload (
+              job_id, originating_adviser_id, originating_goal);
+            enqueue (std::move (retry_ev));
+            return;
+          }
+          finish_job (job_id, false, "invalid Plan: " + ref_error);
+          return;
+        }
+      }
+
       // Both rejection guards passed (or never applied) — this job's Plan
       // is clean. Drop any retry-count entry now; leaving it would grow
       // g_plan_rejection_retry_count unboundedly over the daemon's
@@ -5534,6 +5567,80 @@ namespace agentos
   // Pipeline execution
   // ---------------------------------------------------------------------------
 
+  // ADR-031 §13.1–§13.3: static validation of a Plan's step ids and the
+  // reference tokens in its step inputs. Returns an empty string when the
+  // Plan is valid, else a description of the first violation.
+  std::string Orchestrator::validate_plan_references (
+    const rapidjson::Value &steps, const std::string &job_id,
+    const std::string &user_id)
+  {
+    static const std::regex id_re ("^[A-Za-z0-9_-]{1,64}$");
+    static const std::regex field_re ("^[A-Za-z0-9_-]+$");
+
+    std::unordered_set<std::string> earlier;
+    std::optional<std::vector<Database::JobAssetRow>> job_assets;
+    int index = 0;
+    for (const auto &s : steps.GetArray ())
+    {
+      const std::string where = "step #" + std::to_string (index++);
+      if (!s.IsObject () || !s.HasMember ("id") || !s["id"].IsString ())
+        return where + " has no id";
+      const std::string id = s["id"].GetString ();
+      if (!std::regex_match (id, id_re))
+        return where + " id '" + id + "' does not match [A-Za-z0-9_-]{1,64}";
+      if (earlier.count (id))
+        return "duplicate step id '" + id + "'";
+
+      if (s.HasMember ("input") && s["input"].IsObject ())
+      {
+        for (auto it = s["input"].MemberBegin (); it != s["input"].MemberEnd ();
+             ++it)
+        {
+          if (!it->value.IsString ())
+            continue;
+          const std::string v = it->value.GetString ();
+          const std::string ctx
+            = "step '" + id + "' input '" + it->name.GetString () + "'";
+
+          if (v.rfind ("$step:", 0) == 0)
+          {
+            const std::string rest = v.substr (6);
+            const auto dot = rest.find ('.');
+            const std::string ref
+              = dot == std::string::npos ? rest : rest.substr (0, dot);
+            if (!earlier.count (ref))
+              return ctx + ": " + v + " does not name an earlier step";
+            if (dot != std::string::npos)
+            {
+              const std::string field = rest.substr (dot + 1);
+              if (field.find ('.') != std::string::npos)
+                return ctx + ": " + v
+                       + " uses a nested path; only one top-level field is "
+                         "supported";
+              if (!std::regex_match (field, field_re))
+                return ctx + ": " + v + " has an invalid field name";
+            }
+          }
+          else if (v.rfind ("$asset:", 0) == 0)
+          {
+            const std::string asset_id = v.substr (7);
+            if (!job_assets)
+              job_assets = db_.load_job_assets (job_id);
+            const bool attached
+              = std::any_of (job_assets->begin (), job_assets->end (),
+                             [&] (const Database::JobAssetRow &r)
+                             { return r.asset_id == asset_id; });
+            auto asset = attached ? db_.load_asset (asset_id) : std::nullopt;
+            if (!attached || !asset || asset->user_id != user_id)
+              return ctx + ": " + v + " is not an asset attached to this job";
+          }
+        }
+      }
+      earlier.insert (id);
+    }
+    return {};
+  }
+
   // ADR-031 §10: resolve $prev_result and $step:<id>.<field> reference
   // tokens in a step's params against persisted step results. $prev_result
   // is a shorthand for "the immediately preceding step's whole result" —
@@ -5545,9 +5652,11 @@ namespace agentos
   std::unordered_map<std::string, std::string>
   Orchestrator::resolve_step_references (
     const std::unordered_map<std::string, std::string> &params,
-    const std::string &prev_result, const std::string &job_id)
+    const std::string &prev_result, const std::string &job_id,
+    std::string &unresolved)
   {
     std::unordered_map<std::string, std::string> resolved;
+    unresolved.clear ();
     resolved.reserve (params.size ());
 
     for (const auto &[key, value] : params)
@@ -5590,11 +5699,9 @@ namespace agentos
                                 { return r.asset_id == asset_id; });
         if (it == job_assets.end ())
         {
-          spdlog::warn ("[orchestrator] $asset reference '{}' not found "
-                       "among job {}'s attached assets",
-                       value, job_id);
-          resolved[key] = "\"\"";
-          continue;
+          // ADR-031 §13.4: never substitute a placeholder.
+          unresolved = value + " (not an asset attached to this job)";
+          return {};
         }
         const std::string path
           = (agentos_home () / "jobs" / job_id / "assets" / it->filename)
@@ -5625,11 +5732,9 @@ namespace agentos
           = db_.load_step_result (job_id, ref_step_id);
         if (ref_result.empty ())
         {
-          spdlog::warn ("[orchestrator] $step reference '{}' resolved to "
-                       "empty (step {} has no persisted result)",
-                       value, ref_step_id);
-          resolved[key] = "{}";
-          continue;
+          unresolved = value + " (step " + ref_step_id
+                       + " has no persisted result)";
+          return {};
         }
 
         if (field.empty ())
@@ -5642,11 +5747,9 @@ namespace agentos
         if (doc.Parse (ref_result.c_str ()).HasParseError () || !doc.IsObject ()
             || !doc.HasMember (field.c_str ()))
         {
-          spdlog::warn ("[orchestrator] $step reference '{}': field '{}' "
-                       "not found in step {}'s result",
-                       value, field, ref_step_id);
-          resolved[key] = "{}";
-          continue;
+          unresolved = value + " (field '" + field + "' not in step "
+                       + ref_step_id + "'s result)";
+          return {};
         }
 
         rapidjson::StringBuffer buf;
@@ -5981,8 +6084,14 @@ namespace agentos
       // per-step `input` (e.g. input_path/format for extract_segments) was
       // never forwarded into task_json at all, only the fixed
       // job_id/step_id/command/description/$prev_result fields were.
+      std::string unresolved;
       auto resolved_params = resolve_step_references (
-        step.step.params, job.last_step_result, job.job_id);
+        step.step.params, job.last_step_result, job.job_id, unresolved);
+      if (!unresolved.empty ())
+      {
+        fail_step_unresolved_reference (job, unresolved);
+        return;
+      }
 
       rapidjson::StringBuffer tbuf;
       rapidjson::Writer<rapidjson::StringBuffer> tw (tbuf);
@@ -6191,9 +6300,15 @@ namespace agentos
 
     // ADR-031 §10: resolve $prev_result / $step:<id>.<field> before
     // building the prompt.
+    std::string unresolved;
     auto resolved_params
       = resolve_step_references (step.step.params, job.last_step_result,
-                                 job.job_id);
+                                 job.job_id, unresolved);
+    if (!unresolved.empty ())
+    {
+      fail_step_unresolved_reference (job, unresolved);
+      return;
+    }
 
     spdlog::info ("[orchestrator] dispatching adviser-target step {} → "
                  "adviser {} for job {}",
@@ -6481,6 +6596,22 @@ namespace agentos
                "step " + step.step.id + " (" + step.step.command
                  + ") failed after " + std::to_string (step.attempts)
                  + " attempt(s)");
+  }
+
+  // ADR-031 §13.4: an unresolvable reference fails the referencing step
+  // and the job. Terminal: the referenced result will not change on retry.
+  void Orchestrator::fail_step_unresolved_reference (
+    ActiveJob &job, const std::string &unresolved)
+  {
+    if (job.pending_steps.empty ())
+      return;
+    const std::string job_id = job.job_id;
+    const std::string step_id = job.pending_steps.front ().step.id;
+    const std::string reason = "unresolved reference " + unresolved;
+    spdlog::error ("[orchestrator] job {} step {}: {}", job_id, step_id,
+                   reason);
+    db_.update_step_status (job_id, step_id, db::step_status::failed, reason);
+    finish_job (job_id, false, "step " + step_id + ": " + reason);
   }
 
   void Orchestrator::reject_step_by_review (ActiveJob &job,

@@ -817,6 +817,170 @@ TEST_F (OrchestratorTest, Register_ReviewerDeclaration)
 }
 
 // ---------------------------------------------------------------------------
+// ADR-031 §13.3: Plan-ingestion validation of step ids and references
+// ---------------------------------------------------------------------------
+
+TEST_F (OrchestratorTest, PlanReady_InvalidReferences_RejectPlan)
+{
+  struct Case
+  {
+    const char *name;
+    const char *steps;
+    const char *expect;
+  };
+  const Case cases[] = {
+    {"nested", R"([{"id":"a","target_type":"worker","command":"x.y","description":"d"},)"
+               R"({"id":"b","target_type":"worker","command":"x.y","description":"d",)"
+               R"("input":{"v":"$step:a.f.g"}}])",
+     "nested path"},
+    {"forward", R"([{"id":"a","target_type":"worker","command":"x.y","description":"d",)"
+                R"("input":{"v":"$step:b.f"}},)"
+                R"({"id":"b","target_type":"worker","command":"x.y","description":"d"}])",
+     "does not name an earlier step"},
+    {"self", R"([{"id":"a","target_type":"worker","command":"x.y","description":"d",)"
+             R"("input":{"v":"$step:a"}}])",
+     "does not name an earlier step"},
+    {"dup", R"([{"id":"a","target_type":"worker","command":"x.y","description":"d"},)"
+            R"({"id":"a","target_type":"worker","command":"x.y","description":"d"}])",
+     "duplicate step id"},
+    {"badid", R"([{"id":"a.b","target_type":"worker","command":"x.y","description":"d"}])",
+     "does not match"},
+    {"noid", R"([{"target_type":"worker","command":"x.y","description":"d"}])",
+     "has no id"},
+    {"asset", R"([{"id":"a","target_type":"worker","command":"x.y","description":"d",)"
+              R"("input":{"f":"$asset:not-mine"}}])",
+     "not an asset attached"},
+  };
+
+  for (const auto &c : cases)
+  {
+    const std::string job_id = std::string ("job-ref-") + c.name;
+    Task task;
+    task.id = TaskId (job_id);
+    task.goal = "g";
+    task.user_id = "0";
+    db_->store_job (task);
+
+    OrchestratorEvent ev;
+    ev.kind = OrchestratorEvent::Kind::MasterDecision;
+    ev.job_id = job_id;
+    ev.payload_json = R"({"type":"plan_ready","job_id":")" + job_id
+                      + R"(","job_type":"oneshot","steps":)" + c.steps + "}";
+    orch_->enqueue (std::move (ev));
+
+    std::optional<Job> j;
+    for (int i = 0; i < 80; ++i)
+    {
+      std::this_thread::sleep_for (std::chrono::milliseconds (10));
+      j = db_->load_job (job_id);
+      if (j && j->phase == "failed")
+        break;
+    }
+    ASSERT_TRUE (j) << c.name;
+    EXPECT_EQ (j->phase, "failed") << c.name;
+    ASSERT_TRUE (j->error) << c.name;
+    EXPECT_NE (j->error->find ("invalid Plan"), std::string::npos)
+      << c.name << ": " << *j->error;
+    EXPECT_NE (j->error->find (c.expect), std::string::npos)
+      << c.name << ": " << *j->error;
+    EXPECT_TRUE (db_->load_steps_for_job (job_id).empty ())
+      << c.name << ": a rejected Plan persists no steps";
+  }
+}
+
+// ADR-031 §13.4: a validated reference that cannot be resolved at run time
+// fails the referencing step and the job; no placeholder is substituted.
+TEST_F (OrchestratorTest, UnresolvedStepField_FailsStepTerminally)
+{
+  const fs::path worker_dir = home_ / "workers" / "ref-w";
+  fs::create_directories (worker_dir);
+  const fs::path script = worker_dir / "worker.sh";
+  std::ofstream (script) << "#!/bin/sh\nexit 0\n";
+  fs::permissions (script, fs::perms::owner_all);
+  db_->insert_agent ("ref-w", "worker", script.string (), "{}");
+  db_->insert_capability ("ref-w", "ref.run", "d", "{}");
+
+  orch_->stop ();
+  registry_ = std::make_unique<Registry> ();
+  registry_->init (*db_);
+  orch_ = std::make_unique<Orchestrator> (
+    *db_, *llm_, *registry_, dispatcher_, *forge_, config_, *cred_vault_,
+    [this] (MasterEvent ev)
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      master_events_.push_back (std::move (ev));
+      cv_.notify_all ();
+    },
+    [this] (GatewayEvent ev)
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.push_back (std::move (ev));
+      cv_.notify_all ();
+    });
+  orch_->init ();
+  orch_->start ();
+
+  const std::string job_id = "job-unresolved";
+  Task task;
+  task.id = TaskId (job_id);
+  task.goal = "g";
+  task.user_id = "0";
+  db_->store_job (task);
+
+  OrchestratorEvent ev;
+  ev.kind = OrchestratorEvent::Kind::MasterDecision;
+  ev.job_id = job_id;
+  ev.payload_json
+    = R"({"type":"plan_ready","job_id":")" + job_id
+      + R"(","job_type":"oneshot","steps":[)"
+        R"({"id":"s0","target_type":"worker","command":"ref.run","description":"d"},)"
+        R"({"id":"s1","target_type":"worker","command":"ref.run","description":"d",)"
+        R"("input":{"v":"$step:s0.missing"}}]})";
+  orch_->enqueue (std::move (ev));
+
+  bool running = false;
+  for (int i = 0; i < 80 && !running; ++i)
+  {
+    std::this_thread::sleep_for (std::chrono::milliseconds (25));
+    for (const auto &st : db_->load_steps_for_job (job_id))
+      running = running || (st.id == "s0" && st.status == "running");
+  }
+  ASSERT_TRUE (running);
+
+  const fs::path run_dir = home_ / "fake-run-unresolved";
+  fs::create_directories (run_dir);
+  std::ofstream (run_dir / "result.json") << R"({"status":"ok","result":{"a":1}})";
+  OrchestratorEvent done;
+  done.kind = OrchestratorEvent::Kind::WorkerDone;
+  done.job_id = job_id;
+  done.payload_json = R"({"run_id":"fake","exit_code":0,"run_dir":")"
+                      + run_dir.string () + R"("})";
+  orch_->enqueue (std::move (done));
+
+  std::optional<Job> j;
+  for (int i = 0; i < 80; ++i)
+  {
+    std::this_thread::sleep_for (std::chrono::milliseconds (25));
+    j = db_->load_job (job_id);
+    if (j && j->phase == "failed")
+      break;
+  }
+  ASSERT_TRUE (j);
+  EXPECT_EQ (j->phase, "failed");
+  ASSERT_TRUE (j->error);
+  EXPECT_NE (j->error->find ("unresolved reference $step:s0.missing"),
+             std::string::npos)
+    << *j->error;
+  for (const auto &st : db_->load_steps_for_job (job_id))
+  {
+    if (st.id == "s0")
+      EXPECT_EQ (st.status, "done");
+    if (st.id == "s1")
+      EXPECT_EQ (st.status, "failed");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ADR-031 §14 / ADR-016: reviewer Workers
 // ---------------------------------------------------------------------------
 

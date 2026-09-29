@@ -33,6 +33,8 @@
 #include "agentos/types.h"
 #include "agentos/user_manager.h"
 
+#include <rapidjson/document.h>
+
 #include <deque>
 #include <functional>
 #include <string>
@@ -406,10 +408,20 @@ namespace agentos
     // and this job's attached assets (db_.load_job_assets). Returns a new
     // map with references replaced by the referenced content; non-reference
     // values pass through unchanged.
+    // ADR-031 §13.4: if a reference cannot be resolved, `unresolved` names
+    // it and the returned map is empty; no placeholder is substituted.
     std::unordered_map<std::string, std::string>
     resolve_step_references (const std::unordered_map<std::string, std::string> &params,
                              const std::string &prev_result,
-                             const std::string &job_id);
+                             const std::string &job_id,
+                             std::string &unresolved);
+    void fail_step_unresolved_reference (ActiveJob &job,
+                                         const std::string &unresolved);
+    // ADR-031 §13.1–§13.3: Plan-ingestion validation of step ids and
+    // reference tokens. Empty string when valid.
+    std::string validate_plan_references (const rapidjson::Value &steps,
+                                          const std::string &job_id,
+                                          const std::string &user_id);
 
     // Called on WorkerDone: read result, store in DB, advance pipeline.
     void on_step_complete (const std::string &job_id, const std::string &run_id,

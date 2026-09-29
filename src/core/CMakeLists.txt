@@ -28,6 +28,7 @@ target_include_directories(agentos_core SYSTEM PUBLIC
   ${HTTPLIB_INC}
   ${CMAKE_SOURCE_DIR}/deps-src/httplib-src
   ${CPPZMQ_INC}
+  ${ZMQ_INC}            # cppzmq's zmq.hpp includes <zmq.h>; gateway.h is public
   ${TOMLPLUSPLUS_INC}
   ${SECCOMP_INCLUDE_DIR}
   ${CAP_INCLUDE_DIR}

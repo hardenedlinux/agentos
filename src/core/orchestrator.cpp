@@ -5494,6 +5494,12 @@ namespace agentos
       tw.String (step.step.command.c_str ());
       tw.Key ("description");
       tw.String (step.step.description.c_str ());
+      // ADR-029/ADR-040: the tenant identity a Worker sees is the job
+      // owner's, taken from the job record -- never from the Plan. The
+      // Plan is LLM output; a Plan-supplied user_id (observed in practice:
+      // invented strings, integer 0) is dropped in the merge loop below.
+      tw.Key ("user_id");
+      tw.String (job.user_id.c_str ());
       // Inject previous step result as $prev_result (empty object if first
       // step) — kept as its own always-present key for backward
       // compatibility with Worker scripts that look for it directly,
@@ -5513,6 +5519,18 @@ namespace agentos
       // task object, not nested under a "params" sub-object.
       for (const auto &[k, v] : resolved_params)
       {
+        // Keys written above from daemon-owned state. Letting a Plan param
+        // of the same name through would emit a duplicate key, and most
+        // JSON parsers (Python's json included) keep the last one -- i.e.
+        // the Plan's value would silently win.
+        if (k == "job_id" || k == "step_id" || k == "command"
+            || k == "description" || k == "user_id" || k == "$prev_result")
+        {
+          spdlog::warn ("[orchestrator] step {} param '{}' is reserved; "
+                        "ignoring the Plan-supplied value",
+                        step.step.id, k);
+          continue;
+        }
         tw.Key (k.c_str ());
         rapidjson::Document probe;
         if (!probe.Parse (v.c_str ()).HasParseError ()

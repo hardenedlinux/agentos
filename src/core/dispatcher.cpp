@@ -36,6 +36,20 @@ namespace agentos
     return agentos_home () / "layers" / "runs" / run_id;
   }
 
+  // Emit a run's output.log at warn level. Used for every failed run, not
+  // only non-zero exits: a Worker that exits 0 but reports status=error (or
+  // violates the result.json contract) usually left its traceback on stderr,
+  // and without this it is visible only by opening the file by hand.
+  static void warn_output_log (const std::string &run_id,
+                               const fs::path &log_path)
+  {
+    std::ifstream lf (log_path);
+    std::ostringstream ss;
+    ss << lf.rdbuf ();
+    spdlog::warn ("[dispatcher] run_id={} output.log:\n{}", run_id,
+                  ss.str ());
+  }
+
   fs::path Dispatcher::log_file (const std::string &run_id)
   {
     return agentos_home () / "logs" / "runs" / run_id / "output.log";
@@ -111,13 +125,7 @@ namespace agentos
       }
 
       if (exit_code != 0)
-      {
-        std::ifstream lf (log_file (entry.run_id));
-        std::ostringstream ss;
-        ss << lf.rdbuf ();
-        spdlog::warn ("[dispatcher] run_id={} output.log:\n{}", entry.run_id,
-                      ss.str ());
-      }
+        warn_output_log (entry.run_id, log_file (entry.run_id));
 
       if (cb)
         cb (WorkerExited{entry.job_id, entry.run_id, entry.step_id, exit_code,
@@ -331,6 +339,7 @@ namespace agentos
     {
       const std::string err = "result.json not found: " + result_path.string ();
       spdlog::warn ("[dispatcher] run_id={} {}", run_id, err);
+      warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
     }
 
@@ -340,6 +349,7 @@ namespace agentos
       const std::string err
         = "cannot open result.json: " + result_path.string ();
       spdlog::error ("[dispatcher] run_id={} {}", run_id, err);
+      warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
     }
 
@@ -355,6 +365,7 @@ namespace agentos
                               "envelope: "
                               + result_path.string ();
       spdlog::error ("[dispatcher] run_id={} {}", run_id, err);
+      warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
     }
 
@@ -367,6 +378,7 @@ namespace agentos
         err = doc["error"].GetString ();
       spdlog::warn ("[dispatcher] run_id={} worker-reported error: {}", run_id,
                     err);
+      warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
     }
 
@@ -374,6 +386,7 @@ namespace agentos
     {
       const std::string err = "result.json has unknown status: " + status;
       spdlog::error ("[dispatcher] run_id={} {}", run_id, err);
+      warn_output_log (run_id, log_file (run_id));
       return {false, exit_code, {}, err};
     }
 

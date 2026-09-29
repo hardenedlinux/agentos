@@ -6,7 +6,10 @@ add_library(agentos_core STATIC ${AGENTOS_CORE_SOURCES})
 
 add_library(sqlite3 STATIC ${SQLITE3_SRC_DIR}/sqlite3.c)
 
-target_include_directories(sqlite3 SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
+# PUBLIC: agentos/database.h (a public header) includes <sqlite3.h>, so every
+# consumer of agentos_core needs the amalgamation header -- never the system
+# one, which may be missing or a different version than the code we link.
+target_include_directories(sqlite3 SYSTEM PUBLIC ${SQLITE3_SRC_DIR})
 
 target_compile_definitions(sqlite3 PRIVATE
   SQLITE_OMIT_LOAD_EXTENSION
@@ -31,8 +34,6 @@ target_include_directories(agentos_core SYSTEM PUBLIC
   ${OPENSSL_STATIC_INC}
   ${LIBTPMS_INC}
 )
-
-target_include_directories(agentos_core SYSTEM PRIVATE ${SQLITE3_SRC_DIR})
 
 target_compile_definitions(agentos_core PRIVATE
   SQLITE_ENABLE_JSON1
@@ -80,7 +81,7 @@ add_dependencies(
   openssl_ext
   libtpms_ext)
 
-target_link_libraries(agentos_core PRIVATE sqlite3)
+target_link_libraries(agentos_core PUBLIC sqlite3)
 
 if(AGENTOS_COVERAGE)
   target_compile_options(agentos_core PRIVATE --coverage -fprofile-arcs -ftest-coverage)

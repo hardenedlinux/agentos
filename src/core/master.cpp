@@ -106,6 +106,7 @@ namespace agentos
   void Master::handle_job_submit (MasterEvent msg)
   {
     const std::string job_id = msg.job_id;
+    const std::string user_id = msg.user_id; // ADR-040
 
     // Parse goal (and, if present, a known_adviser_id already resolved by
     // Orchestrator via explicit adviser_id or continuation lookup — see
@@ -148,9 +149,10 @@ namespace agentos
     // unit — there is exactly one thread, one LLM round-trip, regardless
     // of which branch is taken internally.
     std::thread (
-      [this, job_id, goal, known_adviser_id] ()
+      [this, job_id, user_id, goal, known_adviser_id] ()
       {
-        SelectionResult sel = select_adviser (job_id, goal, known_adviser_id);
+        SelectionResult sel
+          = select_adviser (job_id, user_id, goal, known_adviser_id);
 
         // Build internal result payload.
         rapidjson::StringBuffer buf;
@@ -361,9 +363,9 @@ namespace agentos
     }
 
     std::thread (
-      [this, job_id, command, step_description] ()
+      [this, job_id, user_id = msg.user_id, command, step_description] ()
       {
-        const bool trigger = decide_forge (job_id, command);
+        const bool trigger = decide_forge (job_id, user_id, command);
 
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -481,7 +483,9 @@ namespace agentos
   // ---------------------------------------------------------------------------
 
   Master::SelectionResult
-  Master::select_adviser (const std::string &job_id, const std::string &goal,
+  Master::select_adviser (const std::string &job_id,
+                          const std::string &user_id,
+                          const std::string &goal,
                           const std::string &known_adviser_id)
   {
     // Step 0 — known_adviser_id short-circuit (ADR-033 §1 Step 0).
@@ -499,7 +503,7 @@ namespace agentos
       // ADR-012 Amendment: Digest Pass still runs — no candidates, since
       // selection is already decided; its adviser_id_suggestion (if any)
       // must not be read here.
-      DigestResult digest = run_digest_pass (job_id, goal, {});
+      DigestResult digest = run_digest_pass (job_id, user_id, goal, {});
       return SelectionResult{known_adviser_id, std::move (digest)};
     }
     if (!known_adviser_id.empty ())
@@ -548,7 +552,7 @@ namespace agentos
         // deterministic-fallback/failure path — no candidates to
         // disambiguate, but digestion/deliverable_kind must exist for
         // every job regardless of outcome.
-        DigestResult digest = run_digest_pass (job_id, goal, {});
+        DigestResult digest = run_digest_pass (job_id, user_id, goal, {});
 
         if (!planning_exists)
           {
@@ -564,14 +568,14 @@ namespace agentos
 
     if (candidates.size () == 1)
     {
-      DigestResult digest = run_digest_pass (job_id, goal, {});
+      DigestResult digest = run_digest_pass (job_id, user_id, goal, {});
       return SelectionResult{candidates[0].id.value (), std::move (digest)};
     }
 
     // Step 2 (folded into the mandatory Digest Pass, ADR-033 Amendment
     // Note 3) — bounded LLM disambiguation, one output field of the same
     // call that also produces digested_problem/deliverable_kind.
-    DigestResult digest = run_digest_pass (job_id, goal, candidates);
+    DigestResult digest = run_digest_pass (job_id, user_id, goal, candidates);
 
     if (!digest.adviser_id_suggestion.empty ())
     {
@@ -592,9 +596,11 @@ namespace agentos
   }
 
   std::string Master::review_plan (const std::string &job_id,
+                                   const std::string &user_id,
                                    const std::string &plan_json)
   {
     LlmRequest req;
+    req.user_id = user_id; // ADR-040
     req.system_prompt
       = "You are the Master of an agent orchestration system reviewing a plan. "
         "Respond with JSON: {\"approved\":true} or "
@@ -604,7 +610,7 @@ namespace agentos
     req.user_prompt = "Does this plan correctly address the task goal?";
     req.max_tokens = 512;
 
-    auto result = llm_.complete (req);
+    auto result = llm_fn_ ? llm_fn_ (req) : llm_.complete (req);
     if (!result.ok)
     {
       spdlog::warn ("[master] LLM plan review failed for job {}, approving",
@@ -646,9 +652,11 @@ namespace agentos
   }
 
   bool Master::decide_forge (const std::string &job_id,
+                             const std::string &user_id,
                              const std::string &command)
   {
     LlmRequest req;
+    req.user_id = user_id; // ADR-040
     req.system_prompt = "You are the Master of an agent orchestration system. "
                         "A required worker capability is missing. "
                         "Decide whether to trigger the Forge pipeline to "
@@ -658,7 +666,7 @@ namespace agentos
     req.user_prompt = "Missing capability: " + command;
     req.max_tokens = 128;
 
-    auto result = llm_.complete (req);
+    auto result = llm_fn_ ? llm_fn_ (req) : llm_.complete (req);
     if (!result.ok)
     {
       spdlog::warn ("[master] LLM forge decision failed for job {}, triggering",
@@ -725,7 +733,8 @@ namespace agentos
   // the response's adviser_id_suggestion field is still populated by the
   // model but the caller must not consult it in that case.
   DigestResult Master::run_digest_pass (
-      const std::string &job_id, const std::string &goal,
+      const std::string &job_id, const std::string &user_id,
+      const std::string &goal,
       const std::vector<RegisteredAdviser> &candidates) const
   {
     std::string user_msg = "Goal: " + goal;
@@ -788,6 +797,7 @@ namespace agentos
         "No explanation, no markdown, no other text.";
     req.user_prompt = user_msg;
     req.max_tokens = 300;
+    req.user_id = user_id; // ADR-040
 
     DigestResult digest; // deliverable_kind defaults to "result" (fail-open)
 

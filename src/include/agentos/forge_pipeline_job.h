@@ -25,6 +25,10 @@ namespace agentos
   {
     std::string id;
     std::string task_id;
+    // ADR-040: user whose job triggered this Forge run. Used for every LLM
+    // request in the run (incl. after restart); records who caused the
+    // work, not who owns the resulting Worker (Workers are shared).
+    std::string user_id;
     ForgeStatus status = ForgeStatus::drafting;
     std::string requirement_json;
     std::string writer_output_json;

@@ -112,4 +112,10 @@ namespace agentos
     int rate_limit_max_wait_s_;
   };
 
+  // ADR-040: map an AgentOS user_id to a value DeepSeek accepts
+  // ([A-Za-z0-9_-]{1,512}). Valid ids -- including the default user "0" --
+  // pass through unchanged; anything else becomes a stable opaque
+  // "sha256_<hex>" so tenants stay distinct and raw ids never leave.
+  std::string deepseek_user_id (const std::string &uid);
+
 } // namespace agentos

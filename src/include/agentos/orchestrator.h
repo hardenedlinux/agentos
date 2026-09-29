@@ -118,6 +118,8 @@ namespace agentos
     // Adviser thread completed or failed.
     void handle_adviser_done (const OrchestratorEvent &ev);
     void handle_adviser_failed (const OrchestratorEvent &ev);
+    // ADR-040: owning job's user_id (ActiveJob, else jobs row).
+    std::string owning_user_id (const std::string &job_id);
 
     // Master has made a decision (e.g. TriggerForge, JobFailed).
     void handle_master_decision (const OrchestratorEvent &ev);

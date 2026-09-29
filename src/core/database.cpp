@@ -166,7 +166,8 @@ namespace agentos
         max_attempts          INTEGER DEFAULT 3,
         last_code_path        TEXT,
         created_at            INTEGER NOT NULL,
-        updated_at            INTEGER NOT NULL
+        updated_at            INTEGER NOT NULL,
+        user_id               TEXT NOT NULL DEFAULT '0' -- ADR-040
     );
     CREATE TABLE IF NOT EXISTS agents (
         id          TEXT PRIMARY KEY,
@@ -388,6 +389,34 @@ namespace agentos
       // DigestResult's own default — this keeps existing rows and any
       // reader that doesn't SELECT this column behaviorally unchanged.
       maybe_add_column ("ALTER TABLE jobs ADD COLUMN deliverable_kind TEXT");
+    }
+
+    // ADR-040: forge_pipeline_jobs.user_id — who triggered the Forge run.
+    // Existing rows are backfilled from their triggering job; rows whose job
+    // is gone keep the default user "0".
+    {
+      char *err = nullptr;
+      if (sqlite3_exec (db_,
+                        "ALTER TABLE forge_pipeline_jobs ADD COLUMN user_id "
+                        "TEXT NOT NULL DEFAULT '0'",
+                        nullptr, nullptr, &err)
+          == SQLITE_OK)
+        {
+          sqlite3_exec (db_,
+                        "UPDATE forge_pipeline_jobs SET user_id = "
+                        "(SELECT j.user_id FROM jobs j WHERE j.id = task_id) "
+                        "WHERE EXISTS (SELECT 1 FROM jobs j "
+                        "WHERE j.id = task_id)",
+                        nullptr, nullptr, &err);
+          if (err)
+            spdlog::warn ("[database] forge_pipeline_jobs user_id backfill: {}",
+                          err);
+        }
+      if (err)
+        {
+          spdlog::debug ("[database] forge_pipeline_jobs migration: {}", err);
+          sqlite3_free (err);
+        }
     }
 
     // ADR‑025: extend human_reviews with type / job_id
@@ -1013,8 +1042,9 @@ namespace agentos
                         max_iterations, current_iteration,
                         max_repairs, current_repairs,
                         reviewer_id, acceptance_criteria, last_feedback,
-                        timer_id, interval_s, starts_at, last_run_at, next_run_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        timer_id, interval_s, starts_at, last_run_at, next_run_at,
+                        user_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     )"));
     if (!stmt.s)
       return;
@@ -1071,6 +1101,9 @@ namespace agentos
       sqlite3_bind_null (stmt, 19);
       sqlite3_bind_null (stmt, 20);
     }
+
+    // ADR-029/040: previously omitted, silently making every job user "0".
+    sqlite3_bind_text (stmt, 21, job.user_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_job: {}", sqlite3_errmsg (db_));
@@ -2048,6 +2081,8 @@ namespace agentos
     fj.last_code_path = column_text_or_empty (stmt, 9);
     fj.created_at = sqlite3_column_int64 (stmt, 10);
     fj.updated_at = sqlite3_column_int64 (stmt, 11);
+    if (sqlite3_column_count (stmt) > 12)
+      fj.user_id = column_text_or_empty (stmt, 12); // ADR-040
     return fj;
   }
 
@@ -2059,8 +2094,8 @@ namespace agentos
       INSERT OR REPLACE INTO forge_pipeline_jobs
           (id, task_id, status, requirement_json, writer_output_json,
            reviewer_verdict_json, feedback, attempt, max_attempts,
-           last_code_path, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           last_code_path, created_at, updated_at, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   )"));
     if (!stmt.s)
       return;
@@ -2082,6 +2117,9 @@ namespace agentos
                        SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 11, ts);
     sqlite3_bind_int64 (stmt, 12, ts);
+    // ADR-040: bind as-is. Never substitute "0" for empty -- user "0" is a
+    // real (default) user, so that would misattribute an unknown owner.
+    sqlite3_bind_text (stmt, 13, job.user_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] store_forge_pipeline_job: {}",
@@ -2150,7 +2188,7 @@ namespace agentos
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
-             last_code_path, created_at, updated_at
+             last_code_path, created_at, updated_at, user_id
       FROM forge_pipeline_jobs WHERE id = ?
   )"));
     if (!stmt.s)
@@ -2173,7 +2211,7 @@ namespace agentos
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
-             last_code_path, created_at, updated_at
+             last_code_path, created_at, updated_at, user_id
       FROM forge_pipeline_jobs WHERE task_id = ?
       ORDER BY created_at DESC LIMIT 1
   )"));
@@ -2197,7 +2235,7 @@ namespace agentos
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
-             last_code_path, created_at, updated_at
+             last_code_path, created_at, updated_at, user_id
       FROM forge_pipeline_jobs
       WHERE status NOT IN (2, 3, 4)
   )"));
@@ -2221,7 +2259,7 @@ namespace agentos
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
-             last_code_path, created_at, updated_at
+             last_code_path, created_at, updated_at, user_id
       FROM forge_pipeline_jobs
       WHERE status = ?
       ORDER BY updated_at DESC
@@ -2231,7 +2269,7 @@ namespace agentos
       SELECT id, task_id, status, requirement_json,
              writer_output_json, reviewer_verdict_json,
              feedback, attempt, max_attempts,
-             last_code_path, created_at, updated_at
+             last_code_path, created_at, updated_at, user_id
       FROM forge_pipeline_jobs
       ORDER BY updated_at DESC
       LIMIT ?

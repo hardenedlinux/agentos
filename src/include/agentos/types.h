@@ -370,6 +370,10 @@ namespace agentos
     Kind kind;
     std::string payload_json;
     std::string job_id;
+    // ADR-040: owning job's tenant identity, copied from the job record by
+    // Orchestrator. Every LLM call Master makes on behalf of this job
+    // carries it. "0" is a real (default) user, never "no user".
+    std::string user_id;
   };
 
   // ADR-020 — Gateway outbound message (response or notification to client)

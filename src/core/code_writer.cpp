@@ -107,6 +107,16 @@ namespace agentos::forge
     if (!require_string (doc, "forge_job_id", forge_job_id))
       return make_error ("missing or invalid 'forge_job_id'");
 
+    // ADR-040: owning user's id, set by ForgeCoordinator from the persisted
+    // forge_pipeline_jobs row (never from LLM output). Optional so older
+    // callers/tests still parse; empty is logged by LlmProxy.
+    std::string user_id;
+    {
+      auto it = doc.FindMember ("user_id");
+      if (it != doc.MemberEnd () && it->value.IsString ())
+        user_id = it->value.GetString ();
+    }
+
     auto req_it = doc.FindMember ("requirement");
     if (req_it == doc.MemberEnd () || !req_it->value.IsObject ())
       return make_error ("missing or invalid 'requirement'");
@@ -210,6 +220,7 @@ namespace agentos::forge
     llm_req.user_prompt = user_prompt;
     llm_req.max_tokens = max_tokens;
     llm_req.api_path = api_path;
+    llm_req.user_id = user_id; // ADR-040
 
     auto fut = proxy.enqueue (llm_req);
 

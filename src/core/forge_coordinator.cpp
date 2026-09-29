@@ -351,6 +351,8 @@ namespace agentos::forge
     w.String (job.task_id.c_str ());
     w.Key ("forge_job_id");
     w.String (job.id.c_str ());
+    w.Key ("user_id"); // ADR-040: from the persisted row, survives restart
+    w.String (job.user_id.c_str ());
     w.Key ("requirement");
     // requirement_json is a JSON object — embed as raw value.
     w.RawValue (job.requirement_json.c_str (), job.requirement_json.size (),
@@ -524,6 +526,8 @@ namespace agentos::forge
     w.String (job.task_id.c_str ());
     w.Key ("forge_job_id");
     w.String (job.id.c_str ());
+    w.Key ("user_id"); // ADR-040: from the persisted row, survives restart
+    w.String (job.user_id.c_str ());
     w.Key ("requirement");
     w.RawValue (job.requirement_json.c_str (), job.requirement_json.size (),
                 rapidjson::kObjectType);

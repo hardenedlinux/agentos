@@ -25,6 +25,7 @@ namespace agentos
     if (filled.model.empty ())
       filled.model = cfg_.model;
 
+    const std::string model = filled.model; // logged below; filled is moved
     auto fut = proxy_.enqueue (std::move (filled));
 
     const auto t0 = std::chrono::steady_clock::now ();
@@ -36,7 +37,7 @@ namespace agentos
     auto result = fut.get ();
     const auto elapsed = std::chrono::steady_clock::now () - t0;
     spdlog::debug (
-                   "[llm] model={} tokens={} elapsed={}ms", filled.model, filled.max_tokens,
+                   "[llm] model={} tokens={} elapsed={}ms", model, req.max_tokens,
                    std::chrono::duration_cast<std::chrono::milliseconds> (elapsed).count ());
     return result;
   }

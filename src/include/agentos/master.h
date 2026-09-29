@@ -138,17 +138,20 @@ private:
   // Orchestrator from an explicit job.submit adviser_id or a continuation
   // owner lookup, ADR-038) — empty if neither source produced a value.
   SelectionResult select_adviser (const std::string &job_id,
+                                  const std::string &user_id,
                                   const std::string &goal,
                                   const std::string &known_adviser_id);
 
   // Use LLM to review a plan.
   // Returns empty string on approval, rejection reason otherwise.
   std::string review_plan (const std::string &job_id,
+                           const std::string &user_id,
                            const std::string &plan_json);
 
   // Use LLM to decide whether to trigger Forge for a missing Worker.
   // Returns true if Forge should be triggered.
   bool decide_forge (const std::string &job_id,
+                     const std::string &user_id,
                      const std::string &command);
 
   // Build adviser list context for LLM prompt.
@@ -162,11 +165,13 @@ private:
   // response's adviser_id_suggestion field will still be present but must
   // not be consulted by the caller in that case.
   DigestResult run_digest_pass (
-      const std::string &job_id, const std::string &goal,
+      const std::string &job_id, const std::string &user_id,
+      const std::string &goal,
       const std::vector<RegisteredAdviser> &candidates) const;
 
-  // Test seam – allow injection of a fake LLM response for disambiguation.
-  // If set, run_digest_pass uses this instead of llm_.complete().
+  // Test seam – allow injection of a fake LLM response.
+  // If set, run_digest_pass / decide_forge / review_plan use this instead
+  // of llm_.complete().
   // Private, and reachable only through MasterSelectInvoker (see friend
   // declaration above) — matches the existing access pattern used for
   // invoking select_adviser() from tests. No public setter is exposed:

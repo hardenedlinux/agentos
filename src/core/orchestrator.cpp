@@ -423,6 +423,7 @@ namespace agentos
         if (!j->type.empty ())
           job.type = j->type;
         job.goal = j->goal;
+        job.user_id = j->user_id; // ADR-040/038: survive daemon restart
         if (j->loop)
         {
           job.current_iteration = j->loop->current_iteration;
@@ -987,6 +988,7 @@ namespace agentos
     MasterEvent me;
     me.kind = MasterEvent::Kind::JobSubmit;
     me.job_id = job_id;
+    me.user_id = user_id; // ADR-040
     {
       rapidjson::StringBuffer buf;
       rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -3785,8 +3787,23 @@ namespace agentos
     MasterEvent me;
     me.kind = MasterEvent::Kind::JobSubmit;
     me.job_id = ev.job_id;
+    me.user_id = owning_user_id (ev.job_id); // ADR-040
     me.payload_json = ev.payload_json;
     send_to_master_ (std::move (me));
+  }
+
+  // ADR-040: the owning user of a job, from the in-memory ActiveJob if
+  // the job is active, else from the jobs row. Empty only when the job is
+  // unknown -- never for user "0", which is a real (default) user.
+  std::string Orchestrator::owning_user_id (const std::string &job_id)
+  {
+    if (auto it = active_jobs_.find (job_id); it != active_jobs_.end ()
+        && !it->second.user_id.empty ())
+      return it->second.user_id;
+    if (auto j = db_.load_job (job_id); j)
+      return j->user_id;
+    spdlog::warn ("[orchestrator] owning_user_id: no jobs row for {}", job_id);
+    return "";
   }
 
   void Orchestrator::handle_adviser_failed (const OrchestratorEvent &ev)
@@ -3807,6 +3824,7 @@ namespace agentos
     MasterEvent me;
     me.kind = MasterEvent::Kind::AdviserFailed;
     me.job_id = ev.job_id;
+    me.user_id = owning_user_id (ev.job_id); // ADR-040
     me.payload_json = ev.payload_json;
     send_to_master_ (std::move (me));
   }
@@ -4907,6 +4925,7 @@ namespace agentos
       ForgePipelineJob fpj;
       fpj.id = forge_job_id;
       fpj.task_id = job_id;
+      fpj.user_id = owning_user_id (job_id); // ADR-040
       fpj.status = ForgeStatus::drafting;
       fpj.requirement_json = requirement_json;
       fpj.attempt = 0;
@@ -5313,6 +5332,7 @@ namespace agentos
         MasterEvent me;
         me.kind = MasterEvent::Kind::WorkerExhausted;
         me.job_id = job.job_id;
+        me.user_id = job.user_id; // ADR-040
         // Encode needs_forge=true so Master skips WorkerExhausted handling
         // and goes straight to trigger_forge.
         me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
@@ -5330,6 +5350,7 @@ namespace agentos
         MasterEvent me;
         me.kind = MasterEvent::Kind::WorkerExhausted;
         me.job_id = job.job_id;
+        me.user_id = job.user_id; // ADR-040
         me.payload_json = R"({"job_id":")" + job.job_id + R"(","command":")"
                           + step.step.command
                           + R"(","needs_forge":false,"step_description":")"

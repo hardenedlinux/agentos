@@ -10,6 +10,8 @@
  */
 #include "agentos/llm_proxy.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -19,6 +21,7 @@
 
 #include <httplib.h>
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
@@ -31,6 +34,35 @@ namespace agentos
   // ─────────────────────────────────────────────────────────────────────────────
   // Internal helpers
   // ─────────────────────────────────────────────────────────────────────────────
+
+  // ADR-040: DeepSeek accepts user_id matching [A-Za-z0-9_-]{1,512}; any
+  // other value is rejected with HTTP 400. "0" (the default user) is valid
+  // as-is. An AgentOS id outside that alphabet (e.g. an email) is mapped to
+  // a stable, opaque "sha256_<hex>" so each tenant keeps its own
+  // provider-side identity without leaking the raw id (DeepSeek asks that
+  // user_id carry no private information).
+  std::string deepseek_user_id (const std::string &uid)
+  {
+    const bool valid
+      = !uid.empty () && uid.size () <= 512
+        && std::all_of (uid.begin (), uid.end (),
+                        [] (unsigned char c)
+                        { return std::isalnum (c) || c == '-' || c == '_'; });
+    if (valid)
+      return uid;
+
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    EVP_Digest (uid.data (), uid.size (), md, &md_len, EVP_sha256 (), nullptr);
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out = "sha256_";
+    for (unsigned int i = 0; i < md_len; ++i)
+      {
+        out += hex[md[i] >> 4];
+        out += hex[md[i] & 0xf];
+      }
+    return out;
+  }
 
   namespace
   {
@@ -204,12 +236,15 @@ namespace agentos
       // AgentOS tenant identity is internal, while user_id has provider-
       // specific semantics.
       if (is_deepseek && !req.user_id.empty ())
-        doc.AddMember (
-          "user_id",
-          rapidjson::Value (req.user_id.c_str (),
-                            static_cast<rapidjson::SizeType> (req.user_id.size ()),
-                            alloc),
-          alloc);
+        {
+          const std::string uid = deepseek_user_id (req.user_id);
+          doc.AddMember (
+            "user_id",
+            rapidjson::Value (uid.c_str (),
+                              static_cast<rapidjson::SizeType> (uid.size ()),
+                              alloc),
+            alloc);
+        }
 
       // Disable DeepSeek chain-of-thought reasoning by default (ADR future).
       // Reasoning adds significant latency and token cost with no benefit for
@@ -333,11 +368,18 @@ namespace agentos
 
     constexpr int kMaxAttempts = 3;
 
+    // ADR-040: every job-originated call must carry the owning user_id.
+    // "0" is the default registered user and is logged/sent verbatim; only
+    // a genuinely empty id is a missing call-site propagation (a defect).
+    if (req.user_id.empty ())
+      spdlog::warn ("[llm_proxy] request to {}{} has no user_id — an LLM "
+                    "call site is not propagating the job owner (ADR-040)",
+                    host, path);
+
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
       {
-        spdlog::info ("[llm_proxy] attempt {}/{} → {}{} user_id={}",
-                      attempt + 1, kMaxAttempts, host, path,
-                      req.user_id.empty () ? "<none>" : req.user_id);
+        spdlog::info ("[llm_proxy] attempt {}/{} → {}{} user_id='{}'",
+                      attempt + 1, kMaxAttempts, host, path, req.user_id);
 
         auto res = send_once ();
 

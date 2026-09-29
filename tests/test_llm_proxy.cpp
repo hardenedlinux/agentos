@@ -90,4 +90,25 @@ TEST(LlmProxyTest, DeepSeekE2E) {
         << "Content was empty; check the log for possible parsing issues.";
 }
 
+// ADR-040: DeepSeek user_id mapping.
+TEST(LlmProxyTest, DeepSeekUserId_DefaultUserZeroPassesThrough) {
+    EXPECT_EQ(deepseek_user_id("0"), "0");
+}
+
+TEST(LlmProxyTest, DeepSeekUserId_ValidIdsPassThrough) {
+    EXPECT_EQ(deepseek_user_id("alice"), "alice");
+    EXPECT_EQ(deepseek_user_id("tenant_42-a"), "tenant_42-a");
+    EXPECT_EQ(deepseek_user_id(std::string(512, 'a')), std::string(512, 'a'));
+}
+
+TEST(LlmProxyTest, DeepSeekUserId_InvalidIdsAreHashedStably) {
+    const std::string h = deepseek_user_id("roy@example.com");
+    EXPECT_EQ(h.rfind("sha256_", 0), 0u);
+    EXPECT_EQ(h.size(), 7u + 64u);
+    EXPECT_EQ(h, deepseek_user_id("roy@example.com"));      // stable
+    EXPECT_NE(h, deepseek_user_id("roy@example.org"));      // distinct tenants
+    EXPECT_EQ(h.find('@'), std::string::npos);              // raw id not leaked
+    EXPECT_NE(deepseek_user_id(std::string(513, 'a')), std::string(513, 'a'));
+}
+
 } // namespace

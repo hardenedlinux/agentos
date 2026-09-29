@@ -27,6 +27,8 @@
 #include "agentos/registry.h"
 #include "agentos/types.h"
 
+#include <sqlite3.h>
+
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -224,6 +226,71 @@ protected:
 // ---------------------------------------------------------------------------
 // 1. ForgeStatus stored as INTEGER
 // ---------------------------------------------------------------------------
+
+// ADR-040: forge_pipeline_jobs carries the triggering user's id and it
+// survives a store/load round trip (i.e. a daemon restart). "0" is a real
+// user and must round-trip as "0".
+TEST_F (ForgeCoordinatorTest, UserId_RoundTrips_IncludingDefaultUserZero)
+{
+  for (const std::string uid : {"0", "alice"})
+    {
+      ForgePipelineJob job;
+      job.id = "fj-" + uid;
+      job.task_id = "task-" + uid;
+      job.user_id = uid;
+      job.requirement_json = std::string (kRequirement);
+      db_->store_forge_pipeline_job (job);
+
+      auto loaded = db_->load_forge_pipeline_job (job.id);
+      ASSERT_TRUE (loaded.has_value ());
+      EXPECT_EQ (loaded->user_id, uid);
+
+      auto latest = db_->load_latest_forge_pipeline_job_for_task (job.task_id);
+      ASSERT_TRUE (latest.has_value ());
+      EXPECT_EQ (latest->user_id, uid);
+    }
+}
+
+// ADR-040 migration: a pre-ADR-040 forge_pipeline_jobs table (no user_id
+// column) gains the column on open and existing rows are backfilled from
+// their triggering job.
+TEST_F (ForgeCoordinatorTest, UserId_MigrationBackfillsFromTriggeringJob)
+{
+  Job j;
+  j.id = "task-bob";
+  j.type = "oneshot";
+  j.goal = "g";
+  j.user_id = "bob";
+  db_->insert_job (j);
+  make_db_job ("fj-legacy", "task-bob");
+  make_db_job ("fj-orphan", "task-gone");
+  const std::string path = (home_ / "agentos.db").string ();
+  db_->close ();
+
+  // Simulate the old schema.
+  {
+    sqlite3 *raw = nullptr;
+    ASSERT_EQ (sqlite3_open (path.c_str (), &raw), SQLITE_OK);
+    char *err = nullptr;
+    ASSERT_EQ (sqlite3_exec (raw,
+                             "ALTER TABLE forge_pipeline_jobs DROP COLUMN user_id",
+                             nullptr, nullptr, &err),
+               SQLITE_OK)
+      << (err ? err : "");
+    sqlite3_close (raw);
+  }
+
+  db_ = std::make_unique<Database> (path);
+  ASSERT_TRUE (db_->open ());
+
+  auto legacy = db_->load_forge_pipeline_job ("fj-legacy");
+  ASSERT_TRUE (legacy.has_value ());
+  EXPECT_EQ (legacy->user_id, "bob");
+
+  auto orphan = db_->load_forge_pipeline_job ("fj-orphan");
+  ASSERT_TRUE (orphan.has_value ());
+  EXPECT_EQ (orphan->user_id, "0"); // no triggering job left: default user
+}
 
 TEST_F (ForgeCoordinatorTest, ForgeStatus_StoredAsInteger)
 {

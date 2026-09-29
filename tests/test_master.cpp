@@ -90,9 +90,10 @@ namespace agentos
     static Master::SelectionResult
     call_select_adviser (Master &m, const std::string &job_id,
                          const std::string &goal,
-                         const std::string &known_adviser_id)
+                         const std::string &known_adviser_id,
+                         const std::string &user_id = "0")
     {
-      return m.select_adviser (job_id, goal, known_adviser_id);
+      return m.select_adviser (job_id, user_id, goal, known_adviser_id);
     }
   };
 } // namespace agentos
@@ -297,6 +298,105 @@ domains = ["planning"]
   EXPECT_NE (orch_events_[0].payload_json.find ("planning-adviser"),
              std::string::npos);
   EXPECT_NE (orch_events_[0].payload_json.find ("job-3"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-040: the owning job's user_id reaches every Master LLM request.
+// User "0" is the default registered user (and what tests submit as by
+// default) -- it must arrive as "0", never be dropped as "no user".
+// ---------------------------------------------------------------------------
+
+namespace
+{
+  struct UserIdCapture
+  {
+    std::mutex m;
+    std::vector<std::string> seen;
+
+    std::function<Result<LlmResponse> (const LlmRequest &)> fn ()
+    {
+      return [this] (const LlmRequest &req) -> Result<LlmResponse>
+      {
+        {
+          std::lock_guard<std::mutex> lk (m);
+          seen.push_back (req.user_id);
+        }
+        LlmResponse resp;
+        // Serves both the Digest Pass and decide_forge callers.
+        resp.content = R"({"digested_problem":"t","deliverable_kind":)"
+                       R"("result","adviser_id_suggestion":"",)"
+                       R"("trigger_forge":false})";
+        return Result<LlmResponse> (resp);
+      };
+    }
+  };
+}
+
+TEST_F (MasterTest, JobSubmit_UserZero_ReachesDigestPassLlmRequest)
+{
+  disable_builtin_advisers ();
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning"]
+)");
+  UserIdCapture cap;
+  start_master (cap.fn ());
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-user0";
+  ev.user_id = "0";
+  ev.payload_json = R"({"goal":"outline a planning workflow"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (cap.m);
+  ASSERT_EQ (cap.seen.size (), 1u);
+  EXPECT_EQ (cap.seen[0], "0");
+}
+
+TEST_F (MasterTest, JobSubmit_NonDefaultUser_ReachesDigestPassLlmRequest)
+{
+  disable_builtin_advisers ();
+  db_->insert_agent ("planning-adviser", "adviser", "", R"(
+[meta]
+id = "planning-adviser"
+domains = ["planning"]
+)");
+  UserIdCapture cap;
+  start_master (cap.fn ());
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::JobSubmit;
+  ev.job_id = "job-alice";
+  ev.user_id = "alice";
+  ev.payload_json = R"({"goal":"outline a planning workflow"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (cap.m);
+  ASSERT_EQ (cap.seen.size (), 1u);
+  EXPECT_EQ (cap.seen[0], "alice");
+}
+
+TEST_F (MasterTest, WorkerExhausted_UserZero_ReachesDecideForgeLlmRequest)
+{
+  UserIdCapture cap;
+  start_master (cap.fn ());
+
+  MasterEvent ev;
+  ev.kind = MasterEvent::Kind::WorkerExhausted;
+  ev.job_id = "job-forge-user0";
+  ev.user_id = "0";
+  ev.payload_json = R"({"job_id":"job-forge-user0","command":"frobnicate",)"
+                    R"("needs_forge":false,"step_description":"x"})";
+  master_->enqueue (std::move (ev));
+
+  ASSERT_TRUE (wait_orch (1));
+  std::lock_guard<std::mutex> lk (cap.m);
+  ASSERT_EQ (cap.seen.size (), 1u);
+  EXPECT_EQ (cap.seen[0], "0");
 }
 
 // ---------------------------------------------------------------------------

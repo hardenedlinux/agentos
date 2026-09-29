@@ -224,10 +224,13 @@ TEST (GcRunLayersTest, RemovesCompletedLayerDirectory)
   WorkerRun run;
   run.run_id = "test_run_gc";
   run.worker_id = "test_worker";
+  run.job_id = "job-wr";
+  run.step_id = "step-0";
+  run.user_id = "0";
   run.status = WorkerStatus::completed;
   run.layer_path = layer_path;
   run.log_path = home.path () + "/logs/runs/test_run_gc/output.log";
-  db.insert_worker_run (run);
+  ASSERT_TRUE (db.insert_worker_run (run));
 
   gc_run_layers (db);
 
@@ -248,10 +251,13 @@ TEST (GcRunLayersTest, PreservesRunningLayerDirectory)
   WorkerRun run;
   run.run_id = "test_run_running";
   run.worker_id = "test_worker";
+  run.job_id = "job-wr";
+  run.step_id = "step-0";
+  run.user_id = "0";
   run.status = WorkerStatus::running;
   run.layer_path = layer_path;
   run.log_path = home.path () + "/logs/runs/test_run_running/output.log";
-  db.insert_worker_run (run);
+  ASSERT_TRUE (db.insert_worker_run (run));
 
   gc_run_layers (db);
 
@@ -269,12 +275,15 @@ TEST (DatabaseWorkerRunTest, InsertAndGetActiveRuns)
   WorkerRun run;
   run.run_id = "run_001";
   run.worker_id = "worker_1";
+  run.job_id = "job-wr";
+  run.step_id = "step-0";
+  run.user_id = "0";
   run.pid = 1234;
   run.started_at = 1000;
   run.status = WorkerStatus::running;
   run.layer_path = "/tmp/layers/runs/run_001";
   run.log_path = "/tmp/logs/runs/run_001/output.log";
-  db.insert_worker_run (run);
+  ASSERT_TRUE (db.insert_worker_run (run));
 
   const auto active = db.get_active_worker_runs ();
   ASSERT_EQ (active.size (), 1u);
@@ -290,12 +299,15 @@ TEST (DatabaseWorkerRunTest, UpdateStatusToCompleted)
   WorkerRun run;
   run.run_id = "run_002";
   run.worker_id = "worker_2";
+  run.job_id = "job-wr";
+  run.step_id = "step-0";
+  run.user_id = "0";
   run.pid = 5678;
   run.started_at = 2000;
   run.status = WorkerStatus::running;
   run.layer_path = "/tmp/layers/runs/run_002";
   run.log_path = "/tmp/logs/runs/run_002/output.log";
-  db.insert_worker_run (run);
+  ASSERT_TRUE (db.insert_worker_run (run));
 
   run.status = WorkerStatus::completed;
   run.ended_at = 3000;
@@ -317,15 +329,49 @@ TEST (DatabaseWorkerRunTest, MarkAllRunningAsCrashed)
     WorkerRun run;
     run.run_id = id;
     run.worker_id = "w";
+    run.job_id = "job-wr";
+    run.step_id = "step-0";
+    run.user_id = "0";
     run.pid = pid;
     run.started_at = 100;
     run.status = WorkerStatus::running;
     run.layer_path = "/tmp/layers/runs/" + id;
     run.log_path = "/tmp/logs/runs/" + id + "/output.log";
-    db.insert_worker_run (run);
+    ASSERT_TRUE (db.insert_worker_run (run));
   }
 
   db.mark_all_running_as_crashed ();
 
   EXPECT_TRUE (db.get_active_worker_runs ().empty ());
+}
+
+// ADR-016 amendment: a run without job/step/user attribution is refused,
+// and attribution (including the default user "0") round-trips verbatim.
+TEST (WorkerRunAttributionTest, RequiresJobStepUserAndRoundTrips)
+{
+  char tmpl[] = "/tmp/agentos_wr_attr_XXXXXX";
+  int fd = mkstemp (tmpl);
+  ASSERT_GE (fd, 0);
+  close (fd);
+  {
+    agentos::Database db (tmpl);
+    ASSERT_TRUE (db.open ());
+
+    agentos::WorkerRun run;
+    run.run_id = "run-attr";
+    run.worker_id = "w";
+    run.job_id = "job-1";
+    run.step_id = "step-0";
+    run.user_id = "";
+    EXPECT_FALSE (db.insert_worker_run (run)) << "empty user_id must be refused";
+
+    run.user_id = "0";
+    ASSERT_TRUE (db.insert_worker_run (run));
+    auto all = db.get_all_worker_runs ();
+    ASSERT_EQ (all.size (), 1u);
+    EXPECT_EQ (all[0].job_id, "job-1");
+    EXPECT_EQ (all[0].step_id, "step-0");
+    EXPECT_EQ (all[0].user_id, "0");
+  }
+  std::remove (tmpl);
 }

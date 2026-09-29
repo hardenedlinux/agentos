@@ -261,6 +261,12 @@ namespace agentos
     WorkerStatus status = WorkerStatus::running;
     std::string layer_path; // ~/.agentos/layers/runs/<run-id>/
     std::string log_path;   // ~/.agentos/logs/runs/<run-id>/output.log
+    // ADR-016 amendment: every run is on behalf of a job. All three are
+    // required and never empty; user_id is the owning job's, verbatim
+    // ("0" is a real user).
+    std::string job_id;
+    std::string step_id;
+    std::string user_id;
   };
 
   // ADR-018: Adviser skill package manifest

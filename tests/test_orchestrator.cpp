@@ -336,6 +336,8 @@ TEST_F (OrchestratorTest, JobStatus_Ownership)
   EXPECT_NE (reply ("2").find ("-32020"), std::string::npos) << reply ("2");
   EXPECT_NE (reply ("3").find ("\"result\""), std::string::npos) << reply ("3");
   EXPECT_NE (reply ("4").find ("\"result\""), std::string::npos) << reply ("4");
+  EXPECT_NE (reply ("4").find (R"("user_id":"0")"), std::string::npos)
+    << "status snapshot must carry the owner verbatim: " << reply ("4");
   // Foreign and missing are indistinguishable.
   auto strip_id = [] (std::string m)
   {

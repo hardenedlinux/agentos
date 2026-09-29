@@ -154,7 +154,10 @@ namespace agentos
         exit_code  INTEGER,
         status     INTEGER NOT NULL DEFAULT 0,
         layer_path TEXT NOT NULL,
-        log_path   TEXT NOT NULL
+        log_path   TEXT NOT NULL,
+        job_id     TEXT NOT NULL,   -- ADR-016: owning job
+        step_id    TEXT NOT NULL,   -- plan-local step label within job_id
+        user_id    TEXT NOT NULL    -- owning job's user_id ("0" is real)
     );
     CREATE TABLE IF NOT EXISTS forge_pipeline_jobs (
         id                    TEXT PRIMARY KEY,
@@ -346,6 +349,19 @@ namespace agentos
       maybe_add_column ("ALTER TABLE tasks ADD COLUMN target_type TEXT");
       maybe_add_column (
         "ALTER TABLE tasks ADD COLUMN needs_forge INTEGER DEFAULT 0");
+
+      // ADR-016 amendment: attribute every Worker run to its job, step and
+      // user. New databases declare these NOT NULL; on an existing database
+      // the columns are added for new rows (rows written before this
+      // change predate the attribution and stay NULL). insert_worker_run
+      // refuses to write a row with any of the three empty.
+      maybe_add_column ("ALTER TABLE worker_runs ADD COLUMN job_id TEXT");
+      maybe_add_column ("ALTER TABLE worker_runs ADD COLUMN step_id TEXT");
+      maybe_add_column ("ALTER TABLE worker_runs ADD COLUMN user_id TEXT");
+      maybe_add_column ("CREATE INDEX IF NOT EXISTS idx_worker_runs_job "
+                        "ON worker_runs(job_id)");
+      maybe_add_column ("CREATE INDEX IF NOT EXISTS idx_worker_runs_user "
+                        "ON worker_runs(user_id)");
     }
 
 
@@ -2043,21 +2059,35 @@ namespace agentos
     run.status = static_cast<WorkerStatus> (sqlite3_column_int (stmt, 6));
     run.layer_path = column_text_or_empty (stmt, 7);
     run.log_path = column_text_or_empty (stmt, 8);
+    run.job_id = column_text_or_empty (stmt, 9);
+    run.step_id = column_text_or_empty (stmt, 10);
+    run.user_id = column_text_or_empty (stmt, 11);
     return run;
   }
 
-  void Database::insert_worker_run (const WorkerRun &run)
+  bool Database::insert_worker_run (const WorkerRun &run)
   {
     if (!db_)
-      return;
+      return false;
+    // ADR-016 / ADR-029 invariant: a run always belongs to a job, a step
+    // and a user. An empty value here is a daemon defect; refuse the row
+    // rather than record an unattributable run.
+    if (run.job_id.empty () || run.step_id.empty () || run.user_id.empty ())
+    {
+      spdlog::error ("[database] insert_worker_run: refusing run {} with "
+                     "missing attribution (job_id='{}' step_id='{}' "
+                     "user_id='{}')",
+                     run.run_id, run.job_id, run.step_id, run.user_id);
+      return false;
+    }
     Stmt stmt (prepare (R"(
       INSERT INTO worker_runs
           (run_id, worker_id, pid, started_at, ended_at, exit_code,
-           status, layer_path, log_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           status, layer_path, log_path, job_id, step_id, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   )"));
     if (!stmt.s)
-      return;
+      return false;
 
     sqlite3_bind_text (stmt, 1, run.run_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, run.worker_id.c_str (), -1, SQLITE_TRANSIENT);
@@ -2077,9 +2107,16 @@ namespace agentos
     sqlite3_bind_int (stmt, 7, static_cast<int> (run.status));
     sqlite3_bind_text (stmt, 8, run.layer_path.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 9, run.log_path.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 10, run.job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 11, run.step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 12, run.user_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
       spdlog::error ("[database] insert_worker_run: {}", sqlite3_errmsg (db_));
+      return false;
+    }
+    return true;
   }
 
   void Database::update_worker_run (const WorkerRun &run)
@@ -2116,7 +2153,7 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT run_id, worker_id, pid, started_at, ended_at, exit_code,
-             status, layer_path, log_path
+             status, layer_path, log_path, job_id, step_id, user_id
       FROM worker_runs WHERE status = 0
   )"));
     if (!stmt.s)
@@ -2135,7 +2172,7 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT run_id, worker_id, pid, started_at, ended_at, exit_code,
-             status, layer_path, log_path
+             status, layer_path, log_path, job_id, step_id, user_id
       FROM worker_runs
   )"));
     if (!stmt.s)

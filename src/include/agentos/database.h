@@ -232,7 +232,9 @@ namespace agentos
 
     // -- WorkerRun table ------------------------------------------------------
 
-    void insert_worker_run (const WorkerRun &run);
+    // Returns false (and writes nothing) if job_id, step_id or user_id is
+    // empty (ADR-016 amendment) or on a database error.
+    [[nodiscard]] bool insert_worker_run (const WorkerRun &run);
     void update_worker_run (const WorkerRun &run);
     std::vector<WorkerRun> get_active_worker_runs ();
     std::vector<WorkerRun> get_all_worker_runs ();

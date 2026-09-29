@@ -1053,6 +1053,10 @@ namespace agentos
     w.StartObject ();
     w.Key ("job_id");
     w.String (job_id.c_str ());
+    // ADR-029 / ADR-039 §H2a: the owner is part of every status snapshot,
+    // including outbox events, verbatim ("0" is a real user).
+    w.Key ("user_id");
+    w.String (job->user_id.c_str ());
     w.Key ("phase");
     w.String (job->phase.c_str ());
     w.Key ("goal");
@@ -5442,6 +5446,22 @@ namespace agentos
 
     ActiveStep &step = job.pending_steps.front ();
 
+    // ADR-029 invariant: every step runs on behalf of the job's owner, and
+    // user_id is never empty. Recover it from the job record if the
+    // in-memory copy was lost; if even that is empty the job cannot be
+    // attributed and must not run.
+    if (job.user_id.empty ())
+      job.user_id = owning_user_id (job.job_id);
+    if (job.user_id.empty ())
+    {
+      spdlog::error ("[orchestrator] job {} has no user_id; refusing to "
+                     "dispatch step {}",
+                     job.job_id, step.step.id);
+      const std::string job_id = job.job_id;
+      finish_job (job_id, false, "internal error: job has no user_id");
+      return;
+    }
+
     // ADR-031 §9: route by target_type. Missing target_type is leniently
     // treated as "worker" (logged, not rejected) — mirrors the existing
     // needs_forge leniency below rather than hard-failing the Plan; a
@@ -5721,7 +5741,19 @@ namespace agentos
     run.status = WorkerStatus::running;
     run.layer_path = {};
     run.log_path = {};
-    db_.insert_worker_run (run);
+    // ADR-016 amendment: attribute the run to its job, step and user.
+    run.job_id = job.job_id;
+    run.step_id = step.step.id;
+    run.user_id = job.user_id;
+    if (!db_.insert_worker_run (run))
+    {
+      spdlog::error ("[orchestrator] could not record worker run {} for job "
+                     "{} step {}; not dispatching",
+                     run_id, job.job_id, step.step.id);
+      const std::string job_id = job.job_id;
+      finish_job (job_id, false, "internal error: worker run not recorded");
+      return;
+    }
 
     auto result = dispatcher_.fork_exec (req);
     if (!result.ok)

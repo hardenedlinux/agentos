@@ -135,6 +135,7 @@ namespace agentos
   apply_landlock (const std::vector<std::string> &allowed_read_paths,
                   const std::vector<std::string> &allowed_write_paths,
                   const std::vector<std::string> &allowed_device_paths,
+                  const std::vector<std::string> &allowed_rw_file_dirs,
                   const std::vector<int> &allowed_tcp_ports)
   {
     // Create ruleset
@@ -293,6 +294,30 @@ namespace agentos
       }
       path_attr.allowed_access
         = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE;
+      if (syscall (SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_PATH_BENEATH,
+                   &path_attr, 0)
+          != 0)
+        spdlog::warn ("[sandbox] landlock_add_rule for {} failed: {}", path,
+                      strerror (errno));
+      close (path_attr.parent_fd);
+    }
+
+    // Directories whose existing files may be read and written, with no
+    // right to create, remove or rename anything beneath them. Used for
+    // /proc by the ADR-015 GPU grant (see collect_gpu_grant).
+    for (const auto &path : allowed_rw_file_dirs)
+    {
+      struct landlock_path_beneath_attr path_attr = {};
+      path_attr.parent_fd = open (path.c_str (), O_PATH | O_CLOEXEC);
+      if (path_attr.parent_fd < 0)
+      {
+        spdlog::warn ("[sandbox] open {} for landlock failed: {}", path,
+                      strerror (errno));
+        continue;
+      }
+      path_attr.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE
+                                 | LANDLOCK_ACCESS_FS_WRITE_FILE
+                                 | LANDLOCK_ACCESS_FS_READ_DIR;
       if (syscall (SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_PATH_BENEATH,
                    &path_attr, 0)
           != 0)
@@ -717,7 +742,8 @@ namespace agentos
   // deliberately withheld (~/.nv/ComputeCache: binaries must ship SASS for
   // the target GPU instead of relying on PTX JIT).
   static void collect_gpu_grant (std::vector<std::string> &read_paths,
-                                 std::vector<std::string> &device_paths)
+                                 std::vector<std::string> &device_paths,
+                                 std::vector<std::string> &rw_file_dirs)
   {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -742,20 +768,31 @@ namespace agentos
       return;
     }
 
-    // Read-only: procfs, CPU/NUMA topology, NVIDIA module state, and each
-    // GPU's PCI device directory.
+    // /proc: read, and write to existing files. CUDA reads its own
+    // /proc/self/{maps,status,cmdline,exe,ns/pid,task/*/comm} and names its
+    // helper threads through pthread_setname_np, which writes
+    // /proc/self/task/<tid>/comm; a denied write makes CUDA init fail with
+    // "OS call failed". A Worker that wraps a CUDA program (voice.render
+    // running velum) starts it as a child with its own pid, so the grant
+    // cannot be narrowed to the Worker's own /proc/<pid>.
     //
-    // All of /proc, not just the Worker's own /proc/<pid>: a Worker that
-    // wraps a CUDA program (e.g. voice.render running velum) starts it as a
-    // child with a different pid, and CUDA reads that process's own
-    // /proc/self/{maps,status,cmdline,exe,ns/pid,task/*/comm}. This does not
-    // expose other processes' secrets: the per-process files that matter
-    // (environ, maps, mem, fd, ...) are gated by the ptrace-read check, and
-    // Landlock denies it for any process outside the Worker's domain -- the
-    // daemon included. What stays readable elsewhere is what `ps` shows.
-    // Writes under /proc (and /proc/sys) remain denied.
+    // What this does not open, verified on kernel 6.x: other processes'
+    // environ/maps/mem/fd are behind the ptrace check, which Landlock
+    // denies for every process outside the Worker's domain; another
+    // process's comm rejects writes (EINVAL); /proc/sys and other
+    // root-owned files stay denied by ordinary permissions; nothing can be
+    // created or removed. The daemon is PR_SET_DUMPABLE=0 (central.cpp),
+    // which makes its /proc entries root-owned and unwritable here.
+    // Residual: other dumpable processes of the same uid remain writable
+    // through the few owner-writable knobs (oom_score_adj upward,
+    // coredump_filter, clear_refs) -- ADR-015 GPU grant.
+    if (fs::exists ("/proc", ec))
+      rw_file_dirs.emplace_back ("/proc");
+
+    // Read-only: CPU/NUMA topology, NVIDIA module state, and each GPU's PCI
+    // device directory.
     for (const char *p :
-         {"/proc", "/sys/devices/system",
+         {"/sys/devices/system",
           // Kernel module state (initstate), read by CUDA at init with
           // the NVIDIA open kernel modules.
           "/sys/module/nvidia", "/sys/module/nvidia_uvm"})
@@ -925,6 +962,7 @@ namespace agentos
     // no /dev/nvidia* nodes, so granting paths there would be meaningless.
     // Refuse loudly instead of silently running on CPU.
     std::vector<std::string> device_paths;
+    std::vector<std::string> rw_file_dirs;
     if (gpu)
     {
       if (privileged)
@@ -933,14 +971,15 @@ namespace agentos
                        "mode yet (no device nodes inside the worker root)");
         return false;
       }
-      collect_gpu_grant (read_paths, device_paths);
+      collect_gpu_grant (read_paths, device_paths, rw_file_dirs);
       std::string devs;
       for (const auto &d : device_paths)
         devs += d + "; ";
-      spdlog::info ("[sandbox] GPU grant: devices=[{}]", devs);
+      spdlog::info ("[sandbox] GPU grant: devices=[{}] proc={}", devs,
+                    rw_file_dirs.empty () ? "none" : "read+write-existing");
     }
 
-    if (!apply_landlock (read_paths, write_paths, device_paths,
+    if (!apply_landlock (read_paths, write_paths, device_paths, rw_file_dirs,
                          tcp_connect_ports))
     {
       spdlog::error ("[sandbox] Landlock setup failed");

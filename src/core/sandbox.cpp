@@ -742,18 +742,25 @@ namespace agentos
       return;
     }
 
-    // Read-only: driver state, CPU/NUMA topology, the worker's own /proc
-    // entry (covers /proc/self/{maps,status,cmdline}; this child's pid is
-    // the worker's pid after execve), and each GPU's PCI device directory.
+    // Read-only: procfs, CPU/NUMA topology, NVIDIA module state, and each
+    // GPU's PCI device directory.
+    //
+    // All of /proc, not just the Worker's own /proc/<pid>: a Worker that
+    // wraps a CUDA program (e.g. voice.render running velum) starts it as a
+    // child with a different pid, and CUDA reads that process's own
+    // /proc/self/{maps,status,cmdline,exe,ns/pid,task/*/comm}. This does not
+    // expose other processes' secrets: the per-process files that matter
+    // (environ, maps, mem, fd, ...) are gated by the ptrace-read check, and
+    // Landlock denies it for any process outside the Worker's domain -- the
+    // daemon included. What stays readable elsewhere is what `ps` shows.
+    // Writes under /proc (and /proc/sys) remain denied.
     for (const char *p :
-         {"/proc/driver/nvidia", "/proc/devices", "/proc/cpuinfo",
-          "/proc/sys/vm/mmap_min_addr", "/sys/devices/system",
+         {"/proc", "/sys/devices/system",
           // Kernel module state (initstate), read by CUDA at init with
           // the NVIDIA open kernel modules.
           "/sys/module/nvidia", "/sys/module/nvidia_uvm"})
       if (fs::exists (p, ec))
         read_paths.emplace_back (p);
-    read_paths.push_back ("/proc/" + std::to_string (getpid ()));
     for (const auto &e :
          fs::directory_iterator ("/proc/driver/nvidia/gpus", ec))
     {

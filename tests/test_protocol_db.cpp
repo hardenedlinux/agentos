@@ -148,7 +148,7 @@ TEST_F (ProtocolDbTest, InsertAndLoadStep)
 
   db_.insert_step (step);
 
-  auto loaded = db_.load_step ("step-1");
+  auto loaded = db_.load_step ("job-step", "step-1");
   ASSERT_TRUE (loaded.has_value ());
   EXPECT_EQ (loaded->id,          step.id);
   EXPECT_EQ (loaded->job_id,      step.job_id);
@@ -169,12 +169,12 @@ TEST_F (ProtocolDbTest, CompleteStep)
   step.status      = std::string (db::step_status::pending);
   db_.insert_step (step);
 
-  db_.complete_step ("step-comp", R"({"ok":true})");
+  db_.complete_step ("j", "step-comp", R"({"ok":true})");
 
-  auto loaded = db_.load_step ("step-comp");
+  auto loaded = db_.load_step ("j", "step-comp");
   ASSERT_TRUE (loaded.has_value ());
   EXPECT_EQ (loaded->status, std::string (db::step_status::done));
-  auto res = db_.load_step_result_opt ("step-comp");
+  auto res = db_.load_step_result_opt ("j", "step-comp");
   ASSERT_TRUE (res.has_value ());
   EXPECT_EQ (*res, R"({"ok":true})");
 }
@@ -212,7 +212,7 @@ TEST_F (ProtocolDbTest, LoadStepResult_Null)
   step.status      = std::string (db::step_status::pending);
   db_.insert_step (step);
 
-  auto res = db_.load_step_result_opt ("no-result");
+  auto res = db_.load_step_result_opt ("j", "no-result");
   EXPECT_FALSE (res.has_value ());
 }
 

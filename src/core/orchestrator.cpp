@@ -454,7 +454,8 @@ namespace agentos
         // gets a fresh retry budget on resume — a known, accepted
         // leniency rather than a correctness bug.
         if (ss.status == StepStatus::running)
-          db_.update_step_status (ss.step.id, db::step_status::pending);
+          db_.update_step_status (job.job_id, ss.step.id,
+                                  db::step_status::pending);
 
         ActiveStep as;
         as.step = std::move (ss.step);
@@ -3823,8 +3824,9 @@ namespace agentos
         result_json = new_buf.GetString ();
       }
 
-      db_.update_step_result (job.pending_steps.front ().step.id, result_json);
-      db_.update_step_tokens (job.pending_steps.front ().step.id,
+      db_.update_step_result (job.job_id, job.pending_steps.front ().step.id,
+                              result_json);
+      db_.update_step_tokens (job.job_id, job.pending_steps.front ().step.id,
                               step_tokens_prompt, step_tokens_completion);
       job.last_step_result = result_json;
       job.pending_steps.pop_front ();
@@ -4491,7 +4493,7 @@ namespace agentos
             synthetic_step.needs_forge = false;
             db_.store_pipeline_task (TaskId (job_id), synthetic_step,
                                      /*order=*/0);
-            db_.update_step_result (synthetic_step.id,
+            db_.update_step_result (job_id, synthetic_step.id,
                                     clarification_result_json);
 
             // active_jobs_ is only ever touched from the Orchestrator's own
@@ -4917,7 +4919,8 @@ namespace agentos
                    ? doc["planning_tokens_completion"].GetInt ()
                    : 0;
         if ((pt > 0 || ct > 0) && !job.pending_steps.empty ())
-          db_.update_step_tokens (job.pending_steps.front ().step.id, pt, ct);
+          db_.update_step_tokens (job.job_id, job.pending_steps.front ().step.id,
+                                  pt, ct);
       }
 
       // Load goal from DB so it is available for task injection.
@@ -5224,7 +5227,8 @@ namespace agentos
         const std::string field
           = (dot == std::string::npos) ? "" : rest.substr (dot + 1);
 
-        const std::string ref_result = db_.load_step_result (ref_step_id);
+        const std::string ref_result
+          = db_.load_step_result (job_id, ref_step_id);
         if (ref_result.empty ())
         {
           spdlog::warn ("[orchestrator] $step reference '{}' resolved to "
@@ -5321,7 +5325,7 @@ namespace agentos
       "hint instead",
       job.job_id, agent_id, step_id);
 
-    db_.update_step_result (step_id, result_json);
+    db_.update_step_result (job.job_id, step_id, result_json);
     job.last_step_result = result_json;
     job.pending_steps.pop_front ();
 
@@ -5650,7 +5654,8 @@ namespace agentos
     step.job_dir = result.job_dir;
 
     // Mark step as running with started_at timestamp (ADR-025).
-    db_.update_step_status (step.step.id, db::step_status::running);
+    db_.update_step_status (job.job_id, step.step.id,
+                            db::step_status::running);
 
     spdlog::info ("[orchestrator] dispatched step {} run_id={} pid={}",
                   step.step.id, run_id, result.pid);
@@ -5742,7 +5747,8 @@ namespace agentos
                  "adviser {} for job {}",
                  step_id, adviser_id, job_id);
 
-    db_.update_step_status (step.step.id, db::step_status::running);
+    db_.update_step_status (job_id, step.step.id,
+                            db::step_status::running);
 
     auto home = agentos_home ();
     const std::string skill_path
@@ -5922,7 +5928,7 @@ namespace agentos
     // implemented; no in-memory field on ActiveStep for result.
     if (!job.pending_steps.empty ())
     {
-      db_.update_step_result (job.pending_steps.front ().step.id,
+      db_.update_step_result (job.job_id, job.pending_steps.front ().step.id,
                               collected.result_json);
     }
 

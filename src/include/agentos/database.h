@@ -207,20 +207,28 @@ namespace agentos
     // worker_runs, not tasks.status) — callers should reset such a step to
     // 'pending' via update_step_status before re-queuing it.
     std::vector<StepState> load_pipeline_steps_for_job (const std::string &job_id);
-    std::string load_step_result (const std::string &step_id);
-    void update_step_result (const std::string &step_id,
+    // ADR-031 §13.1: step ids are plan-local labels; every step lookup is
+    // scoped by (job_id, step_id). Never look a step up by id alone.
+    std::string load_step_result (const std::string &job_id,
+                                  const std::string &step_id);
+    void update_step_result (const std::string &job_id,
+                             const std::string &step_id,
                              const std::string &result_json);
 
     // -- Step table (ADR‑025) -------------------------------------------------
 
     void insert_step (const Step &step);
-    void update_step_status (const std::string &id, std::string_view new_status,
+    void update_step_status (const std::string &job_id, const std::string &id,
+                             std::string_view new_status,
                              std::optional<std::string> error = std::nullopt);
-    void complete_step (const std::string &id, const std::string &result_json);
-    std::optional<Step> load_step (const std::string &id);
+    void complete_step (const std::string &job_id, const std::string &id,
+                        const std::string &result_json);
+    std::optional<Step> load_step (const std::string &job_id,
+                                   const std::string &id);
     std::vector<Step> load_steps_for_job (const std::string &job_id);
     std::optional<std::string>
-    load_step_result_opt (const std::string &step_id);
+    load_step_result_opt (const std::string &job_id,
+                          const std::string &step_id);
 
     // -- WorkerRun table ------------------------------------------------------
 
@@ -266,7 +274,8 @@ namespace agentos
                        const std::string &approved_by = "forge");
     // Accumulate LLM token usage for a step (additive — safe to call
     // multiple times for Planning + Forge contributions).
-    void update_step_tokens (const std::string &step_id,
+    void update_step_tokens (const std::string &job_id,
+                             const std::string &step_id,
                              int prompt_tokens, int completion_tokens);
 
     void insert_capability (const std::string &agent_id,
@@ -905,6 +914,9 @@ namespace agentos
     // -- Internal helpers -----------------------------------------------------
 
     [[nodiscard]] bool exec_ddl (const char *sql);
+    // ADR-031 §13.1: rebuild a pre-existing tasks table whose primary key is
+    // `id` alone into one keyed by (job_id, id). No-op when already migrated.
+    [[nodiscard]] bool migrate_tasks_primary_key ();
 
     // Seed built-in adviser rows into the agents table (INSERT OR IGNORE).
     // Called at the end of open() so advisers are always available without

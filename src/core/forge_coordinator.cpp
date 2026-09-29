@@ -234,10 +234,11 @@ namespace agentos::forge
               // Record cumulative Forge token usage on the pipeline step.
               // Write Forge token usage to the pipeline step row.
               // Use step_id (not job.task_id which is the job_id).
-              const std::string &token_target
-                = step_id.empty () ? job.task_id : step_id;
-              if (forge_tokens_prompt > 0 || forge_tokens_completion > 0)
-                db_.update_step_tokens (token_target,
+              // ADR-031 §13.1: steps are keyed by (job_id, step_id);
+              // task_id is the owning job_id.
+              if (!step_id.empty ()
+                  && (forge_tokens_prompt > 0 || forge_tokens_completion > 0))
+                db_.update_step_tokens (job.task_id, step_id,
                                         forge_tokens_prompt,
                                         forge_tokens_completion);
 

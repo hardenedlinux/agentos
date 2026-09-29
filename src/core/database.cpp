@@ -21,6 +21,7 @@
 #include "agentos/secure_enclave.h"
 #include "agentos/time_utils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -127,7 +128,7 @@ namespace agentos
         updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS tasks (
-        id           TEXT PRIMARY KEY,
+        id           TEXT NOT NULL,   -- plan-local step label (ADR-031 §13.1)
         job_id       TEXT NOT NULL,
         agent_id     TEXT,
         method       TEXT,
@@ -141,7 +142,8 @@ namespace agentos
         completed_at      INTEGER,
         error             TEXT,
         tokens_prompt     INTEGER DEFAULT 0,
-        tokens_completion INTEGER DEFAULT 0
+        tokens_completion INTEGER DEFAULT 0,
+        PRIMARY KEY (job_id, id)
     );
     CREATE TABLE IF NOT EXISTS worker_runs (
         run_id     TEXT PRIMARY KEY,
@@ -345,6 +347,7 @@ namespace agentos
       maybe_add_column (
         "ALTER TABLE tasks ADD COLUMN needs_forge INTEGER DEFAULT 0");
     }
+
 
     // ADR‑025: extend the jobs table with new columns (idempotent)
     {
@@ -652,6 +655,15 @@ namespace agentos
         ");"
         "CREATE INDEX IF NOT EXISTS idx_subject_memory_signoffs_lookup "
         "    ON subject_memory_signoffs(subject_id, entry_key, signed_off_at);"))
+      return false;
+
+    // ADR-031 §13.1: step ids are plan-local labels, so tasks must be keyed
+    // by (job_id, id). Databases created before this change have id as the
+    // sole primary key, under which two jobs using the same labels
+    // (e.g. "step-0") overwrite each other's rows. Rebuild such a table once.
+    // Runs after every other migration: the table rename re-validates views
+    // (user_profile) that depend on columns added above.
+    if (!migrate_tasks_primary_key ())
       return false;
 
     // Must run after all migrations above (needs agents.description) and
@@ -1317,6 +1329,83 @@ namespace agentos
                      sqlite3_errmsg (db_));
   }
 
+  bool Database::migrate_tasks_primary_key ()
+  {
+    std::vector<std::string> columns;
+    std::vector<std::string> pk_columns;
+    {
+      Stmt info (prepare ("PRAGMA table_info(tasks)"));
+      if (!info.s)
+        return false;
+      while (sqlite3_step (info) == SQLITE_ROW)
+      {
+        std::string name = column_text_or_empty (info, 1);
+        if (sqlite3_column_int (info, 5) > 0)
+          pk_columns.push_back (name);
+        columns.push_back (std::move (name));
+      }
+    }
+    if (!(pk_columns.size () == 1 && pk_columns[0] == "id"))
+      return true; // fresh schema or already migrated
+
+    spdlog::info ("[database] migrating tasks primary key to (job_id, id)");
+
+    static const std::vector<std::string> kColumns = {
+      "id",           "job_id",       "agent_id",   "method",
+      "params",       "status",       "result",     "description",
+      "step_order",   "queued_at",    "started_at", "completed_at",
+      "error",        "tokens_prompt", "tokens_completion",
+      "target_type",  "needs_forge"};
+    std::string copy_cols;
+    for (const auto &c : kColumns)
+    {
+      if (std::find (columns.begin (), columns.end (), c) == columns.end ())
+        continue;
+      if (!copy_cols.empty ())
+        copy_cols += ", ";
+      copy_cols += c;
+    }
+
+    const std::string sql = R"(
+      BEGIN IMMEDIATE;
+      CREATE TABLE tasks_new (
+          id           TEXT NOT NULL,
+          job_id       TEXT NOT NULL,
+          agent_id     TEXT,
+          method       TEXT,
+          params       TEXT,
+          status       TEXT DEFAULT 'pending',
+          result       TEXT,
+          description  TEXT,
+          step_order   INTEGER,
+          queued_at         INTEGER,
+          started_at        INTEGER,
+          completed_at      INTEGER,
+          error             TEXT,
+          tokens_prompt     INTEGER DEFAULT 0,
+          tokens_completion INTEGER DEFAULT 0,
+          target_type       TEXT,
+          needs_forge       INTEGER DEFAULT 0,
+          PRIMARY KEY (job_id, id)
+      );
+      INSERT OR IGNORE INTO tasks_new ()"
+                            + copy_cols + ") SELECT " + copy_cols + R"( FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_new RENAME TO tasks;
+      COMMIT;
+    )";
+    char *err = nullptr;
+    if (sqlite3_exec (db_, sql.c_str (), nullptr, nullptr, &err) != SQLITE_OK)
+    {
+      spdlog::error ("[database] tasks primary-key migration failed: {}",
+                     err ? err : "unknown error");
+      sqlite3_free (err);
+      sqlite3_exec (db_, "ROLLBACK", nullptr, nullptr, nullptr);
+      return false;
+    }
+    return true;
+  }
+
   // ---------- Step ----------
 
   void Database::insert_step (const Step &step)
@@ -1345,7 +1434,8 @@ namespace agentos
       spdlog::error ("[database] insert_step: {}", sqlite3_errmsg (db_));
   }
 
-  void Database::update_step_status (const std::string &id,
+  void Database::update_step_status (const std::string &job_id,
+                                     const std::string &id,
                                      std::string_view new_status,
                                      std::optional<std::string> error)
   {
@@ -1357,9 +1447,9 @@ namespace agentos
 
     // running → set started_at; done/failed → set completed_at.
     const char *sql = is_running ? "UPDATE tasks SET status = ?, error = ?, "
-                                   "started_at  = ? WHERE id = ?"
+                                   "started_at  = ? WHERE job_id = ? AND id = ?"
                                  : "UPDATE tasks SET status = ?, error = ?, "
-                                   "completed_at = ? WHERE id = ?";
+                                   "completed_at = ? WHERE job_id = ? AND id = ?";
 
     Stmt stmt (prepare (sql));
     if (!stmt.s)
@@ -1368,20 +1458,23 @@ namespace agentos
     sqlite3_bind_text (stmt, 1, new_status.data (), -1, SQLITE_TRANSIENT);
     bind_optional_text (stmt, 2, error);
     sqlite3_bind_int64 (stmt, 3, ts);
-    sqlite3_bind_text (stmt, 4, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] update_step_status: {}", sqlite3_errmsg (db_));
   }
 
-  void Database::complete_step (const std::string &id,
+  void Database::complete_step (const std::string &job_id,
+                                const std::string &id,
                                 const std::string &result_json)
   {
     // reuse legacy helper that writes result + sets status=done
-    update_step_result (id, result_json);
+    update_step_result (job_id, id, result_json);
   }
 
-  std::optional<Step> Database::load_step (const std::string &id)
+  std::optional<Step> Database::load_step (const std::string &job_id,
+                                           const std::string &id)
   {
     if (!db_)
       return std::nullopt;
@@ -1390,12 +1483,13 @@ namespace agentos
              queued_at, started_at, completed_at, error, result,
              tokens_prompt, tokens_completion,
              method, target_type, needs_forge
-      FROM tasks WHERE id = ?
+      FROM tasks WHERE job_id = ? AND id = ?
     )"));
     if (!stmt.s)
       return std::nullopt;
 
-    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) == SQLITE_ROW)
       return row_to_step (stmt);
@@ -1426,15 +1520,18 @@ namespace agentos
   }
 
   std::optional<std::string>
-  Database::load_step_result_opt (const std::string &step_id)
+  Database::load_step_result_opt (const std::string &job_id,
+                                  const std::string &step_id)
   {
     if (!db_)
       return std::nullopt;
-    Stmt stmt (prepare ("SELECT result FROM tasks WHERE id = ?"));
+    Stmt stmt (
+      prepare ("SELECT result FROM tasks WHERE job_id = ? AND id = ?"));
     if (!stmt.s)
       return std::nullopt;
 
-    sqlite3_bind_text (stmt, 1, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, step_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) == SQLITE_ROW)
     {
@@ -1882,16 +1979,19 @@ namespace agentos
     return out;
   }
 
-  std::string Database::load_step_result (const std::string &step_id)
+  std::string Database::load_step_result (const std::string &job_id,
+                                          const std::string &step_id)
   {
     if (!db_)
       return "";
 
-    Stmt stmt (prepare ("SELECT result FROM tasks WHERE id = ?"));
+    Stmt stmt (
+      prepare ("SELECT result FROM tasks WHERE job_id = ? AND id = ?"));
     if (!stmt.s)
       return "";
 
-    sqlite3_bind_text (stmt, 1, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 1, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, step_id.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) == SQLITE_ROW)
     {
@@ -1902,7 +2002,8 @@ namespace agentos
     return "";
   }
 
-  void Database::update_step_result (const std::string &step_id,
+  void Database::update_step_result (const std::string &job_id,
+                                     const std::string &step_id,
                                      const std::string &result_json)
   {
     if (!db_)
@@ -1910,13 +2011,14 @@ namespace agentos
     std::string done_status = std::string (db::step_status::done);
     Stmt stmt (
       prepare ("UPDATE tasks SET result = ?, status = ?, completed_at = ? "
-               "WHERE id = ?"));
+               "WHERE job_id = ? AND id = ?"));
     if (!stmt.s)
       return;
     sqlite3_bind_text (stmt, 1, result_json.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text (stmt, 2, done_status.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64 (stmt, 3, now_unix ());
-    sqlite3_bind_text (stmt, 4, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 5, step_id.c_str (), -1, SQLITE_TRANSIENT);
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] update_step_result: {}", sqlite3_errmsg (db_));
   }
@@ -2816,7 +2918,8 @@ namespace agentos
     return rows;
   }
 
-  void Database::update_step_tokens (const std::string &step_id,
+  void Database::update_step_tokens (const std::string &job_id,
+                                     const std::string &step_id,
                                      int prompt_tokens, int completion_tokens)
   {
     if (!db_)
@@ -2824,12 +2927,13 @@ namespace agentos
     Stmt stmt (prepare ("UPDATE tasks SET "
                         "tokens_prompt = tokens_prompt + ?, "
                         "tokens_completion = tokens_completion + ? "
-                        "WHERE id = ?"));
+                        "WHERE job_id = ? AND id = ?"));
     if (!stmt.s)
       return;
     sqlite3_bind_int (stmt, 1, prompt_tokens);
     sqlite3_bind_int (stmt, 2, completion_tokens);
-    sqlite3_bind_text (stmt, 3, step_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, job_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, step_id.c_str (), -1, SQLITE_TRANSIENT);
     sqlite3_step (stmt);
   }
 

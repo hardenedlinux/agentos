@@ -159,16 +159,18 @@ TEST_F (DatabasePipelineTest, LoadStepResult_ReturnsStoredResult)
   {
     sqlite3_stmt *stmt = nullptr;
     ASSERT_EQ (sqlite3_prepare_v2 (h,
-                                   "UPDATE tasks SET result = ? WHERE id = ?",
+                                   "UPDATE tasks SET result = ? WHERE job_id = ? AND id = ?",
                                    -1, &stmt, nullptr),
                SQLITE_OK);
     sqlite3_bind_text (stmt, 1, expected_result.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text (stmt, 2, step.id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, job_id.value ().c_str (), -1,
+                       SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, step.id.c_str (), -1, SQLITE_TRANSIENT);
     ASSERT_EQ (sqlite3_step (stmt), SQLITE_DONE);
     sqlite3_finalize (stmt);
   }
 
-  const std::string loaded = db_->load_step_result (step.id);
+  const std::string loaded = db_->load_step_result (job_id.value (), step.id);
   EXPECT_EQ (loaded, expected_result);
 }
 
@@ -177,7 +179,42 @@ TEST_F (DatabasePipelineTest, LoadStepResult_ReturnsStoredResult)
 // -------------------------------------------------------------------------
 TEST_F (DatabasePipelineTest, LoadStepResult_MissingStepReturnsEmpty)
 {
-  EXPECT_EQ (db_->load_step_result ("nonexistent"), "");
+  EXPECT_EQ (db_->load_step_result ("no-such-job", "nonexistent"), "");
+}
+
+// -------------------------------------------------------------------------
+// ADR-031 §13.1: step ids are plan-local labels. Two jobs using the same
+// label must not overwrite or read each other's step rows.
+// -------------------------------------------------------------------------
+TEST_F (DatabasePipelineTest, SameStepLabelInTwoJobs_IsIsolated)
+{
+  auto job_a = agentos::TaskId ("job-a");
+  auto job_b = agentos::TaskId ("job-b");
+  for (const auto &id : {job_a, job_b})
+  {
+    agentos::Task task;
+    task.id = id;
+    task.goal = "g";
+    task.input_json = "{}";
+    db_->store_job (task);
+  }
+
+  agentos::PipelinePlanStep step;
+  step.id = "step-0";
+  step.command = "x.y";
+  step.description = "d";
+  db_->store_pipeline_task (job_a, step, 0);
+  db_->store_pipeline_task (job_b, step, 0);
+
+  db_->update_step_result (job_a.value (), "step-0", R"({"owner":"a"})");
+  db_->update_step_result (job_b.value (), "step-0", R"({"owner":"b"})");
+
+  EXPECT_EQ (db_->load_step_result (job_a.value (), "step-0"),
+             R"({"owner":"a"})");
+  EXPECT_EQ (db_->load_step_result (job_b.value (), "step-0"),
+             R"({"owner":"b"})");
+  EXPECT_EQ (db_->load_pipeline_steps_for_job (job_a.value ()).size (), 0u)
+    << "job-a's only step is done; job-b's pending row must not leak in";
 }
 
 // -------------------------------------------------------------------------
@@ -269,4 +306,47 @@ TEST_F (DatabasePipelineTest, StorePipelineTask_Overwrite)
   EXPECT_EQ (sqlite3_column_int (stmt, 1), 42);
   EXPECT_EQ (column_text_or_empty (stmt, 2), step2.command);
   sqlite3_finalize (stmt);
+}
+
+// -------------------------------------------------------------------------
+// ADR-031 §13.1 migration: a database created with the old schema (tasks
+// keyed by id alone) is rebuilt with PRIMARY KEY (job_id, id), keeping rows.
+// -------------------------------------------------------------------------
+TEST (DatabaseTasksMigrationTest, OldSingleColumnPrimaryKeyIsRebuilt)
+{
+  char tmpl[] = "/tmp/agentos_tasks_migration_XXXXXX";
+  int fd = mkstemp (tmpl);
+  ASSERT_GE (fd, 0);
+  close (fd);
+  const std::string path = tmpl;
+
+  {
+    sqlite3 *h = nullptr;
+    ASSERT_EQ (sqlite3_open (path.c_str (), &h), SQLITE_OK);
+    ASSERT_EQ (sqlite3_exec (h,
+                             "CREATE TABLE tasks (id TEXT PRIMARY KEY, job_id "
+                             "TEXT NOT NULL, status TEXT, result TEXT);"
+                             "INSERT INTO tasks VALUES ('step-0','old-job',"
+                             "'done','{\"x\":1}');",
+                             nullptr, nullptr, nullptr),
+               SQLITE_OK);
+    sqlite3_close (h);
+  }
+
+  {
+    agentos::Database db (path);
+    ASSERT_TRUE (db.open ());
+    EXPECT_EQ (db.load_step_result ("old-job", "step-0"), R"({"x":1})");
+
+    // The same label in another job is now a distinct row.
+    agentos::PipelinePlanStep step;
+    step.id = "step-0";
+    step.command = "x.y";
+    step.description = "d";
+    db.store_pipeline_task (agentos::TaskId ("new-job"), step, 0);
+    db.update_step_result ("new-job", "step-0", R"({"x":2})");
+    EXPECT_EQ (db.load_step_result ("old-job", "step-0"), R"({"x":1})");
+    EXPECT_EQ (db.load_step_result ("new-job", "step-0"), R"({"x":2})");
+  }
+  std::remove (path.c_str ());
 }

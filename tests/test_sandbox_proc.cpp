@@ -31,6 +31,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
+#include <ctime>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -127,4 +129,47 @@ TEST_F (SandboxProcTest, ProcReadableButOtherProcessesOpaque)
   EXPECT_EQ (rc & 2, 0) << "Worker must read its own /proc/self";
   EXPECT_EQ (rc & 4, 0) << "a child of the Worker must read its own "
                            "/proc/self";
+}
+
+// A sandboxed Worker must be able to sleep (glibc/Python sleep go through
+// clock_nanosleep) and have an interrupted blocking call restarted by the
+// kernel (restart_syscall). Either missing is a SIGSYS kill.
+TEST_F (SandboxProcTest, WorkerCanSleepAndResumeAfterSignal)
+{
+  pid_t pid = ::fork ();
+  if (pid == 0)
+  {
+    if (cap_t caps = cap_get_proc ())
+    {
+      cap_value_t v = CAP_SYS_ADMIN;
+      cap_set_flag (caps, CAP_EFFECTIVE, 1, &v, CAP_CLEAR);
+      cap_set_proc (caps);
+      cap_free (caps);
+    }
+    const fs::path job = home_ / "jobs" / "j";
+    const fs::path run = home_ / "layers" / "runs" / "r";
+    fs::create_directories (job);
+    fs::create_directories (run);
+    if (!agentos::apply_worker_sandbox (job.string (), run.string (), "w",
+                                        {}, {}, {}, false, false, "r"))
+      ::_exit (77);
+    struct timespec ts = {0, 20 * 1000 * 1000};
+    ::clock_nanosleep (CLOCK_MONOTONIC, 0, &ts, nullptr);
+    // SIGSTOP/SIGCONT from the parent interrupts this sleep; the kernel
+    // resumes it via restart_syscall.
+    struct timespec longer = {0, 300 * 1000 * 1000};
+    ::clock_nanosleep (CLOCK_MONOTONIC, 0, &longer, nullptr);
+    ::_exit (0);
+  }
+  ::usleep (100 * 1000);
+  ::kill (pid, SIGSTOP);
+  ::usleep (20 * 1000);
+  ::kill (pid, SIGCONT);
+  int st = 0;
+  ::waitpid (pid, &st, 0);
+  if (WIFEXITED (st) && WEXITSTATUS (st) == 77)
+    GTEST_SKIP () << "worker sandbox (Landlock) unavailable here";
+  EXPECT_TRUE (WIFEXITED (st) && WEXITSTATUS (st) == 0)
+    << (WIFSIGNALED (st) ? "killed by signal " + std::to_string (WTERMSIG (st))
+                         : "exit " + std::to_string (WEXITSTATUS (st)));
 }

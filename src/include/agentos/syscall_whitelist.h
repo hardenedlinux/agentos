@@ -180,4 +180,11 @@ int syscalls[] = {
   SCMP_SYS (sched_get_priority_min),
   SCMP_SYS (sched_get_priority_max),
   SCMP_SYS (gettimeofday),
+  // Sleeping and interrupted-syscall restart. glibc implements sleep(),
+  // nanosleep() and Python's time.sleep() with clock_nanosleep; the kernel
+  // issues restart_syscall when a blocking call interrupted by a signal is
+  // resumed. Without them a Worker is killed (SIGSYS) the moment it sleeps
+  // or a child it waits on exits by signal.
+  SCMP_SYS (clock_nanosleep),
+  SCMP_SYS (restart_syscall),
 };

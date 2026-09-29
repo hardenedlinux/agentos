@@ -192,6 +192,11 @@ namespace agentos
     std::vector<std::string> fs_read;
     std::vector<std::string> fs_write;
     bool network = false;
+    // ADR-015: requires.tcp_connect_ports. Only takes effect when the
+    // network grant itself is in force (manifest network=true AND operator
+    // [trusted_workers].network_exempt); Landlock then allows TCP connect
+    // to exactly these ports.
+    std::vector<int> tcp_connect_ports;
     // ADR-015 amendment (GPU device grant): manifest requires.gpu. Like
     // `network`, necessary but not sufficient -- the Worker must also be
     // named in config.toml [trusted_workers].gpu.

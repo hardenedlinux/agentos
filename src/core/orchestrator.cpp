@@ -6059,6 +6059,27 @@ namespace agentos
                    "not in [trusted_workers].network_exempt — dispatching "
                    "with network disabled for run {}",
                    worker->name, run_id);
+    // ADR-015: the declared TCP ports are the only outbound TCP a Worker
+    // gets, and only when the network grant above is in force. Landlock
+    // always handles TCP connect, so network=true with no ports declared
+    // still means no TCP at all -- say so instead of failing with a bare
+    // EACCES inside the Worker.
+    if (req.network)
+    {
+      req.tcp_connect_ports = worker->tcp_connect_ports;
+      std::string ports;
+      for (int p : req.tcp_connect_ports)
+        ports += std::to_string (p) + " ";
+      if (req.tcp_connect_ports.empty ())
+        spdlog::warn ("[orchestrator] worker '{}' has network access but "
+                     "declares no requires.tcp_connect_ports -- every TCP "
+                     "connect will be denied (EACCES) for run {}",
+                     worker->name, run_id);
+      else
+        spdlog::info ("[orchestrator] worker '{}' tcp_connect_ports=[{}] "
+                     "for run {}",
+                     worker->name, ports, run_id);
+    }
 
     // ADR-015 amendment (GPU device grant): same AND-gate as network --
     // manifest requires.gpu AND operator [trusted_workers].gpu.

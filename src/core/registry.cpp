@@ -201,6 +201,17 @@ namespace agentos
         out_worker.network = req["network"].GetBool ();
       if (req.HasMember ("gpu") && req["gpu"].IsBool ())
         out_worker.gpu = req["gpu"].GetBool ();
+      if (req.HasMember ("tcp_connect_ports")
+          && req["tcp_connect_ports"].IsArray ())
+        for (const auto &p : req["tcp_connect_ports"].GetArray ())
+        {
+          if (p.IsInt () && p.GetInt () > 0 && p.GetInt () <= 65535)
+            out_worker.tcp_connect_ports.push_back (p.GetInt ());
+          else
+            spdlog::warn ("[registry] worker '{}': ignoring invalid "
+                          "tcp_connect_ports entry",
+                          agent_id);
+        }
     }
 
     if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())

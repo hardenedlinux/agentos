@@ -305,8 +305,9 @@ namespace agentos
     for (int port : allowed_tcp_ports)
     {
       struct landlock_net_port_attr net_attr = {};
-      net_attr.allowed_access
-        = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
+      // ADR-015: tcp_connect_ports grants outbound connect only; a Worker
+      // never needs to listen.
+      net_attr.allowed_access = LANDLOCK_ACCESS_NET_CONNECT_TCP;
       net_attr.port = static_cast<uint64_t> (port);
       if (syscall (SYS_landlock_add_rule, rs_fd, LANDLOCK_RULE_NET_PORT,
                    &net_attr, 0)

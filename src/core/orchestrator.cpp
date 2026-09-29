@@ -37,8 +37,11 @@
 #include <rapidjson/writer.h>
 #include <spdlog/spdlog.h>
 
+#include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -1646,7 +1649,33 @@ namespace agentos
     // ADR-031 §11: per-step retry limit, independent of Forge's
     // max_repairs — retrying a step means re-invoking the same
     // Worker/Adviser from scratch, not rewriting code.
-    constexpr int kMaxStepRetries = 3;
+    //
+    // Default 0: a failed step fails the job on its first failure. Blind
+    // retries re-run Workers whose external calls cost money (e.g. video
+    // generation) and triple the latency of a deterministic failure.
+    // Operators may opt in with AGENTOS_MAX_STEP_RETRIES=<n> (n >= 0,
+    // retries after the first attempt), read once at first use.
+    int max_step_retries ()
+    {
+      static const int value = [] {
+        const char *env = std::getenv ("AGENTOS_MAX_STEP_RETRIES");
+        if (!env || !*env)
+          return 0;
+        int n = -1;
+        const char *end = env + std::strlen (env);
+        auto [ptr, ec] = std::from_chars (env, end, n);
+        if (ec != std::errc () || ptr != end || n < 0)
+        {
+          spdlog::warn ("[orchestrator] ignoring invalid "
+                        "AGENTOS_MAX_STEP_RETRIES='{}'; using 0",
+                        env);
+          return 0;
+        }
+        spdlog::info ("[orchestrator] AGENTOS_MAX_STEP_RETRIES={}", n);
+        return n;
+      }();
+      return value;
+    }
 
     // ADR-031 §1: namespace.verb, all lowercase, one dot, max 64 chars.
     bool is_valid_capability_method (const std::string &method)
@@ -5899,24 +5928,26 @@ namespace agentos
     ActiveStep &step = job.pending_steps.front ();
     step.attempts++;
 
-    if (step.attempts <= kMaxStepRetries)
+    const int max_retries = max_step_retries ();
+    if (step.attempts <= max_retries)
     {
       spdlog::warn ("[orchestrator] step {} ({}) failed, retrying job {} "
-                   "(attempt {}/{})",
+                   "(retry {}/{})",
                    step.step.id, step.step.command, job_id, step.attempts,
-                   kMaxStepRetries);
+                   max_retries);
       job.current_run_id.clear ();
       dispatch_next_step (job);
       return;
     }
 
-    spdlog::error ("[orchestrator] step {} ({}) exhausted {} retries -- "
-                  "failing job {}",
-                  step.step.id, step.step.command, kMaxStepRetries, job_id);
+    // step.attempts counts failures, i.e. total attempts made.
+    spdlog::error ("[orchestrator] step {} ({}) failed after {} attempt(s) "
+                  "-- failing job {}",
+                  step.step.id, step.step.command, step.attempts, job_id);
     finish_job (job_id, false,
                "step " + step.step.id + " (" + step.step.command
-                 + ") failed after " + std::to_string (kMaxStepRetries)
-                 + " retries");
+                 + ") failed after " + std::to_string (step.attempts)
+                 + " attempt(s)");
   }
 
   void Orchestrator::finish_job (const std::string &job_id, bool success,

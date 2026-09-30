@@ -98,6 +98,10 @@ bool apply_worker_sandbox(const std::string& job_dir,
                           const std::vector<int>& tcp_connect_ports,
                           bool network,
                           bool gpu,
-                          const std::string& run_id);
+                          const std::string& run_id,
+                          // ADR-015 Worker resource limits: the run's cgroup,
+                          // created by the Dispatcher (WorkerCgroups::create).
+                          // Empty = limits disabled; nothing to join.
+                          const std::string& cgroup_path = {});
 
 } // namespace agentos

@@ -1,6 +1,19 @@
-# /usr/lib/systemd/system/agentos.service
+# ~/.config/systemd/user/agentos.service -- installed by install.sh (ADR-014)
+#
+# User service: the daemon runs as the installing user, never as root.
+[Unit]
+Description=AgentOS daemon
+After=network-online.target
+
 [Service]
-User=agentos
-Group=agentos
-RuntimeDirectory=agentos        # systemd creates /run/agentos/ owned by agentos:agentos
-RuntimeDirectoryMode=0750
+Type=simple
+ExecStart=%h/.agentos/bin/agentos run
+Restart=on-failure
+# ADR-015 Worker resource limits: delegate this service's cgroup to the
+# daemon so it can create one child cgroup per Worker run with memory,
+# pids and cpu limits, and kill whatever a Worker leaves behind. Without
+# delegation the daemon still runs, with Worker limits disabled (logged).
+Delegate=memory pids cpu
+
+[Install]
+WantedBy=default.target

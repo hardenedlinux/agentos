@@ -26,6 +26,7 @@
 
 #include "agentos/home_init.h"
 #include "agentos/types.h"
+#include "agentos/worker_cgroup.h"
 
 #include <filesystem>
 #include <functional>
@@ -56,6 +57,9 @@ struct DispatchRequest
   std::vector<int>         tcp_connect_ports;
   bool                     network = false;
   bool                     gpu     = false; // ADR-015 amendment: GPU grant
+  // ADR-006/015: Tier-1 (Forge-generated, agents.approved_by == "forge")
+  // Workers get the tighter Tier-1 resource limits.
+  bool                     forge_generated = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +123,12 @@ public:
   // Thread-safe.
   void set_reap_callback (ReapCallback cb);
 
+  // ADR-015 Worker resource limits. Called once at daemon startup, before
+  // any fork_exec(). Sets up the delegated cgroup hierarchy; if the daemon
+  // is not in a delegated cgroup, limits are disabled (one warning).
+  void init_resource_limits (const WorkerLimits &tier0,
+                             const WorkerLimits &tier1);
+
   // Fork and exec the Worker binary described by req.
   // Inserts the job/run/step identity into the in-flight map.
   // Returns immediately after fork.
@@ -149,6 +159,7 @@ private:
     std::string step_id;
     std::string job_dir;
     std::string run_dir;
+    std::string cgroup_path; // empty if resource limits are disabled
   };
 
   // Derive the run layer directory from run_id (ADR-016).
@@ -163,7 +174,12 @@ private:
   // Apply sandbox stack in child process after fork, before exec.
   bool apply_child_sandbox (const DispatchRequest &req,
                             const std::string     &job_dir,
-                            const std::string     &run_dir);
+                            const std::string     &run_dir,
+                            const std::string     &cgroup_path);
+
+  WorkerCgroups cgroups_;
+  WorkerLimits  limits_tier0_;
+  WorkerLimits  limits_tier1_;
 
   // Protected by mutex_ — accessed from Orchestrator and PeriodicExecutor threads.
   std::unordered_map<int, InFlight> in_flight_; // pid → InFlight

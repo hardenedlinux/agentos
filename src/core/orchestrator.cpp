@@ -6054,6 +6054,8 @@ namespace agentos
       = std::find (exempt_list.begin (), exempt_list.end (), worker->name)
         != exempt_list.end ();
     req.network = worker->network && operator_trusted;
+    // ADR-006/015: Forge-generated Workers are Tier-1 (tighter limits).
+    req.forge_generated = db_.agent_is_forge_generated (worker->id.value ());
     if (worker->network && !operator_trusted)
       spdlog::info ("[orchestrator] worker '{}' declares network=true but is "
                    "not in [trusted_workers].network_exempt — dispatching "

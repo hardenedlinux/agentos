@@ -105,6 +105,22 @@ namespace agentos
       }
     }
 
+    // ADR-015 Worker resource limits: set up the delegated cgroup hierarchy
+    // before any Worker can be forked (crash recovery in orchestrator_.init
+    // may dispatch). 0 in config = no limit for that resource.
+    {
+      const auto &sb = config_.sandbox;
+      auto mb = [] (int v) -> std::uint64_t
+      { return v > 0 ? static_cast<std::uint64_t> (v) * 1024 * 1024 : 0; };
+      auto pos = [] (int v) -> std::uint32_t
+      { return v > 0 ? static_cast<std::uint32_t> (v) : 0; };
+      dispatcher_.init_resource_limits (
+        WorkerLimits{mb (sb.tier0_memory_mb), pos (sb.tier0_pid_limit),
+                     pos (sb.tier0_cpu_weight)},
+        WorkerLimits{mb (sb.memory_mb), pos (sb.pid_limit),
+                     pos (sb.cpu_weight)});
+    }
+
     orchestrator_.init ();
     orchestrator_.start ();
 

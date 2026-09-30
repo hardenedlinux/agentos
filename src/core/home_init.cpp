@@ -540,6 +540,20 @@ if __name__ == "__main__":
         out << "[daemon]\n";
         out << "log_level = \"info\"\n";
         out << "max_concurrent_jobs = 4\n\n";
+        // ADR-015 Worker resource limits (cgroup v2). Only effective when
+        // the daemon runs in a delegated cgroup; see the startup log.
+        out << "# Worker resource limits (cgroup v2). Effective only when the\n";
+        out << "# daemon runs in a delegated cgroup, e.g.\n";
+        out << "#   systemd-run --user --scope -p Delegate=yes agentos run\n";
+        out << "# 0 = no limit. tier1_* apply to Forge-generated Workers,\n";
+        out << "# tier0_* to registered/Suite Workers.\n";
+        out << "[sandbox]\n";
+        out << "tier0_memory_mb = 0\n";
+        out << "tier0_pid_limit = 4096\n";
+        out << "tier0_cpu_weight = 100\n";
+        out << "tier1_memory_mb = 256\n";
+        out << "tier1_pid_limit = 32\n";
+        out << "tier1_cpu_weight = 100\n\n";
 
         // ADR-036 / ADR-034: every decay-tracked fact_type must resolve
         // to a registered algorithm at config load, or the daemon fails

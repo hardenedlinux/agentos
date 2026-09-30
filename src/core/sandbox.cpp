@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "agentos/sandbox.h"
+#include "agentos/worker_cgroup.h"
 #include "agentos/database.h"
 #include "agentos/home_init.h"
 #include <algorithm>
@@ -41,19 +42,6 @@
 
 namespace agentos
 {
-
-  // Helper: write PID to cgroup.procs
-  static bool join_cgroup (const std::string &cgroup_path)
-  {
-    std::ofstream procs (cgroup_path + "/cgroup.procs");
-    if (!procs.is_open ())
-    {
-      spdlog::warn ("[sandbox] cannot open cgroup.procs at {}", cgroup_path);
-      return false;
-    }
-    procs << getpid ();
-    return true;
-  }
 
   // Detect whether the calling process holds CAP_SYS_ADMIN in its effective
   // capability set. Enterprise deployments grant this via a one-time
@@ -818,7 +806,8 @@ namespace agentos
                              const std::vector<std::string> &fs_write,
                              const std::vector<int> &tcp_connect_ports,
                              bool network, bool gpu,
-                             const std::string &run_id)
+                             const std::string &run_id,
+                             const std::string &cgroup_path)
   {
     spdlog::info ("[sandbox] applying worker sandbox job_dir={} run_dir={}", job_dir, run_dir);
 
@@ -912,11 +901,20 @@ namespace agentos
       return false;
     }
 
-    // cgroup v2 (ADR-015 step 1). Failure here is non-fatal — resource
-    // limits are best-effort; the syscall/Landlock layers are the hard
-    // security boundary.
-    if (!join_cgroup ("/sys/fs/cgroup/agentos"))
-      spdlog::warn ("[sandbox] cgroup join failed, continuing");
+    // cgroup v2 (ADR-015 step 1): join the run's own cgroup, created with
+    // its limits by the Dispatcher before fork. Joining before exec means
+    // the Worker and every process it starts are limited and accounted
+    // together. An empty path means limits are disabled for this daemon
+    // (reported once at startup by WorkerCgroups::init).
+    if (!cgroup_path.empty ())
+    {
+      if (join_worker_cgroup (cgroup_path))
+        spdlog::info ("[sandbox] joined cgroup {}", cgroup_path);
+      else
+        spdlog::error ("[sandbox] cannot join cgroup {}: {} -- Worker runs "
+                       "without resource limits",
+                       cgroup_path, strerror (errno));
+    }
 
     // Landlock (ADR-015). Manifest filesystem paths are AgentOS-relative
     // unless absolute. Resolve them here before passing them to Landlock.

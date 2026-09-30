@@ -80,6 +80,15 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
             if (auto v = sandbox_tbl->at_path("tier1_pid_limit").as_integer()) {
                 cfg.sandbox.pid_limit = static_cast<int>(v->get());
             }
+            if (auto v = sandbox_tbl->at_path("tier0_memory_mb").as_integer()) {
+                cfg.sandbox.tier0_memory_mb = static_cast<int>(v->get());
+            }
+            if (auto v = sandbox_tbl->at_path("tier0_cpu_weight").as_integer()) {
+                cfg.sandbox.tier0_cpu_weight = static_cast<int>(v->get());
+            }
+            if (auto v = sandbox_tbl->at_path("tier0_pid_limit").as_integer()) {
+                cfg.sandbox.tier0_pid_limit = static_cast<int>(v->get());
+            }
         }
 
         // [trusted_workers]

@@ -114,6 +114,10 @@ namespace agentos
         "[dispatcher] reaped pid={} job_id={} run_id={} exit_code={}", pid,
         entry.job_id, entry.run_id, exit_code);
 
+      // The Worker has exited: nothing it started may outlive it. Kill
+      // any descendants still in its cgroup and remove the cgroup.
+      cgroups_.destroy (entry.cgroup_path);
+
       if (WIFSIGNALED (status))
       {
         const int sig = WTERMSIG (status);
@@ -215,11 +219,17 @@ namespace agentos
       return {false, -1, {}, {}, {}, err};
     }
 
+    // ADR-015 Worker resource limits: the run's cgroup is created and its
+    // limits written before fork; the child joins it before exec.
+    const std::string cgroup_path = cgroups_.create (
+      req.run_id, req.forge_generated ? limits_tier1_ : limits_tier0_);
+
     const pid_t pid = fork ();
     if (pid < 0)
     {
       const std::string err = std::string ("fork failed: ") + strerror (errno);
       spdlog::error ("[dispatcher] {}", err);
+      cgroups_.destroy (cgroup_path);
       close (log_fd);
       close (pipe_fds[0]);
       close (pipe_fds[1]);
@@ -254,7 +264,8 @@ namespace agentos
       setenv ("AGENTOS_JOB_DIR", job_path.c_str (), 1);
 
       // Apply sandbox stack — must succeed before exec.
-      if (!apply_child_sandbox (req, job_path.string (), run_path.string ()))
+      if (!apply_child_sandbox (req, job_path.string (), run_path.string (),
+                                cgroup_path))
         _exit (2);
 
       // Build argv and exec.
@@ -303,7 +314,8 @@ namespace agentos
     {
       std::lock_guard<std::mutex> lk (mutex_);
       in_flight_[pid] = InFlight{req.job_id, req.run_id, req.step_id,
-                                 job_path.string (), run_path.string ()};
+                                 job_path.string (), run_path.string (),
+                                 cgroup_path};
     }
 
     return {
@@ -433,11 +445,20 @@ namespace agentos
 
   bool Dispatcher::apply_child_sandbox (const DispatchRequest &req,
                                         const std::string &job_dir,
-                                        const std::string &run_dir_path)
+                                        const std::string &run_dir_path,
+                                        const std::string &cgroup_path)
   {
     return apply_worker_sandbox (
       job_dir, run_dir_path, req.worker_id, req.fs_read, req.fs_write,
-      req.tcp_connect_ports, req.network, req.gpu, req.run_id);
+      req.tcp_connect_ports, req.network, req.gpu, req.run_id, cgroup_path);
+  }
+
+  void Dispatcher::init_resource_limits (const WorkerLimits &tier0,
+                                         const WorkerLimits &tier1)
+  {
+    limits_tier0_ = tier0;
+    limits_tier1_ = tier1;
+    cgroups_.init ();
   }
 
 } // namespace agentos

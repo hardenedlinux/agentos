@@ -33,10 +33,16 @@ struct Config {
         int promotion_threshold = 5;
     } forge;
 
+    // Worker resource limits (cgroup v2, ADR-006 Layer 0 / ADR-015). Tier-1
+    // = Forge-generated Workers ([sandbox] tier1_*); Tier-0 = registered /
+    // Suite Workers ([sandbox] tier0_*). 0 = no limit for that resource.
     struct Sandbox {
-        int memory_mb  = 256;
-        int cpu_weight = 100;
-        int pid_limit  = 32;
+        int memory_mb  = 256;   // tier1_memory_mb
+        int cpu_weight = 100;   // tier1_cpu_weight
+        int pid_limit  = 32;    // tier1_pid_limit
+        int tier0_memory_mb  = 0;     // no memory cap by default
+        int tier0_cpu_weight = 100;
+        int tier0_pid_limit  = 4096;
     } sandbox;
 
     struct Database {

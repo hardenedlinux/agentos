@@ -3269,6 +3269,20 @@ namespace agentos
            && sqlite3_column_int (stmt, 0) != 0;
   }
 
+  bool Database::agent_is_forge_generated (const std::string &id)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("SELECT approved_by FROM agents WHERE id=?"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return false;
+    const auto *t = sqlite3_column_text (stmt, 0);
+    return t && std::string (reinterpret_cast<const char *> (t)) == "forge";
+  }
+
   void Database::set_job_review_rejected (const std::string &job_id,
                                           const std::string &review_json)
   {

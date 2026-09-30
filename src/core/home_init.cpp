@@ -397,6 +397,94 @@ if __name__ == "__main__":
     main()
 )TMPL";
 
+    // -------- ADR-042 job channel client --------
+    // Written to ~/.agentos/skills/agentos_channel.py on every start (the
+    // daemon owns this file; it tracks the daemon's protocol version).
+    const char *CHANNEL_CLIENT = R"PY("""agentos_channel -- AgentOS job channel client (ADR-042).
+
+A Worker reaches the daemon through its job channel: fd 3, inherited at
+dispatch (AGENTOS_CHANNEL_FD). The daemon knows which run, job, step and
+user the channel belongs to; a Worker never states its own identity, and a
+user_id it does pass must match the job's.
+
+    import os, sys
+    sys.path.insert(0, os.path.join(os.environ["AGENTOS_HOME"], "skills"))
+    import agentos_channel
+
+    agentos_channel.call("user.facts.record", {
+        "fact_type": "card_reaction", "fact_key": "sku-1",
+        "payload": {"reaction": "accepted"}})
+
+Methods: user.facts.record/get, subject.register, subject.units.populate/
+next/complete/progress, subject.memory.upsert/query, asset.register (the
+file must be inside the job directory). Calls are synchronous; one request
+is in flight at a time. Frames: 4-byte big-endian length + JSON-RPC 2.0,
+at most 8 MiB -- pass large data as files, not through the channel.
+"""
+
+import itertools
+import json
+import os
+import socket
+import struct
+
+MAX_FRAME = 8 * 1024 * 1024
+
+
+class ChannelError(Exception):
+    def __init__(self, code, message, data=None):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.data = data
+
+
+_sock = None
+_ids = itertools.count(1)
+
+
+def _connection():
+    global _sock
+    if _sock is None:
+        fd = int(os.environ.get("AGENTOS_CHANNEL_FD", "-1"))
+        if fd < 0:
+            raise ChannelError(-32000, "no AgentOS job channel "
+                                       "(AGENTOS_CHANNEL_FD is not set)")
+        _sock = socket.socket(fileno=os.dup(fd))
+    return _sock
+
+
+def _recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ChannelError(-32000, "job channel closed by the daemon")
+        buf += chunk
+    return bytes(buf)
+
+
+def call(method, params=None):
+    """Send one request and return its result; raise ChannelError on error."""
+    sock = _connection()
+    rid = str(next(_ids))
+    body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": method,
+                       "params": params or {}},
+                      ensure_ascii=False).encode("utf-8")
+    if len(body) > MAX_FRAME:
+        raise ChannelError(-32600, "request exceeds 8 MiB; pass a file")
+    sock.sendall(struct.pack(">I", len(body)) + body)
+    (n,) = struct.unpack(">I", _recv_exact(sock, 4))
+    if n > MAX_FRAME:
+        raise ChannelError(-32600, "reply exceeds 8 MiB")
+    resp = json.loads(_recv_exact(sock, n).decode("utf-8"))
+    if "error" in resp:
+        err = resp["error"] or {}
+        raise ChannelError(err.get("code"), err.get("message"),
+                           err.get("data"))
+    return resp.get("result")
+)PY";
+
     // -------- Signature extractor (deterministic, no LLM) --------
     // Seeded to ~/.agentos/skills/extract_signatures.py
     // Forge runs this after Code Writer produces worker_impl.py.
@@ -616,6 +704,21 @@ if __name__ == "__main__":
     seed_if_absent (base / "skills" / "worker_template.py", WORKER_TEMPLATE);
     seed_if_absent (base / "skills" / "extract_signatures.py",
                     EXTRACT_SIGNATURES);
+    // ADR-042: always rewritten, so Workers get the client matching this
+    // daemon's channel protocol.
+    {
+      const auto path = base / "skills" / "agentos_channel.py";
+      std::ifstream in (path);
+      const std::string current ((std::istreambuf_iterator<char> (in)), {});
+      if (current != CHANNEL_CLIENT)
+      {
+        std::ofstream out (path, std::ios::trunc);
+        if (out)
+          out << CHANNEL_CLIENT;
+        else
+          spdlog::error ("[home_init] cannot write {}", path.string ());
+      }
+    }
 
     // NVChip is intentionally NOT inspected or repaired here (ADR-028).
     // is_initialized() checks vault.sealed only; NVChip is libtpms-internal,

@@ -750,6 +750,20 @@ namespace agentos
     gc_package_staging (agentos_home () / "workers");
     gc_package_staging (agentos_home () / "advisers");
 
+    // ADR-042: Worker requests on their job channel are served here,
+    // serially, like Gateway requests.
+    dispatcher_.set_channel_request_callback (
+      [this] (const ChannelContext &ctx, std::string frame)
+      {
+        OrchestratorEvent ev;
+        ev.kind = OrchestratorEvent::Kind::ChannelRequest;
+        ev.payload_json = std::move (frame);
+        ev.identity = "chan:" + ctx.run_id;
+        ev.job_id = ctx.job_id;
+        ev.channel = ctx;
+        enqueue (std::move (ev));
+      });
+
     // ADR-039 §H2a: once at startup, re-emit every job whose newest state
     // did not reach the outbox before the previous shutdown or crash.
     // Queued so it runs on the actor thread, after crash recovery.
@@ -787,6 +801,9 @@ namespace agentos
       break;
     case OrchestratorEvent::Kind::TimerFired:
       handle_timer_fired (msg);
+      break;
+    case OrchestratorEvent::Kind::ChannelRequest:
+      handle_channel_request (msg);
       break;
     }
   }
@@ -903,6 +920,7 @@ namespace agentos
     // that point is to thread the resolved id through as an explicit
     // parameter to each cmd_* handler instead of via this member.
     current_caller_key_id_ = ak->id;
+    channel_ctx_.reset ();
 
     // 5. Extract params.
     std::string params_json = "{}";
@@ -2843,15 +2861,20 @@ namespace agentos
   {
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
-        || !params.HasMember ("user_id") || !params["user_id"].IsString ()
-        || !params.HasMember ("path") || !params["path"].IsString ())
+        || !params.HasMember ("path") || !params["path"].IsString ()
+        || (!channel_ctx_
+            && (!params.HasMember ("user_id") || !params["user_id"].IsString ())))
     {
       reply_error (identity, request_id, -32602,
                    "Invalid params: 'user_id' and 'path' are required");
       return;
     }
 
-    const std::string user_id = params["user_id"].GetString ();
+    // ADR-042: on the job channel the asset belongs to the job's user.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
+    const std::string user_id = *acting;
     const fs::path source_path = params["path"].GetString ();
 
     // ADR-029: an asset may only be registered to a registered, enabled
@@ -2878,6 +2901,25 @@ namespace agentos
       reply_error (identity, request_id, -32602,
                    "file not found: " + source_path.string ());
       return;
+    }
+    // ADR-042: the daemon itself is not sandboxed, so a Worker could
+    // otherwise register -- and read back through the asset store -- any
+    // file the daemon can read. On the job channel only files inside the
+    // job's own directory (after resolving symlinks) are accepted.
+    if (channel_ctx_)
+    {
+      std::error_code ec;
+      const fs::path real = fs::canonical (source_path, ec);
+      const fs::path job_dir = fs::canonical (channel_ctx_->job_dir, ec);
+      const auto rel = real.lexically_relative (job_dir);
+      if (ec || real.empty () || job_dir.empty () || rel.empty ()
+          || *rel.begin () == "..")
+      {
+        reply_error (identity, request_id, -32011,
+                     "asset path must be inside the job directory "
+                       + channel_ctx_->job_dir);
+        return;
+      }
     }
 
     std::string original_filename;
@@ -3328,6 +3370,10 @@ namespace agentos
                                             const std::string &identity,
                                             const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("fact_type") || !params["fact_type"].IsString ()
@@ -3338,7 +3384,7 @@ namespace agentos
       return;
     }
 
-    const std::string user_id = current_caller_key_id_;
+    const std::string user_id = *acting;
     if (user_id.empty ())
     {
       reply_error (identity, request_id, -32603, "Internal error: no authenticated user");
@@ -3361,7 +3407,11 @@ namespace agentos
     params["payload"].Accept (pw);
     const std::string payload_json = payload_buf.GetString ();
 
-    const std::string source = current_caller_key_id_;
+    // ADR-034: who recorded this -- the job on the job channel, the admin
+    // key on the Gateway.
+    const std::string source = channel_ctx_
+                                 ? "job:" + channel_ctx_->job_id
+                                 : "admin:" + current_caller_key_id_;
 
     Database::UserFactEvent event;
     event.user_id    = user_id;
@@ -3440,6 +3490,10 @@ namespace agentos
                                         const std::string &identity,
                                         const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ())
     {
@@ -3447,7 +3501,7 @@ namespace agentos
       return;
     }
 
-    const std::string user_id = current_caller_key_id_;
+    const std::string user_id = *acting;
     if (user_id.empty ())
     {
       reply_error (identity, request_id, -32603, "Internal error");
@@ -3495,6 +3549,10 @@ namespace agentos
                                            const std::string &identity,
                                            const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_type") || !params["subject_type"].IsString ()
@@ -3503,7 +3561,7 @@ namespace agentos
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    const std::string user_id = current_caller_key_id_;
+    const std::string user_id = *acting;
     if (user_id.empty ())
     {
       reply_error (identity, request_id, -32603, "Internal error");
@@ -3548,6 +3606,10 @@ namespace agentos
                                                 const std::string &identity,
                                                 const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
@@ -3558,7 +3620,7 @@ namespace agentos
     }
     const std::string subject_id = params["subject_id"].GetString ();
     auto subj = db_.load_subject (subject_id);
-    if (!subj || subj->user_id != current_caller_key_id_)
+    if (!subj || subj->user_id != *acting)
     {
       reply_error (identity, request_id, -32020, "subject not found");
       return;
@@ -3586,6 +3648,10 @@ namespace agentos
                                             const std::string &identity,
                                             const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
@@ -3596,7 +3662,7 @@ namespace agentos
     const std::string subject_id = params["subject_id"].GetString ();
     {
         auto subj = db_.load_subject (subject_id);
-        if (!subj || subj->user_id != current_caller_key_id_)
+        if (!subj || subj->user_id != *acting)
         {
             reply_error (identity, request_id, -32020, "subject not found");
             return;
@@ -3631,6 +3697,10 @@ namespace agentos
                                                 const std::string &identity,
                                                 const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
@@ -3642,7 +3712,7 @@ namespace agentos
     const std::string subject_id = params["subject_id"].GetString ();
     {
         auto subj = db_.load_subject (subject_id);
-        if (!subj || subj->user_id != current_caller_key_id_)
+        if (!subj || subj->user_id != *acting)
         {
             reply_error (identity, request_id, -32020, "subject not found");
             return;
@@ -3661,6 +3731,10 @@ namespace agentos
                                                 const std::string &identity,
                                                 const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
@@ -3671,7 +3745,7 @@ namespace agentos
     const std::string subject_id = params["subject_id"].GetString ();
     {
         auto subj = db_.load_subject (subject_id);
-        if (!subj || subj->user_id != current_caller_key_id_)
+        if (!subj || subj->user_id != *acting)
         {
             reply_error (identity, request_id, -32020, "subject not found");
             return;
@@ -3693,20 +3767,48 @@ namespace agentos
                                                 const std::string &identity,
                                                 const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ()
         || !params.HasMember ("entry_key") || !params["entry_key"].IsString ()
         || !params.HasMember ("entry_value") || !params["entry_value"].IsObject ()
-        || !params.HasMember ("source_job_id") || !params["source_job_id"].IsString ())
+        || (params.HasMember ("source_job_id")
+            && !params["source_job_id"].IsString ())
+        || (!channel_ctx_ && !params.HasMember ("source_job_id")))
     {
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
+    // ADR-042: on the job channel the provenance is the requesting run's --
+    // source_job_id is its job, signed_off_by its Worker. Values supplied
+    // by the caller must agree; they are never taken on trust.
+    if (channel_ctx_)
+    {
+      if (params.HasMember ("source_job_id")
+          && params["source_job_id"].GetString () != channel_ctx_->job_id)
+      {
+        reply_error (identity, request_id, -32011,
+                     "source_job_id does not match the requesting job");
+        return;
+      }
+      if (params.HasMember ("signed_off_by")
+          && (!params["signed_off_by"].IsString ()
+              || params["signed_off_by"].GetString ()
+                   != channel_ctx_->worker_id))
+      {
+        reply_error (identity, request_id, -32011,
+                     "signed_off_by does not match the requesting Worker");
+        return;
+      }
+    }
     const std::string subject_id_str = params["subject_id"].GetString ();
     {
         auto subj = db_.load_subject (subject_id_str);
-        if (!subj || subj->user_id != current_caller_key_id_)
+        if (!subj || subj->user_id != *acting)
         {
             reply_error (identity, request_id, -32020, "subject not found");
             return;
@@ -3730,7 +3832,8 @@ namespace agentos
     }
     else
       row.related_asset_ids = "[]";
-    row.source_job_id = params["source_job_id"].GetString ();
+    row.source_job_id = channel_ctx_ ? channel_ctx_->job_id
+                                     : params["source_job_id"].GetString ();
     row.created_at = now_unix ();
     row.updated_at = now_unix ();
 
@@ -3750,6 +3853,8 @@ namespace agentos
     std::string signed_off_by;
     if (params.HasMember ("signed_off_by") && params["signed_off_by"].IsString ())
       signed_off_by = params["signed_off_by"].GetString ();
+    if (channel_ctx_ && track == "attested")
+      signed_off_by = channel_ctx_->worker_id;
 
     if (track == "attested" && signed_off_by.empty ())
     {
@@ -3782,6 +3887,10 @@ namespace agentos
                                                const std::string &identity,
                                                const std::string &request_id)
   {
+    // ADR-034/035/042: the user this request acts for.
+    const auto acting = acting_user_id (params_json, identity, request_id);
+    if (!acting)
+      return;
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
         || !params.HasMember ("subject_id") || !params["subject_id"].IsString ())
@@ -3792,7 +3901,7 @@ namespace agentos
     const std::string subject_id = params["subject_id"].GetString ();
     {
         auto subj = db_.load_subject (subject_id);
-        if (!subj || subj->user_id != current_caller_key_id_)
+        if (!subj || subj->user_id != *acting)
         {
             reply_error (identity, request_id, -32020, "subject not found");
             return;
@@ -5593,6 +5702,124 @@ namespace agentos
   }
 
   // ---------------------------------------------------------------------------
+  // ADR-042: Job execution channel
+  // ---------------------------------------------------------------------------
+
+  std::optional<std::string>
+  Orchestrator::acting_user_id (const std::string &params_json,
+                                const std::string &identity,
+                                const std::string &request_id)
+  {
+    rapidjson::Document params;
+    const bool parsed = !params.Parse (params_json.c_str ()).HasParseError ()
+                        && params.IsObject ();
+    if (channel_ctx_)
+    {
+      if (channel_ctx_->user_id.empty ())
+      {
+        reply_error (identity, request_id, -32603,
+                     "internal error: job has no user_id");
+        return std::nullopt;
+      }
+      if (parsed && params.HasMember ("user_id")
+          && (!params["user_id"].IsString ()
+              || params["user_id"].GetString () != channel_ctx_->user_id))
+      {
+        reply_error (identity, request_id, -32011,
+                     "user_id does not match the requesting job");
+        return std::nullopt;
+      }
+      return channel_ctx_->user_id;
+    }
+    std::optional<std::string> uid;
+    if (parsed)
+      uid = required_user_id (params);
+    if (!uid)
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: user_id is required");
+      return std::nullopt;
+    }
+    return uid;
+  }
+
+  void Orchestrator::handle_channel_request (const OrchestratorEvent &ev)
+  {
+    const ChannelContext &ctx = ev.channel;
+    const std::string &identity = ev.identity; // "chan:<run_id>"
+
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ()
+        || !doc.IsObject ())
+    {
+      reply_error (identity, "", -32700, "Parse error");
+      return;
+    }
+    std::string request_id;
+    if (doc.HasMember ("id"))
+    {
+      if (doc["id"].IsString ())
+        request_id = doc["id"].GetString ();
+      else if (doc["id"].IsInt64 ())
+        request_id = std::to_string (doc["id"].GetInt64 ());
+    }
+    const std::string method
+      = doc.HasMember ("method") && doc["method"].IsString ()
+          ? doc["method"].GetString ()
+          : "";
+
+    // The run's job must still exist and belong to the run's user. The
+    // channel lives exactly as long as the Worker, so this only fails on
+    // an internal inconsistency; it is checked anyway.
+    if (ctx.user_id.empty () || !job_owned_by (ctx.job_id, ctx.user_id))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+
+    std::string params_json = "{}";
+    if (doc.HasMember ("params"))
+    {
+      rapidjson::StringBuffer buf;
+      rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+      doc["params"].Accept (w);
+      params_json = buf.GetString ();
+    }
+
+    using Handler = void (Orchestrator::*) (const std::string &,
+                                            const std::string &,
+                                            const std::string &);
+    // The only methods a Worker can reach. Everything else -- job control,
+    // registration, credentials, vault, users -- is not on the channel.
+    static const std::unordered_map<std::string, Handler> kChannelMethods = {
+      {"user.facts.record", &Orchestrator::cmd_user_facts_record},
+      {"user.facts.get", &Orchestrator::cmd_user_facts_get},
+      {"subject.register", &Orchestrator::cmd_subject_register},
+      {"subject.units.populate", &Orchestrator::cmd_subject_units_populate},
+      {"subject.units.next", &Orchestrator::cmd_subject_units_next},
+      {"subject.units.complete", &Orchestrator::cmd_subject_units_complete},
+      {"subject.units.progress", &Orchestrator::cmd_subject_units_progress},
+      {"subject.memory.upsert", &Orchestrator::cmd_subject_memory_upsert},
+      {"subject.memory.query", &Orchestrator::cmd_subject_memory_query},
+      {"asset.register", &Orchestrator::cmd_asset_register},
+    };
+    auto it = kChannelMethods.find (method);
+    if (it == kChannelMethods.end ())
+    {
+      reply_error (identity, request_id, -32601,
+                   "Method not available on the job channel");
+      return;
+    }
+
+    spdlog::info ("[orchestrator] channel {} job {} step {} user '{}': {}",
+                  ctx.run_id, ctx.job_id, ctx.step_id, ctx.user_id, method);
+    channel_ctx_ = ctx;
+    current_caller_key_id_.clear ();
+    (this->*(it->second)) (params_json, identity, request_id);
+    channel_ctx_.reset ();
+  }
+
+  // ---------------------------------------------------------------------------
   // TimerFired
   // ---------------------------------------------------------------------------
 
@@ -6061,6 +6288,7 @@ namespace agentos
     req.run_id = run_id;
     req.step_id = step.step.id;
     req.worker_id = worker->id.value ();
+    req.user_id = job.user_id; // ADR-042: channel identity
     req.binary_path = worker->binary_path;
 
     // ADR-015/016: substitute the reserved __JOB_INPUT_PATH__/
@@ -6772,6 +7000,12 @@ namespace agentos
                                const std::string &request_id,
                                const std::string &result_json)
   {
+    if (identity.rfind ("chan:", 0) == 0) // ADR-042 job channel
+    {
+      dispatcher_.channel_send (identity.substr (5),
+                                make_response (request_id, result_json));
+      return;
+    }
     GatewayEvent ev;
     ev.kind = GatewayEvent::Kind::Outbound;
     ev.outbound.identity = identity;
@@ -6784,6 +7018,13 @@ namespace agentos
                                   const std::string &message,
                                   const std::string &data_json)
   {
+    if (identity.rfind ("chan:", 0) == 0) // ADR-042 job channel
+    {
+      dispatcher_.channel_send (
+        identity.substr (5),
+        make_error_response (request_id, code, message, data_json));
+      return;
+    }
     GatewayEvent ev;
     ev.kind = GatewayEvent::Kind::Outbound;
     ev.outbound.identity = identity;

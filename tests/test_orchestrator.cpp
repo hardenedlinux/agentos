@@ -45,6 +45,7 @@
 #include "agentos/orchestrator.h"
 #include "agentos/registry.h"
 #include "agentos/types.h"
+#include "agentos/user_manager.h"
 
 #include <openssl/evp.h>
 #include <openssl/sha.h>
@@ -758,6 +759,102 @@ TEST_F (OrchestratorTest, PlanReady_NoWorkerForCommand_ReportsExhaustedToMaster)
 // ---------------------------------------------------------------------------
 // Pipeline: plan_ready with a registered worker → WorkerDone → job done
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// ADR-042: Job execution channel -- identity, method whitelist, asset scope
+// ---------------------------------------------------------------------------
+
+TEST_F (OrchestratorTest, JobChannel_ActsForTheJobsUserOnly)
+{
+  const std::string job_id = "job-chan";
+  Task task;
+  task.id = TaskId (job_id);
+  task.goal = "g";
+  task.user_id = "alice";
+  db_->store_job (task);
+  const fs::path job_dir = home_ / "jobs" / job_id;
+  fs::create_directories (job_dir / "output");
+  ASSERT_TRUE (UserManager (*db_).register_user ("alice"));
+
+  auto channel = [&] (const std::string &body)
+  {
+    OrchestratorEvent ev;
+    ev.kind = OrchestratorEvent::Kind::ChannelRequest;
+    ev.payload_json = body;
+    ev.identity = "chan:run-1";
+    ev.job_id = job_id;
+    ev.channel = ChannelContext{"run-1", job_id, "step-0", "alice",
+                                "fact-writer", job_dir.string ()};
+    orch_->enqueue (std::move (ev));
+  };
+  auto settle = [] { std::this_thread::sleep_for (std::chrono::milliseconds (150)); };
+
+  // 1. Recorded for the job's user, attributed to the job.
+  channel (R"({"jsonrpc":"2.0","id":"1","method":"user.facts.record","params":)"
+           R"({"fact_type":"card_reaction","fact_key":"sku-1","payload":{}}})");
+  // 2. A user_id naming someone else is rejected, never honoured.
+  channel (R"({"jsonrpc":"2.0","id":"2","method":"user.facts.record","params":)"
+           R"({"user_id":"bob","fact_type":"card_reaction","fact_key":"sku-2","payload":{}}})");
+  // 3. Methods outside the channel whitelist are unreachable.
+  channel (R"({"jsonrpc":"2.0","id":"3","method":"job.cancel","params":)"
+           R"({"job_id":"job-chan","user_id":"alice"}})");
+  // 4. asset.register: only files inside the job directory.
+  std::ofstream (job_dir / "output" / "a.wav") << "RIFF";
+  channel (R"({"jsonrpc":"2.0","id":"4","method":"asset.register","params":)"
+           R"({"path":")" + (job_dir / "output" / "a.wav").string () + R"("}})");
+  std::ofstream (home_ / "secret.txt") << "key";
+  channel (R"({"jsonrpc":"2.0","id":"5","method":"asset.register","params":)"
+           R"({"path":")" + (home_ / "secret.txt").string () + R"("}})");
+  // Symlink escaping the job directory is resolved and refused too.
+  fs::create_symlink (home_ / "secret.txt", job_dir / "output" / "link.txt");
+  channel (R"({"jsonrpc":"2.0","id":"6","method":"asset.register","params":)"
+           R"({"path":")" + (job_dir / "output" / "link.txt").string () + R"("}})");
+  settle ();
+
+  auto alice = db_->load_user_fact_events ("alice", std::nullopt, 10);
+  ASSERT_EQ (alice.size (), 1u);
+  EXPECT_EQ (alice[0].fact_key, "sku-1");
+  EXPECT_EQ (alice[0].source, "job:job-chan");
+  EXPECT_TRUE (db_->load_user_fact_events ("bob", std::nullopt, 10).empty ());
+
+  auto j = db_->load_job (job_id);
+  ASSERT_TRUE (j);
+  EXPECT_NE (j->phase, "cancelled") << "job.cancel must not be reachable";
+
+  auto assets = db_->load_assets_for_user ("alice");
+  ASSERT_EQ (assets.size (), 1u) << "only the in-job file is registered";
+  EXPECT_EQ (assets[0].original_filename, "a.wav");
+}
+
+TEST_F (OrchestratorTest, Gateway_FactsRequireExplicitUser)
+{
+  const std::string key = insert_key ("admin");
+  auto call = [&] (const std::string &id, const std::string &params) -> std::string
+  {
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id
+                  + R"(","method":"user.facts.record","key":")" + key
+                  + R"(","params":)" + params + "}");
+    if (!wait_gateway (1))
+      return "timeout";
+    std::lock_guard<std::mutex> lk (mtx_);
+    return gateway_events_[0].outbound.message;
+  };
+  const std::string no_user = call (
+    "1", R"({"fact_type":"card_reaction","fact_key":"k","payload":{}})");
+  EXPECT_NE (no_user.find ("-32602"), std::string::npos) << no_user;
+  const std::string with_user = call (
+    "2", R"({"user_id":"carol","fact_type":"card_reaction","fact_key":"k","payload":{}})");
+  EXPECT_NE (with_user.find ("\"result\""), std::string::npos) << with_user;
+  auto ev = db_->load_user_fact_events ("carol", std::nullopt, 10);
+  ASSERT_EQ (ev.size (), 1u);
+  EXPECT_EQ (ev[0].source, "admin:key-admin");
+  EXPECT_TRUE (db_->load_user_fact_events ("key-admin", std::nullopt, 10).empty ())
+    << "the key id is never used as a user_id";
+}
 
 // ADR-030: suite.install is all or nothing. A Suite whose second
 // component is invalid must leave the previously installed Adviser package,

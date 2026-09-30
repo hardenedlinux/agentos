@@ -390,19 +390,19 @@ info "user A id=$ID_A, user B id=$ID_B"
 expect_error_containing \
   "unknown fact_type -> Unknown fact_type" \
   "Unknown fact_type" \
-  "$AGENTOS_BIN" user --key "$RAW_A" facts record \
+  "$AGENTOS_BIN" user --key "$RAW_A" facts --user userA record \
     --fact-type not_a_real_fact_type --fact-key x --payload '{}'
 
 expect_error_containing \
   "decayed fact_type without --signal -> signal required" \
   "signal required for decayed fact_type" \
-  "$AGENTOS_BIN" user --key "$RAW_A" facts record \
+  "$AGENTOS_BIN" user --key "$RAW_A" facts --user userA record \
     --fact-type category_interest --fact-key electronics --payload '{}'
 
 expect_error_containing \
   "subject register with invalid unit_type -> rejected" \
   "unit_type must be 'file' or 'line'" \
-  "$AGENTOS_BIN" subject --key "$RAW_A" register \
+  "$AGENTOS_BIN" subject --key "$RAW_A" --user userA register \
     --subject-type codebase --unit-type chunk
 
 RANDOM_SUBJECT_ID="00000000-0000-0000-0000-000000000000"
@@ -410,26 +410,26 @@ RANDOM_SUBJECT_ID="00000000-0000-0000-0000-000000000000"
 expect_error_containing \
   "subject units next on a nonexistent subject_id -> subject not found" \
   "subject not found" \
-  "$AGENTOS_BIN" subject --key "$RAW_A" units next \
+  "$AGENTOS_BIN" subject --key "$RAW_A" --user userA units next \
     --subject-id "$RANDOM_SUBJECT_ID"
 
 expect_error_containing \
   "subject units progress on a nonexistent subject_id -> subject not found" \
   "subject not found" \
-  "$AGENTOS_BIN" subject --key "$RAW_A" units progress \
+  "$AGENTOS_BIN" subject --key "$RAW_A" --user userA units progress \
     --subject-id "$RANDOM_SUBJECT_ID"
 
 expect_error_containing \
   "subject memory query on a nonexistent subject_id -> subject not found" \
   "subject not found" \
-  "$AGENTOS_BIN" subject --key "$RAW_A" memory query \
+  "$AGENTOS_BIN" subject --key "$RAW_A" --user userA memory query \
     --subject-id "$RANDOM_SUBJECT_ID"
 
 # --- cross-user isolation: A creates, B is rejected on every subject.* op ---
 
 expect_success \
   "(setup) user A registers a subject" REG_A \
-  "$AGENTOS_BIN" subject --json --key "$RAW_A" register \
+  "$AGENTOS_BIN" subject --json --key "$RAW_A" --user userA register \
     --subject-type codebase --unit-type file --title "userA private repo"
 SUBJECT_A=$(json_line "$REG_A" | jq -r '.subject_id // empty')
 if [[ -z "$SUBJECT_A" ]]; then
@@ -440,38 +440,38 @@ else
   expect_error_containing \
     "user B: units populate on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" units populate \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB units populate \
       --subject-id "$SUBJECT_A" --unit x.py
 
   expect_error_containing \
     "user B: units next on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" units next \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB units next \
       --subject-id "$SUBJECT_A"
 
   expect_error_containing \
     "user B: units complete on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" units complete \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB units complete \
       --subject-id "$SUBJECT_A" --index 0
 
   expect_error_containing \
     "user B: units progress on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" units progress \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB units progress \
       --subject-id "$SUBJECT_A"
 
   expect_error_containing \
     "user B: memory upsert on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" memory upsert \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB memory upsert \
       --subject-id "$SUBJECT_A" --entry-key k --entry-value '{}' \
       --source-job-id job1
 
   expect_error_containing \
     "user B: memory query on A's subject -> subject not found" \
     "subject not found" \
-    "$AGENTOS_BIN" subject --key "$RAW_B" memory query \
+    "$AGENTOS_BIN" subject --key "$RAW_B" --user userB memory query \
       --subject-id "$SUBJECT_A"
 
   # sanity: B is not globally broken — B can register and use their OWN
@@ -481,32 +481,32 @@ else
   REG_B=""
   expect_success \
     "user B can still register their OWN subject (isolation isn't overly broad)" REG_B \
-    "$AGENTOS_BIN" subject --json --key "$RAW_B" register \
+    "$AGENTOS_BIN" subject --json --key "$RAW_B" --user userB register \
       --subject-type codebase --unit-type file --title "userB own repo"
   SUBJECT_B=$(json_line "$REG_B" | jq -r '.subject_id // empty')
   if [[ -n "$SUBJECT_B" ]]; then
     POP_B_OUT=""
     expect_success \
       "user B can populate units on their OWN subject" POP_B_OUT \
-      "$AGENTOS_BIN" subject --key "$RAW_B" units populate \
+      "$AGENTOS_BIN" subject --key "$RAW_B" --user userB units populate \
         --subject-id "$SUBJECT_B" --unit y.py
   fi
 fi
 
-# --- cross-user isolation: user.facts.* (implicit per-caller scoping, not
-# an explicit ownership param — so the "negative" case here is data NOT
-# leaking through a successful call, rather than an error response) ---
+# --- cross-user isolation: user.facts.* (ADR-042: the Gateway path is
+# admin-only and names the user explicitly; the "negative" case is data
+# NOT leaking into another user's successful call) ---
 
-"$AGENTOS_BIN" user --key "$RAW_A" facts record \
+"$AGENTOS_BIN" user --key "$RAW_A" facts --user userA record \
   --fact-type card_reaction --fact-key userA_only_sku --payload '{}' >/dev/null 2>&1
 
-GET_AS_B=$("$AGENTOS_BIN" user --json --key "$RAW_B" facts get 2>&1)
+GET_AS_B=$("$AGENTOS_BIN" user --json --key "$RAW_B" facts --user userB get 2>&1)
 GET_AS_B_JSON=$(json_line "$GET_AS_B")
 if echo "$GET_AS_B_JSON" | jq -e '.facts[] | select(.fact_key=="userA_only_sku")' >/dev/null 2>&1; then
   bad "user B's facts.get leaked user A's fact — cross-user isolation broken for user.facts.get"
   echo "$GET_AS_B_JSON"
 else
-  ok "user B's facts.get does not see user A's card_reaction fact (implicit per-caller scoping holds)"
+  ok "user B's facts.get does not see user A's card_reaction fact (per-user scoping holds)"
 fi
 
 stop_daemon

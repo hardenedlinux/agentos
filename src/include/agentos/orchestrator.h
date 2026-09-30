@@ -37,6 +37,7 @@
 
 #include <deque>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -513,6 +514,19 @@ namespace agentos
     // The authenticated caller's identity (access‑key id) for the current
     // request; set during handle_gateway_inbound and used for per‑user scoping.
     std::string current_caller_key_id_;
+    // ADR-042: set while serving a job-channel request (serial dispatch, as
+    // for current_caller_key_id_). Identifies the requesting run; the
+    // user a request acts for comes from here, never from its params.
+    std::optional<ChannelContext> channel_ctx_;
+    void handle_channel_request (const OrchestratorEvent &ev);
+    // The user a user-scoped request acts for: the job's user on the job
+    // channel (a differing params.user_id is rejected with -32011); the
+    // explicit, required params.user_id on the Gateway (admin only).
+    // Replies with the error and returns nullopt on failure.
+    std::optional<std::string>
+    acting_user_id (const std::string &params_json,
+                    const std::string &identity,
+                    const std::string &request_id);
 
     // ADR-038: pending continuation_ids provided via job.submit before
     // the job is activated (plan_ready).

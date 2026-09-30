@@ -10,6 +10,7 @@
 #include <rapidjson/writer.h>
 
 #include <fcntl.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -117,6 +118,7 @@ namespace agentos
       // The Worker has exited: nothing it started may outlive it. Kill
       // any descendants still in its cgroup and remove the cgroup.
       cgroups_.destroy (entry.cgroup_path);
+      channel_.close_run (entry.run_id);
 
       if (WIFSIGNALED (status))
       {
@@ -219,6 +221,21 @@ namespace agentos
       return {false, -1, {}, {}, {}, err};
     }
 
+    // ADR-042: the run's channel. The daemon keeps one end; the other
+    // becomes fd 3 in the Worker.
+    const int channel_child_fd = channel_.prepare (
+      ChannelContext{req.run_id, req.job_id, req.step_id, req.user_id,
+                     req.worker_id, job_path.string ()});
+    if (channel_child_fd < 0)
+    {
+      const std::string err = "cannot create job channel";
+      spdlog::error ("[dispatcher] {} for run {}", err, req.run_id);
+      close (log_fd);
+      close (pipe_fds[0]);
+      close (pipe_fds[1]);
+      return {false, -1, {}, {}, {}, err};
+    }
+
     // ADR-015 Worker resource limits: the run's cgroup is created and its
     // limits written before fork; the child joins it before exec.
     const std::string cgroup_path = cgroups_.create (
@@ -230,6 +247,7 @@ namespace agentos
       const std::string err = std::string ("fork failed: ") + strerror (errno);
       spdlog::error ("[dispatcher] {}", err);
       cgroups_.destroy (cgroup_path);
+      channel_.discard (req.run_id);
       close (log_fd);
       close (pipe_fds[0]);
       close (pipe_fds[1]);
@@ -255,6 +273,23 @@ namespace agentos
       close (log_fd);
       close (pipe_fds[0]);
       close (pipe_fds[1]);
+
+      // ADR-042: the job channel is fd 3. dup2 clears FD_CLOEXEC on the
+      // target; if the socket already is fd 3, clear it explicitly.
+      if (channel_child_fd == kChannelFd)
+        fcntl (kChannelFd, F_SETFD, 0);
+      else
+      {
+        if (dup2 (channel_child_fd, kChannelFd) < 0)
+          _exit (1);
+        close (channel_child_fd);
+      }
+      setenv ("AGENTOS_CHANNEL_FD", std::to_string (kChannelFd).c_str (), 1);
+
+      // A Worker inherits exactly stdin, stdout, stderr and its channel.
+      // Close every other descriptor the daemon had open, whether or not
+      // it was marked close-on-exec.
+      syscall (SYS_close_range, kChannelFd + 1, ~0U, 0);
 
       // Tell the worker where to write result.json (ADR-016 Result File
       // Wire Format). setenv() only touches this process's own environ
@@ -294,6 +329,7 @@ namespace agentos
 
     close (log_fd);
     close (pipe_fds[0]); // child owns read end
+    channel_.attach (req.run_id);
 
     // Write task_json; child reads from stdin until EOF.
     {
@@ -451,6 +487,18 @@ namespace agentos
     return apply_worker_sandbox (
       job_dir, run_dir_path, req.worker_id, req.fs_read, req.fs_write,
       req.tcp_connect_ports, req.network, req.gpu, req.run_id, cgroup_path);
+  }
+
+  void Dispatcher::set_channel_request_callback (
+    ChannelServer::RequestCallback cb)
+  {
+    channel_.set_request_callback (std::move (cb));
+  }
+
+  void Dispatcher::channel_send (const std::string &run_id,
+                                 const std::string &message)
+  {
+    channel_.send (run_id, message);
   }
 
   void Dispatcher::init_resource_limits (const WorkerLimits &tier0,

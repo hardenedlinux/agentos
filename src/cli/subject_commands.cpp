@@ -68,6 +68,12 @@ void register_subject_commands (CLI::App &app)
   subject->add_option (
     "--key", *access_key,
     "Access key (64-char hex); defaults to first active key in DB");
+  // ADR-035/042: subjects are owned by a user. Over the Gateway (admin) the
+  // user must be named explicitly; Workers use the job channel instead.
+  auto subject_user = std::make_shared<std::string> ("0");
+  subject->add_option ("--user", *subject_user,
+                       "user_id the subject belongs to (default \"0\")")
+    ->default_val ("0");
 
   // ---- subject register ----
   {
@@ -84,7 +90,7 @@ void register_subject_commands (CLI::App &app)
 
     reg->callback (
       [timeout_ms, socket_path, json_flag, access_key, subject_type, unit_type,
-       title]
+       title, subject_user]
       {
         try
         {
@@ -105,6 +111,10 @@ void register_subject_commands (CLI::App &app)
             client.set_socket_path (*socket_path);
           if (!access_key->empty ())
             client.set_access_key (*access_key);
+          params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
           auto result = client.send ("subject.register", std::move (params));
           if (*json_flag)
@@ -139,7 +149,7 @@ void register_subject_commands (CLI::App &app)
         ->required ();
 
       populate->callback (
-        [timeout_ms, socket_path, json_flag, access_key, subject_id, unit_refs]
+        [timeout_ms, socket_path, json_flag, access_key, subject_id, unit_refs, subject_user]
         {
           try
           {
@@ -158,6 +168,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result
               = client.send ("subject.units.populate", std::move (params));
@@ -186,7 +200,7 @@ void register_subject_commands (CLI::App &app)
       next->add_option ("--limit", *limit)->default_val (50);
 
       next->callback (
-        [timeout_ms, socket_path, json_flag, access_key, subject_id, limit]
+        [timeout_ms, socket_path, json_flag, access_key, subject_id, limit, subject_user]
         {
           try
           {
@@ -202,6 +216,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result = client.send ("subject.units.next", std::move (params));
             if (*json_flag)
@@ -240,7 +258,7 @@ void register_subject_commands (CLI::App &app)
         ->required ();
 
       complete->callback (
-        [timeout_ms, socket_path, json_flag, access_key, subject_id, indices]
+        [timeout_ms, socket_path, json_flag, access_key, subject_id, indices, subject_user]
         {
           try
           {
@@ -259,6 +277,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result
               = client.send ("subject.units.complete", std::move (params));
@@ -283,7 +305,7 @@ void register_subject_commands (CLI::App &app)
       progress->add_option ("--subject-id", *subject_id)->required ();
 
       progress->callback (
-        [timeout_ms, socket_path, json_flag, access_key, subject_id]
+        [timeout_ms, socket_path, json_flag, access_key, subject_id, subject_user]
         {
           try
           {
@@ -298,6 +320,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result
               = client.send ("subject.units.progress", std::move (params));
@@ -344,7 +370,7 @@ void register_subject_commands (CLI::App &app)
 
       upsert->callback (
         [timeout_ms, socket_path, json_flag, access_key, subject_id, entry_key,
-         entry_value_str, source_job_id, asset_ids]
+         entry_value_str, source_job_id, asset_ids, subject_user]
         {
           try
           {
@@ -382,6 +408,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result
               = client.send ("subject.memory.upsert", std::move (params));
@@ -414,7 +444,7 @@ void register_subject_commands (CLI::App &app)
 
       query->callback (
         [timeout_ms, socket_path, json_flag, access_key, subject_id, key_prefix,
-         limit, cursor]
+         limit, cursor, subject_user]
         {
           try
           {
@@ -438,6 +468,10 @@ void register_subject_commands (CLI::App &app)
               client.set_socket_path (*socket_path);
             if (!access_key->empty ())
               client.set_access_key (*access_key);
+            params.AddMember ("user_id",
+                              rapidjson::Value (subject_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
 
             auto result = client.send ("subject.memory.query", std::move (params));
             if (*json_flag)

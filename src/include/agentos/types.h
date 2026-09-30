@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #pragma once
+#include "agentos/job_channel.h"
 /**
  * agentos/types.h
  *
@@ -363,12 +364,14 @@ namespace agentos
         AdviserFailed,  // Adviser thread exited with error
         MasterDecision, // Master has reached a decision
         TimerFired,     // from PeriodicExecutor (scheduled task)
+        ChannelRequest, // ADR-042: a Worker's request on its job channel
       };
 
     Kind kind;
     std::string payload_json;
     std::string identity;
     std::string job_id; // associated job (replaces TaskId where relevant)
+    ChannelContext channel; // ChannelRequest only: the requesting run
   };
 
   // ADR-024 — Master event queue entries

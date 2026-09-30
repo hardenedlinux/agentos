@@ -361,6 +361,12 @@ void register_user_commands (CLI::App &app)
     auto *facts = user->add_subcommand (
       "facts", "Manage per-user personalization facts");
     facts->require_subcommand (1);
+    // ADR-034/042: facts belong to a user. Over the Gateway (admin) the user
+    // must be named explicitly; Workers use the job channel instead.
+    auto facts_user = std::make_shared<std::string> ("0");
+    facts->add_option ("--user", *facts_user,
+                       "user_id the facts belong to (default \"0\")")
+      ->default_val ("0");
 
     // ---- user facts record ----
     {
@@ -392,7 +398,7 @@ void register_user_commands (CLI::App &app)
 
       record->callback (
         [timeout_ms, socket_path, json_flag, access_key, fact_type, fact_key,
-         payload_str, signal, record]
+         payload_str, signal, record, facts_user]
         {
           try
           {
@@ -422,6 +428,10 @@ void register_user_commands (CLI::App &app)
             if (!access_key->empty ())
               client.set_access_key (*access_key);
 
+            params.AddMember ("user_id",
+                              rapidjson::Value (facts_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
             auto result = client.send ("user.facts.record", std::move (params));
             if (*json_flag)
               print_json (result);
@@ -446,7 +456,7 @@ void register_user_commands (CLI::App &app)
                        "Repeatable; omit to return all fact_types");
 
       get->callback (
-        [timeout_ms, socket_path, json_flag, access_key, fact_types]
+        [timeout_ms, socket_path, json_flag, access_key, fact_types, facts_user]
         {
           try
           {
@@ -466,6 +476,10 @@ void register_user_commands (CLI::App &app)
             if (!access_key->empty ())
               client.set_access_key (*access_key);
 
+            params.AddMember ("user_id",
+                              rapidjson::Value (facts_user->c_str (),
+                                                params.GetAllocator ()),
+                              params.GetAllocator ());
             auto result = client.send ("user.facts.get", std::move (params));
             if (*json_flag)
             {

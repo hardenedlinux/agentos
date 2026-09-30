@@ -266,15 +266,9 @@ assert_close "$SCORE2" "0.65" 0.0001 "score after second write matches real ema(
 
 log "== user.facts.events — local/debug command (bypasses RPC entirely) =="
 
-require_sqlite3
-USER_ID=$(sqlite3 "$AGENTOS_HOME/agentos.db" \
-  "SELECT id FROM access_keys ORDER BY created_at ASC LIMIT 1;")
-if [[ -n "$USER_ID" ]]; then
-  ok "resolved user_id=$USER_ID from access_keys (test bookkeeping only)"
-else
-  bad "could not resolve a user_id from access_keys"
-  die "cannot continue user.facts.events tests without a user_id"
-fi
+# ADR-042: facts written above over the Gateway belong to the user named
+# by the CLI's --user, which defaults to "0".
+USER_ID="0"
 
 CR_EVENTS=$("$AGENTOS_BIN" user --json facts events \
   --user-id "$USER_ID" --fact-type card_reaction 2>&1)

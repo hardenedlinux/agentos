@@ -27,6 +27,7 @@
 #include "agentos/home_init.h"
 #include "agentos/types.h"
 #include "agentos/worker_cgroup.h"
+#include "agentos/job_channel.h"
 
 #include <filesystem>
 #include <functional>
@@ -48,6 +49,7 @@ struct DispatchRequest
   std::string run_id;      // pre-generated UUID (Orchestrator owns generation)
   std::string step_id;     // pipeline step this Worker is executing
   std::string worker_id;   // identifies the worker binary in Registry
+  std::string user_id;     // owning job's user_id (ADR-029/042), never empty
   std::string binary_path; // absolute path to worker executable (.py/.scm/ELF)
   std::string task_json;   // full task payload, written to Worker stdin
 
@@ -129,6 +131,12 @@ public:
   void init_resource_limits (const WorkerLimits &tier0,
                              const WorkerLimits &tier1);
 
+  // ADR-042 Job execution channel. Requests arriving on a run's fd 3 are
+  // delivered to `cb` with the run's identity; replies go back through
+  // channel_send(). Thread-safe.
+  void set_channel_request_callback (ChannelServer::RequestCallback cb);
+  void channel_send (const std::string &run_id, const std::string &message);
+
   // Fork and exec the Worker binary described by req.
   // Inserts the job/run/step identity into the in-flight map.
   // Returns immediately after fork.
@@ -178,6 +186,7 @@ private:
                             const std::string     &cgroup_path);
 
   WorkerCgroups cgroups_;
+  ChannelServer channel_;
   WorkerLimits  limits_tier0_;
   WorkerLimits  limits_tier1_;
 

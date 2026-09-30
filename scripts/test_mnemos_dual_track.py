@@ -31,7 +31,14 @@ sock.setsockopt(zmq.LINGER, 0)
 sock.connect(SOCKET_PATH)
 
 
+# ADR-042: over the Gateway (admin), user-scoped subject.* calls name the
+# user explicitly; Workers use their job channel instead.
+TEST_USER_ID = "0"
+
+
 def call(method: str, params: dict) -> dict:
+    if method.startswith("subject.") and method != "subject.memory.write_policy.upsert":
+        params = {"user_id": TEST_USER_ID, **params}
     req_id = str(uuid.uuid4())
     msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "key": ADMIN_KEY, "params": params}
     sock.send_string(json.dumps(msg))

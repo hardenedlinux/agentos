@@ -98,11 +98,14 @@ namespace agentos::cli
     auto keys = db.load_active_access_keys ();
     for (const auto &k : keys)
     {
-      if (k.role == "admin")
+      if (k.role == "admin" && !k.key.empty ())
         return k.key;
     }
-    if (!keys.empty ())
-      return keys.front ().key;
+    // Any other key the CLI can present; user-bound keys are hash-only
+    // (ADR-041) and have no stored plaintext.
+    for (const auto &k : keys)
+      if (!k.key.empty ())
+        return k.key;
     return {};
   }
 

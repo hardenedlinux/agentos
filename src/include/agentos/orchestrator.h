@@ -22,6 +22,7 @@
  * because MessageQueue is thread-safe.
  */
 
+#include "agentos/access_key.h"
 #include "agentos/actor.h"
 #include "agentos/config.h"
 #include "agentos/cred_vault.h"
@@ -47,6 +48,15 @@ namespace agentos
   // ---------------------------------------------------------------------------
   // In-memory execution state per active job
   // ---------------------------------------------------------------------------
+
+  // ADR-041: who is calling on the Gateway, resolved once per request.
+  struct CallerContext
+  {
+    std::string key_id;
+    std::string role; // admin | operator | readonly | service
+    // Set only for a user-bound service key: the one user it acts for.
+    std::optional<std::string> bound_user_id;
+  };
 
   struct ActiveStep
   {
@@ -150,8 +160,9 @@ namespace agentos
     std::optional<Database::AccessKey>
     authenticate (const std::string &key_value) const;
 
-    // Check role permission for a method (ADR-025 role matrix).
-    bool is_permitted (const std::string &role,
+    // Check a caller's permission for a method (ADR-025 role matrix,
+    // ADR-041 service role: bound vs unbound).
+    bool is_permitted (const CallerContext &caller,
                        const std::string &method) const;
 
     // ---------------------------------------------------------------------------
@@ -245,6 +256,17 @@ namespace agentos
                           const std::string &request_id);
 
     // --- ADR-029: user.* methods ---
+    // ADR-041: per-user access keys.
+    void cmd_user_key_issue (const std::string &params_json,
+                             const std::string &identity,
+                             const std::string &request_id);
+    void cmd_user_key_revoke (const std::string &params_json,
+                              const std::string &identity,
+                              const std::string &request_id);
+    // Issue and store a key bound to user_id; nullopt on failure.
+    std::optional<IssuedAccessKey>
+    issue_user_access_key (const std::string &user_id,
+                           const std::string &description);
     void cmd_user_register (const std::string &params_json,
                             const std::string &identity,
                             const std::string &request_id);
@@ -511,11 +533,12 @@ namespace agentos
     // Active jobs: job_id → ActiveJob
     std::unordered_map<std::string, ActiveJob> active_jobs_;
 
-    // The authenticated caller's identity (access‑key id) for the current
-    // request; set during handle_gateway_inbound and used for per‑user scoping.
-    std::string current_caller_key_id_;
+    // ADR-041: the authenticated Gateway caller for the request being
+    // served; set by handle_gateway_inbound, empty while a job-channel
+    // request is served. Valid for exactly one serially handled request.
+    CallerContext caller_;
     // ADR-042: set while serving a job-channel request (serial dispatch, as
-    // for current_caller_key_id_). Identifies the requesting run; the
+    // for caller_). Identifies the requesting run; the
     // user a request acts for comes from here, never from its params.
     std::optional<ChannelContext> channel_ctx_;
     void handle_channel_request (const OrchestratorEvent &ev);

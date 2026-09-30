@@ -12,7 +12,9 @@
 #include <string>
 #include <vector>
 
+#include "agentos/access_key.h"
 #include "agentos/database.h"
+#include <sqlite3.h>
 
 class KeyStoreFixture : public ::testing::Test {
 protected:
@@ -160,4 +162,45 @@ TEST_F(KeyStoreFixture, RevokeNonExistent)
     db_->revoke_access_key("nonexistent", "test");
     auto active = db_->load_active_access_keys();
     EXPECT_TRUE(active.empty());
+}
+
+// ADR-041: keys written before key_digest existed are found after an
+// upgrade (digest back-filled at open); bound keys are hash-only.
+TEST_F(KeyStoreFixture, DigestBackfillAndHashOnlyBoundKeys)
+{
+    const std::string raw(64, 'a');
+    {
+        sqlite3 *h = nullptr;
+        ASSERT_EQ(sqlite3_open(db_path_.c_str(), &h), SQLITE_OK);
+        const std::string sql =
+            "INSERT INTO access_keys (id, key, key_hash, key_salt, role, "
+            "created_at) VALUES ('old1', '" + raw + "', 'h', 's', 'admin', 1)";
+        ASSERT_EQ(sqlite3_exec(h, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(h);
+    }
+    db_->close();
+    db_ = std::make_unique<agentos::Database>(db_path_);
+    ASSERT_TRUE(db_->open());
+    auto found = db_->find_active_access_key(raw);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->id, "old1");
+    EXPECT_EQ(found->key_digest, agentos::access_key_digest(raw));
+
+    auto bound = agentos::make_access_key("service", "d", std::string("u1"));
+    ASSERT_TRUE(bound.has_value());
+    EXPECT_TRUE(bound->record.key.empty());
+    db_->insert_access_key(bound->record);
+    auto b = db_->find_active_access_key(bound->raw);
+    ASSERT_TRUE(b.has_value());
+    EXPECT_EQ(b->user_id.value_or(""), "u1");
+    EXPECT_EQ(b->key_hash, agentos::access_key_salted_hash(bound->raw, b->key_salt));
+
+    EXPECT_FALSE(agentos::make_access_key("admin", "d", std::string("u1")).has_value());
+    EXPECT_FALSE(agentos::make_access_key("service", "d", std::string("")).has_value());
+    EXPECT_EQ(agentos::normalize_access_key("ak_" + raw).value_or(""), raw);
+    EXPECT_FALSE(agentos::normalize_access_key("ak_" + raw + "0").has_value());
+    EXPECT_FALSE(agentos::normalize_access_key(std::string(64, 'A')).has_value());
+
+    EXPECT_EQ(db_->revoke_user_access_keys("u1", "t"), 1);
+    EXPECT_FALSE(db_->find_active_access_key(bound->raw).has_value());
 }

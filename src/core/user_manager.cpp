@@ -68,6 +68,7 @@ namespace agentos
     if (!db)
       return fail ("database not open");
 
+    bool created = false;
     // Insert OR IGNORE — does nothing if the row already exists.
     {
       const char *sql = R"(
@@ -84,6 +85,7 @@ namespace agentos
       sqlite3_bind_int64 (stmt.get (), 2, now_unix ());
       if (sqlite3_step (stmt.get ()) != SQLITE_DONE)
         return fail ("insert failed");
+      created = sqlite3_changes (db) > 0;
     }
 
     // Read back (row exists regardless of whether we just inserted it).
@@ -107,6 +109,7 @@ namespace agentos
       rec.id = column_text (stmt.get (), 0);
       rec.enabled = sqlite3_column_int (stmt.get (), 1) != 0;
       rec.created_at = sqlite3_column_int64 (stmt.get (), 2);
+      rec.created = created;
       return rec;
     }
   }

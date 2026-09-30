@@ -73,6 +73,20 @@ namespace
 
 } // unnamed namespace
 
+namespace
+{
+  // ADR-041: a key is shown exactly once, when it is issued.
+  void print_issued_key (const rapidjson::Document &result)
+  {
+    if (!result.HasMember ("access_key") || !result["access_key"].IsObject ())
+      return;
+    const auto &k = result["access_key"];
+    std::cout << "access key (" << k["key_id"].GetString ()
+              << ", shown once -- store it now):\n    "
+              << k["key"].GetString () << "\n";
+  }
+} // namespace
+
 void register_user_commands (CLI::App &app)
 {
   auto *user = app.add_subcommand ("user", "Manage users (admin)");
@@ -121,6 +135,7 @@ void register_user_commands (CLI::App &app)
             std::cout << "user_id: " << result["user_id"].GetString ()
                       << "  created: "
                       << format_unix (result["created_at"].GetInt64 ()) << "\n";
+            print_issued_key (result);
           }
         }
         catch (const agentos::cli::CliError &e)
@@ -129,6 +144,87 @@ void register_user_commands (CLI::App &app)
         }
       });
     agentos::cli::add_completion (reg);
+  }
+
+  // ---- user key issue | revoke (ADR-041) ----
+  {
+    auto *key = user->add_subcommand ("key", "Manage a user's access keys");
+    key->require_subcommand (1);
+
+    auto *issue = key->add_subcommand ("issue", "Issue a key bound to a user");
+    auto issue_user = std::make_shared<std::string> ();
+    auto revoke_existing = std::make_shared<bool> (false);
+    issue->add_option ("user_id", *issue_user)->required ();
+    issue->add_flag ("--revoke-existing", *revoke_existing,
+                     "Revoke the user's active keys first (rotation)");
+    issue->callback (
+      [timeout_ms, socket_path, json_flag, access_key, issue_user,
+       revoke_existing]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
+          rapidjson::Document params (rapidjson::kObjectType);
+          auto &alloc = params.GetAllocator ();
+          params.AddMember ("user_id",
+                            rapidjson::Value (issue_user->c_str (), alloc),
+                            alloc);
+          params.AddMember ("revoke_existing", *revoke_existing, alloc);
+          auto result = client.send ("user.key.issue", std::move (params));
+          if (*json_flag)
+            print_json (result);
+          else
+          {
+            std::cout << "user_id: " << result["user_id"].GetString ()
+                      << "  revoked: " << result["revoked"].GetInt () << "\n";
+            print_issued_key (result);
+          }
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (issue);
+
+    auto *rev = key->add_subcommand ("revoke", "Revoke one of a user's keys");
+    auto rev_user = std::make_shared<std::string> ();
+    auto rev_key = std::make_shared<std::string> ();
+    rev->add_option ("user_id", *rev_user)->required ();
+    rev->add_option ("key_id", *rev_key)->required ();
+    rev->callback (
+      [timeout_ms, socket_path, json_flag, access_key, rev_user, rev_key]
+      {
+        try
+        {
+          agentos::cli::CliClient client (*timeout_ms);
+          if (!socket_path->empty ())
+            client.set_socket_path (*socket_path);
+          if (!access_key->empty ())
+            client.set_access_key (*access_key);
+          rapidjson::Document params (rapidjson::kObjectType);
+          auto &alloc = params.GetAllocator ();
+          params.AddMember ("user_id",
+                            rapidjson::Value (rev_user->c_str (), alloc), alloc);
+          params.AddMember ("key_id",
+                            rapidjson::Value (rev_key->c_str (), alloc), alloc);
+          auto result = client.send ("user.key.revoke", std::move (params));
+          if (*json_flag)
+            print_json (result);
+          else
+            std::cout << "revoked key " << *rev_key << "\n";
+        }
+        catch (const agentos::cli::CliError &e)
+        {
+          agentos::cli::die (2, e.what ());
+        }
+      });
+    agentos::cli::add_completion (rev);
+    agentos::cli::add_completion (key);
   }
 
   // ---- user list ----

@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "agentos/database.h"
+#include "agentos/access_key.h"
 #include "agentos/cred_vault.h"
 #include "agentos/forge_pipeline_job.h"
 #include "agentos/home_init.h"
@@ -362,6 +363,16 @@ namespace agentos
                         "ON worker_runs(job_id)");
       maybe_add_column ("CREATE INDEX IF NOT EXISTS idx_worker_runs_user "
                         "ON worker_runs(user_id)");
+
+      // ADR-041: user-bound service keys, stored hash-only and found by
+      // key_digest = SHA-256(raw key). Existing keys get their digest here.
+      maybe_add_column ("ALTER TABLE access_keys ADD COLUMN user_id TEXT");
+      maybe_add_column ("ALTER TABLE access_keys ADD COLUMN key_digest TEXT");
+      backfill_access_key_digests ();
+      maybe_add_column ("CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "idx_access_keys_digest ON access_keys(key_digest)");
+      maybe_add_column ("CREATE INDEX IF NOT EXISTS idx_access_keys_user "
+                        "ON access_keys(user_id)");
     }
 
 
@@ -3538,8 +3549,9 @@ namespace agentos
     Stmt stmt (prepare (R"(
       INSERT INTO access_keys
           (id, key, key_hash, key_salt, description, role,
-           created_at, expires_at, last_used_at, revoked_at, revoked_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           created_at, expires_at, last_used_at, revoked_at, revoked_reason,
+           user_id, key_digest)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   )"));
     if (!stmt.s)
       return;
@@ -3559,9 +3571,91 @@ namespace agentos
                          SQLITE_TRANSIENT);
     else
       sqlite3_bind_null (stmt, 11);
+    if (key.user_id)
+      sqlite3_bind_text (stmt, 12, key.user_id->c_str (), -1, SQLITE_TRANSIENT);
+    else
+      sqlite3_bind_null (stmt, 12);
+    const std::string digest
+      = !key.key_digest.empty () ? key.key_digest
+        : !key.key.empty ()      ? access_key_digest (key.key)
+                                 : std::string{};
+    if (digest.empty ())
+      sqlite3_bind_null (stmt, 13);
+    else
+      sqlite3_bind_text (stmt, 13, digest.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_DONE)
       spdlog::error ("[database] insert_access_key: {}", sqlite3_errmsg (db_));
+  }
+
+  void Database::backfill_access_key_digests ()
+  {
+    if (!db_)
+      return;
+    std::vector<std::pair<std::string, std::string>> todo;
+    {
+      Stmt sel (prepare ("SELECT id, key FROM access_keys "
+                         "WHERE key_digest IS NULL AND key <> ''"));
+      if (!sel.s)
+        return;
+      while (sqlite3_step (sel) == SQLITE_ROW)
+        todo.emplace_back (column_text_or_empty (sel, 0),
+                           column_text_or_empty (sel, 1));
+    }
+    for (const auto &[id, key] : todo)
+    {
+      Stmt up (prepare ("UPDATE access_keys SET key_digest=? WHERE id=?"));
+      if (!up.s)
+        return;
+      const std::string d = access_key_digest (key);
+      sqlite3_bind_text (up, 1, d.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (up, 2, id.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (up) != SQLITE_DONE)
+        spdlog::error ("[database] access key digest backfill {}: {}", id,
+                       sqlite3_errmsg (db_));
+    }
+  }
+
+  int Database::revoke_user_access_keys (const std::string &user_id,
+                                         const std::string &reason)
+  {
+    if (!db_)
+      return 0;
+    Stmt stmt (prepare ("UPDATE access_keys SET revoked_at=?, "
+                        "revoked_reason=? WHERE user_id=? "
+                        "AND revoked_at IS NULL"));
+    if (!stmt.s)
+      return 0;
+    sqlite3_bind_int64 (stmt, 1, now_unix ());
+    sqlite3_bind_text (stmt, 2, reason.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+    {
+      spdlog::error ("[database] revoke_user_access_keys: {}",
+                     sqlite3_errmsg (db_));
+      return 0;
+    }
+    return sqlite3_changes (db_);
+  }
+
+  bool Database::revoke_user_access_key (const std::string &user_id,
+                                         const std::string &key_id,
+                                         const std::string &reason)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare ("UPDATE access_keys SET revoked_at=?, "
+                        "revoked_reason=? WHERE id=? AND user_id=? "
+                        "AND revoked_at IS NULL"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_int64 (stmt, 1, now_unix ());
+    sqlite3_bind_text (stmt, 2, reason.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 3, key_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 4, user_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE)
+      return false;
+    return sqlite3_changes (db_) > 0;
   }
 
   void Database::revoke_access_key (const std::string &id,
@@ -3605,7 +3699,8 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT id, key, key_hash, key_salt, description, role,
-             created_at, expires_at, last_used_at, revoked_at, revoked_reason
+             created_at, expires_at, last_used_at, revoked_at, revoked_reason,
+             user_id, key_digest
       FROM access_keys
       WHERE revoked_at IS NULL
         AND (expires_at IS NULL OR expires_at > unixepoch())
@@ -3629,6 +3724,9 @@ namespace agentos
       auto reason = column_text_or_empty (stmt, 10);
       if (!reason.empty ())
         k.revoked_reason = reason;
+      if (sqlite3_column_type (stmt, 11) != SQLITE_NULL)
+        k.user_id = column_text_or_empty (stmt, 11);
+      k.key_digest = column_text_or_empty (stmt, 12);
       keys.push_back (std::move (k));
     }
     return keys;
@@ -3642,9 +3740,10 @@ namespace agentos
 
     Stmt stmt (prepare (R"(
       SELECT id, key, key_hash, key_salt, description, role,
-             created_at, expires_at, last_used_at, revoked_at, revoked_reason
+             created_at, expires_at, last_used_at, revoked_at, revoked_reason,
+             user_id, key_digest
       FROM access_keys
-      WHERE key = ?
+      WHERE key_digest = ?
         AND revoked_at IS NULL
         AND (expires_at IS NULL OR expires_at > unixepoch())
       LIMIT 1
@@ -3652,7 +3751,8 @@ namespace agentos
     if (!stmt.s)
       return std::nullopt;
 
-    sqlite3_bind_text (stmt, 1, key_value.c_str (), -1, SQLITE_TRANSIENT);
+    const std::string digest = access_key_digest (key_value);
+    sqlite3_bind_text (stmt, 1, digest.c_str (), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step (stmt) != SQLITE_ROW)
       return std::nullopt;
@@ -3671,6 +3771,9 @@ namespace agentos
     auto reason = column_text_or_empty (stmt, 10);
     if (!reason.empty ())
       k.revoked_reason = reason;
+    if (sqlite3_column_type (stmt, 11) != SQLITE_NULL)
+      k.user_id = column_text_or_empty (stmt, 11);
+    k.key_digest = column_text_or_empty (stmt, 12);
     return k;
   }
 

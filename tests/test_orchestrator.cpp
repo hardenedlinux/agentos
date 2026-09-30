@@ -1405,3 +1405,99 @@ TEST_F (OrchestratorTest, PlanReady_RegisteredWorker_RunsAndCompletes)
   EXPECT_TRUE (done) << "job did not reach 'done' phase";
 }
 
+
+// ADR-041: the service role and user-bound keys.
+TEST_F (OrchestratorTest, ServiceRole_UserBoundKeys)
+{
+  const std::string admin = insert_key ("admin");
+  const std::string svc = insert_key ("service"); // unbound management key
+  auto call = [&] (const std::string &key, const std::string &method,
+                   const std::string &params) -> std::string
+  {
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":"t","method":")" + method
+                  + R"(","key":")" + key + R"(","params":)" + params + "}");
+    if (!wait_gateway (1))
+      return "timeout";
+    std::lock_guard<std::mutex> lk (mtx_);
+    return gateway_events_[0].outbound.message;
+  };
+  auto ok = [] (const std::string &r)
+  { return r.find ("\"result\"") != std::string::npos; };
+  auto err = [] (const std::string &r, const char *code)
+  { return r.find (code) != std::string::npos && r.find ("\"error\"") != std::string::npos; };
+  auto issued_key = [] (const std::string &r) -> std::string
+  {
+    rapidjson::Document d;
+    d.Parse (r.c_str ());
+    if (d.HasParseError () || !d.HasMember ("result")
+        || !d["result"].HasMember ("access_key"))
+      return {};
+    return d["result"]["access_key"]["key"].GetString ();
+  };
+
+  // First registration issues a bound key; a repeat does not.
+  const std::string r1 = call (svc, "user.register", R"({"user_id":"alice"})");
+  const std::string alice = issued_key (r1);
+  ASSERT_EQ (alice.rfind ("ak_", 0), 0u) << r1;
+  EXPECT_EQ (alice.size (), 67u);
+  EXPECT_TRUE (issued_key (call (svc, "user.register", R"({"user_id":"alice"})")).empty ());
+  const std::string bob = issued_key (call (admin, "user.register", R"({"user_id":"bob"})"));
+  ASSERT_FALSE (bob.empty ());
+  EXPECT_TRUE (err (call (svc, "user.register", R"({"user_id":""})"), "-32602"));
+
+  // Hash-only storage for bound keys.
+  int bound = 0;
+  for (const auto &k : db_->load_active_access_keys ())
+    if (k.user_id)
+    {
+      ++bound;
+      EXPECT_TRUE (k.key.empty ()) << "bound keys are stored hash-only";
+      EXPECT_EQ (k.role, "service");
+    }
+  EXPECT_EQ (bound, 2);
+
+  // Unbound service key: management and catalogue only.
+  EXPECT_TRUE (ok (call (svc, "worker.list", "{}")));
+  EXPECT_TRUE (err (call (svc, "job.list", R"({"user_id":"alice"})"), "-32011"));
+  EXPECT_TRUE (err (call (svc, "worker.register", R"({"path":"/x"})"), "-32011"));
+  EXPECT_TRUE (err (call (svc, "user.disable", R"({"user_id":"alice"})"), "-32011"));
+
+  // Bound key: acts for its user only.
+  EXPECT_TRUE (ok (call (alice, "job.list", "{}"))) << "user_id is pinned";
+  EXPECT_TRUE (ok (call (alice, "job.list", R"({"user_id":"alice"})")));
+  EXPECT_TRUE (ok (call (alice.substr (3), "job.list", "{}"))) << "ak_ is optional";
+  EXPECT_TRUE (err (call (alice, "job.list", R"({"user_id":"bob"})"), "-32011"));
+  EXPECT_TRUE (err (call (alice, "job.list", R"({"all_users":true})"), "-32011"));
+  EXPECT_TRUE (ok (call (alice, "cred.list", "{}")));
+  EXPECT_TRUE (err (call (alice, "user.register", R"({"user_id":"mallory"})"), "-32011"));
+  EXPECT_TRUE (err (call (alice, "user.facts.record",
+                          R"({"fact_type":"card_reaction","fact_key":"k","payload":{}})"),
+                    "-32011"));
+  EXPECT_TRUE (err (call (alice, "user.key.issue", R"({"user_id":"alice"})"), "-32011"));
+
+  // Rotation revokes the old key.
+  const std::string r2 = call (svc, "user.key.issue",
+                               R"({"user_id":"alice","revoke_existing":true})");
+  const std::string alice2 = issued_key (r2);
+  ASSERT_FALSE (alice2.empty ()) << r2;
+  EXPECT_TRUE (err (call (alice, "job.list", "{}"), "-32010"));
+  EXPECT_TRUE (ok (call (alice2, "job.list", "{}")));
+
+  // A key can only be revoked through its own user.
+  rapidjson::Document d2;
+  d2.Parse (r2.c_str ());
+  const std::string alice2_id = d2["result"]["access_key"]["key_id"].GetString ();
+  EXPECT_TRUE (err (call (svc, "user.key.revoke",
+                          R"({"user_id":"bob","key_id":")" + alice2_id + R"("})"),
+                    "-32020"));
+
+  // Disabling a user revokes its keys; no new key can be issued.
+  EXPECT_TRUE (ok (call (admin, "user.disable", R"({"user_id":"alice"})")));
+  EXPECT_TRUE (err (call (alice2, "job.list", "{}"), "-32010"));
+  EXPECT_TRUE (err (call (svc, "user.key.issue", R"({"user_id":"alice"})"), "-32020"));
+  EXPECT_TRUE (ok (call (bob, "job.list", "{}"))) << "other users unaffected";
+}

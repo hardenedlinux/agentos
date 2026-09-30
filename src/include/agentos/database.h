@@ -417,15 +417,27 @@ namespace agentos
       std::string key_hash; // SHA-256(key || salt)
       std::string key_salt; // 16-byte random, base64url
       std::string description;
-      std::string role; // "admin" | "operator" | "readonly"
+      std::string role; // "admin" | "operator" | "readonly" | "service"
       int64_t created_at = 0;
       std::optional<int64_t> expires_at;
       std::optional<int64_t> last_used_at;
       std::optional<int64_t> revoked_at;
       std::optional<std::string> revoked_reason;
+      // ADR-041: the one user a "service" key acts for; nullopt = unbound.
+      std::optional<std::string> user_id;
+      // ADR-041: SHA-256(raw key), the lookup column. insert_access_key
+      // derives it from `key` when left empty.
+      std::string key_digest;
     };
 
     void insert_access_key (const AccessKey &key);
+    // ADR-041: revoke every active key bound to user_id; returns how many.
+    int revoke_user_access_keys (const std::string &user_id,
+                                 const std::string &reason);
+    // ADR-041: revoke one active key, only if it is bound to user_id.
+    bool revoke_user_access_key (const std::string &user_id,
+                                 const std::string &key_id,
+                                 const std::string &reason);
     void revoke_access_key (const std::string &id, const std::string &reason);
     void touch_access_key (const std::string &id);
     std::vector<AccessKey> load_active_access_keys ();
@@ -436,6 +448,7 @@ namespace agentos
     // the daemon is already running is usable immediately — there is no
     // in-memory snapshot to go stale, unlike the old active_keys_ cache
     // this replaces (which was only ever populated once at startup).
+    // key_value is the raw key (no "ak_" prefix); matched by key_digest.
     std::optional<AccessKey> find_active_access_key (const std::string &key_value);
 
     // -- timer_tasks table (ADR-023) ------------------------------------------
@@ -948,6 +961,8 @@ namespace agentos
     lookup_subject_memory_write_policy (const std::string &entry_key);
 
   private:
+    // ADR-041 migration: fill key_digest for keys stored in plaintext.
+    void backfill_access_key_digests ();
     // -- Internal helpers -----------------------------------------------------
 
     [[nodiscard]] bool exec_ddl (const char *sql);

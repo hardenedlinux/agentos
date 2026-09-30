@@ -15,6 +15,8 @@ struct UserRecord {
     std::string  id;
     bool         enabled = true;
     int64_t      created_at = 0;
+    // register_user only: true if this call created the user (ADR-041 §5).
+    bool         created = false;
 };
 
 struct UserProfile {

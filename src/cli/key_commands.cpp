@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "agentos/access_key.h"
 #include "agentos/cli_color.h"
 #include "agentos/cli_completion.h"
 #include "agentos/database.h"
@@ -26,54 +27,13 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <openssl/sha.h>
 #include <optional>
 #include <sstream>
 #include <string>
-#include <sys/random.h>
 #include <vector>
 
 namespace
 {
-
-  // ---------------------------------------------------------------------------
-  // Crypto helpers
-  // ---------------------------------------------------------------------------
-
-  // Encode raw bytes as lowercase hex string.
-  // 32 bytes → 64 chars, 16 bytes → 32 chars.
-  std::string hex_encode (const uint8_t *data, size_t len)
-  {
-    std::ostringstream os;
-    for (size_t i = 0; i < len; ++i)
-      os << std::hex << std::setfill ('0') << std::setw (2)
-         << static_cast<int> (data[i]);
-    return os.str ();
-  }
-
-  std::string hex_encode (const std::vector<uint8_t> &buf)
-  {
-    return hex_encode (buf.data (), buf.size ());
-  }
-
-  // SHA-256 of a string, returned as 64-char lowercase hex.
-  // Used as: sha256_hex(key_hex + salt_hex) — both sides (generate and
-  // orchestrator::authenticate) hash the hex-encoded strings, not raw bytes.
-  std::string sha256_hex (const std::string &input)
-  {
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256 (reinterpret_cast<const unsigned char *> (input.data ()),
-            input.size (), hash);
-    return hex_encode (hash, SHA256_DIGEST_LENGTH);
-  }
-
-  std::vector<uint8_t> random_bytes (size_t n)
-  {
-    std::vector<uint8_t> buf (n);
-    if (getrandom (buf.data (), buf.size (), 0) != static_cast<ssize_t> (n))
-      agentos::cli::die (5, "getrandom failed");
-    return buf;
-  }
 
   // ---------------------------------------------------------------------------
   // Time helpers
@@ -184,46 +144,37 @@ void register_key_commands (CLI::App &app)
     auto role = std::make_shared<std::string> ("operator");
     auto description = std::make_shared<std::string> ();
     auto expires = std::make_shared<std::string> ();
+    auto bind_user = std::make_shared<std::string> ();
 
     gen->add_option ("--role", *role)->default_val ("operator");
     gen->add_option ("--description", *description);
     gen->add_option ("--expires", *expires);
+    gen->add_option ("--user", *bind_user,
+                     "Bind a service key to one user (stored hash-only)");
 
     gen->callback (
-      [role, description, expires]
+      [role, description, expires, bind_user]
       {
-        if (*role != "admin" && *role != "operator" && *role != "readonly")
-          agentos::cli::die (1,
-                             "invalid role; use admin, operator, or readonly");
-
-        auto raw = random_bytes (32);
-        auto salt = random_bytes (16);
-
-        // All fields stored and compared as lowercase hex:
-        //   key      = hex(random 32 bytes)       → 64 chars
-        //   key_salt = hex(random 16 bytes)       → 32 chars
-        //   key_hash = SHA256(key + key_salt) hex → 64 chars
-        //
-        // Orchestrator::authenticate computes sha256_hex(key_value, ak.key_salt)
-        // which is SHA256(key_hex + salt_hex) — identical to what we store here.
-        std::string key_str = hex_encode (raw);
-        std::string salt_str = hex_encode (salt);
-        std::string hash_str = sha256_hex (key_str + salt_str);
+        if (!agentos::access_key_role_valid (*role))
+          agentos::cli::die (
+            1, "invalid role; use admin, operator, readonly, or service");
+        if (!bind_user->empty () && *role != "service")
+          agentos::cli::die (1, "--user requires --role service");
 
         auto db = open_db ();
         bool first = db->load_active_access_keys ().empty ();
 
-        agentos::Database::AccessKey k;
-        k.id = hash_str.substr (0, 8);
-        k.key = key_str;
-        k.key_hash = hash_str;
-        k.key_salt = salt_str;
-        k.description = *description;
-        k.role = *role;
-        k.created_at = now_unix ();
-        k.expires_at = parse_expires (*expires);
-
-        db->insert_access_key (k);
+        // key = hex(32 random bytes), key_salt = hex(16 random bytes),
+        // key_hash = SHA256(key + key_salt), key_digest = SHA256(key).
+        auto issued = agentos::make_access_key (
+          *role, *description,
+          bind_user->empty () ? std::nullopt
+                              : std::optional<std::string> (*bind_user),
+          parse_expires (*expires));
+        if (!issued)
+          agentos::cli::die (5, "cannot generate access key");
+        const std::string key_str = issued->raw;
+        db->insert_access_key (issued->record);
 
         using namespace agentos::cli::color;
 
@@ -263,6 +214,9 @@ void register_key_commands (CLI::App &app)
                "connectors.\n"
             << "  " << cyan ("readonly")
             << "  Query status only. Use for monitoring.\n"
+            << "  " << cyan ("service")
+            << "   Commercial caller (CMS). Unbound: onboard users and\n"
+            << "            issue their keys. With --user: act for that user.\n"
             << "\n";
         }
       });

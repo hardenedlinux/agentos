@@ -481,6 +481,35 @@ namespace agentos
       return false;
     }
 
+    // ADR-041 §1: methods that act for one user. On a user-bound key the
+    // bound user_id is pinned into their params; an unbound service key
+    // may not call them at all.
+    const std::unordered_set<std::string> &user_scoped_service_methods ()
+    {
+      static const std::unordered_set<std::string> m = {
+        "job.submit",   "job.status",  "job.list",   "job.cancel",
+        "user.profile", "cred.submit", "cred.list",  "cred.revoke",
+        "asset.register", "asset.show", "asset.list", "asset.revoke",
+      };
+      return m;
+    }
+
+    // ADR-041 §1: the fixed service-role whitelist.
+    bool service_permitted (bool bound, const std::string &method)
+    {
+      static const std::unordered_set<std::string> catalogue = {
+        "worker.list", "adviser.list", "suite.list", "suite.show",
+      };
+      static const std::unordered_set<std::string> management = {
+        "user.register", "user.key.issue", "user.key.revoke",
+      };
+      if (catalogue.count (method))
+        return true;
+      if (bound)
+        return user_scoped_service_methods ().count (method) > 0;
+      return management.count (method) > 0;
+    }
+
     // ADR-025: ForgeJob.phase is a string; forge_pipeline_jobs.status is the
     // INTEGER ForgeStatus enum. Enum ordinal order matches the ADR-025 phase
     // list exactly: drafting=0, reviewing=1, promoted=2, rejected=3,
@@ -815,15 +844,11 @@ namespace agentos
   std::optional<Database::AccessKey>
   Orchestrator::authenticate (const std::string &key_value) const
   {
-    // Reject malformed keys before any processing.
-    // Hex-encoded 32 bytes = exactly 64 chars, [0-9a-f] only.
-    if (key_value.size () != 64)
+    // Reject malformed keys before any processing: 64 lowercase hex
+    // characters, optionally with the "ak_" display prefix (ADR-041 §4).
+    const auto raw = normalize_access_key (key_value);
+    if (!raw)
       return std::nullopt;
-    for (char c : key_value)
-    {
-      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-        return std::nullopt;
-    }
 
     // Queried directly against SQLite on every call — replaces the old
     // active_keys_ in-memory cache, which was populated once via
@@ -831,20 +856,22 @@ namespace agentos
     // key generated (or revoked) after the daemon was already running
     // silently didn't take effect until a full restart. This is a single
     // indexed local-SQLite lookup per request, not a meaningful cost.
-    auto found = db_.find_active_access_key (key_value);
+    auto found = db_.find_active_access_key (*raw);
     if (!found)
       return std::nullopt;
     const auto &ak = *found;
-    const std::string computed = sha256_hex (key_value, ak.key_salt);
+    const std::string computed = sha256_hex (*raw, ak.key_salt);
     if (!ct_equal (computed, ak.key_hash))
       return std::nullopt;
     return ak;
   }
 
-  bool Orchestrator::is_permitted (const std::string &role,
+  bool Orchestrator::is_permitted (const CallerContext &caller,
                                    const std::string &method) const
   {
-    return role_permitted (role, method);
+    if (caller.role == "service")
+      return service_permitted (caller.bound_user_id.has_value (), method);
+    return role_permitted (caller.role, method);
   }
 
   // ---------------------------------------------------------------------------
@@ -901,25 +928,65 @@ namespace agentos
     db_.touch_access_key (ak->id);
 
     // 4. Permission check.
-    if (!is_permitted (ak->role, method))
+    CallerContext caller{ ak->id, ak->role, ak->user_id };
+    if (caller.bound_user_id && caller.role != "service")
+    {
+      // Only service keys can be bound (ADR-041 §2); anything else in the
+      // table is not a key this daemon issued.
+      reply_error (identity, request_id, -32010, "Failed to authorize");
+      return;
+    }
+    if (!is_permitted (caller, method))
     {
       reply_error (identity, request_id, -32011, "Forbidden");
       return;
     }
 
-    // Remember the authenticated key's id for per‑user scoping (used by
-    // cmd_user_facts_* / cmd_subject_* below to resolve the real caller
-    // instead of trusting a client-supplied user_id/subject ownership).
-    //
-    // This is safe ONLY because Orchestrator::on_message dispatches one
-    // event at a time ("serial dispatch") and every cmd_* handler reads
-    // this member synchronously, within the same call, before this function
-    // returns. If dispatch is ever made concurrent, or a cmd_* handler ever
-    // spawns work that reads current_caller_key_id_ after this function has
-    // returned, this becomes a cross-request identity leak — the fix at
-    // that point is to thread the resolved id through as an explicit
-    // parameter to each cmd_* handler instead of via this member.
-    current_caller_key_id_ = ak->id;
+    // 4b. ADR-041 §2: a user-bound key acts for its user only. Pin that
+    // user_id into the params of every user-scoped method; a different
+    // user_id, or a cross-user listing, is refused -- never corrected.
+    if (caller.bound_user_id
+        && user_scoped_service_methods ().count (method))
+    {
+      if (!doc.HasMember ("params"))
+        doc.AddMember ("params", rapidjson::Value (rapidjson::kObjectType),
+                       doc.GetAllocator ());
+      auto &p = doc["params"];
+      if (!p.IsObject ())
+      {
+        reply_error (identity, request_id, -32602, "Invalid params");
+        return;
+      }
+      const std::string &bound = *caller.bound_user_id;
+      if (p.HasMember ("user_id"))
+      {
+        if (!p["user_id"].IsString () || p["user_id"].GetString () != bound)
+        {
+          reply_error (identity, request_id, -32011,
+                       "user_id does not match the access key");
+          return;
+        }
+      }
+      else
+        p.AddMember ("user_id",
+                     rapidjson::Value (bound.c_str (), doc.GetAllocator ()),
+                     doc.GetAllocator ());
+      if (p.HasMember ("all_users")
+          && !(p["all_users"].IsBool () && !p["all_users"].GetBool ()))
+      {
+        reply_error (identity, request_id, -32011,
+                     "all_users is not available to a user-bound key");
+        return;
+      }
+    }
+
+    // ADR-041 §8: remember who is calling for the handler that serves this
+    // request (audit fields such as cred.grant's granted_by). Safe ONLY
+    // because Orchestrator::on_message dispatches one event at a time and
+    // every cmd_* handler reads caller_ synchronously, before this function
+    // returns. If dispatch ever becomes concurrent, thread the context
+    // through as an explicit parameter instead.
+    caller_ = std::move (caller);
     channel_ctx_.reset ();
 
     // 5. Extract params.
@@ -990,6 +1057,8 @@ namespace agentos
       {"user.list",           [this](auto&& p,auto&& id,auto&& ri){cmd_user_list(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"user.enable",         [this](auto&& p,auto&& id,auto&& ri){cmd_user_enable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"user.disable",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_disable(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.key.issue",      [this](auto&& p,auto&& id,auto&& ri){cmd_user_key_issue(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
+      {"user.key.revoke",     [this](auto&& p,auto&& id,auto&& ri){cmd_user_key_revoke(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
       {"user.profile",        [this](auto&& p,auto&& id,auto&& ri){cmd_user_profile(std::forward<decltype(p)>(p),std::forward<decltype(id)>(id),std::forward<decltype(ri)>(ri));}},
     };
 
@@ -3411,7 +3480,7 @@ namespace agentos
     // key on the Gateway.
     const std::string source = channel_ctx_
                                  ? "job:" + channel_ctx_->job_id
-                                 : "admin:" + current_caller_key_id_;
+                                 : "admin:" + caller_.key_id;
 
     Database::UserFactEvent event;
     event.user_id    = user_id;
@@ -3840,7 +3909,7 @@ namespace agentos
     // ADR-035 write-provenance addition. track defaults to "inferred" —
     // the ordinary case for a domain Adviser's incremental analysis
     // output. signed_off_by identifies which Adviser/Worker is making this
-    // specific write; it is NOT current_caller_key_id_ (that's the access
+    // specific write; it is NOT caller_.key_id (that's the access
     // key/user identity for the connected client, not the identity of a
     // domain component like "compliance-adviser@v1") — a client's access
     // key does not by itself authorize an attested write, so this must be
@@ -5814,7 +5883,7 @@ namespace agentos
     spdlog::info ("[orchestrator] channel {} job {} step {} user '{}': {}",
                   ctx.run_id, ctx.job_id, ctx.step_id, ctx.user_id, method);
     channel_ctx_ = ctx;
-    current_caller_key_id_.clear ();
+    caller_ = {};
     (this->*(it->second)) (params_json, identity, request_id);
     channel_ctx_.reset ();
   }
@@ -7270,14 +7339,14 @@ namespace agentos
     // ADR-028 audit trail: record the id of the access key that made this
     // grant (set by handle_gateway_inbound for the request being served),
     // not a fixed role label. Never empty for a Gateway request.
-    if (current_caller_key_id_.empty ())
+    if (caller_.key_id.empty ())
     {
       reply_error (identity, request_id, -32010, "Failed to authorize");
       return;
     }
     auto res = cred_vault_.grant (params["worker_id"].GetString (),
                                   params["provider"].GetString (),
-                                  current_caller_key_id_);
+                                  caller_.key_id);
     if (!res)
     {
       reply_error (identity, request_id, -32030, res.error ());
@@ -7418,22 +7487,72 @@ namespace agentos
   // ADR-029: user.* JSON-RPC handlers (admin only)
   // ---------------------------------------------------------------------------
 
+  std::optional<IssuedAccessKey>
+  Orchestrator::issue_user_access_key (const std::string &user_id,
+                                       const std::string &description)
+  {
+    auto issued = make_access_key ("service", description, user_id);
+    if (!issued)
+      return std::nullopt;
+    db_.insert_access_key (issued->record);
+    // insert_access_key logs rather than fails; confirm the key is usable.
+    if (!db_.find_active_access_key (issued->raw))
+      return std::nullopt;
+    return issued;
+  }
+
+  namespace
+  {
+    void write_issued_key (rapidjson::Writer<rapidjson::StringBuffer> &w,
+                           const IssuedAccessKey &k)
+    {
+      w.StartObject ();
+      w.Key ("key_id");
+      w.String (k.record.id.c_str ());
+      w.Key ("key");
+      const std::string shown
+        = std::string (kAccessKeyDisplayPrefix) + k.raw;
+      w.String (shown.c_str ());
+      w.EndObject ();
+    }
+
+    bool nonempty_string (const rapidjson::Value &v, const char *name)
+    {
+      return v.IsObject () && v.HasMember (name) && v[name].IsString ()
+             && v[name].GetStringLength () > 0;
+    }
+  } // namespace
+
   void Orchestrator::cmd_user_register (const std::string &params_json,
                                         const std::string &identity,
                                         const std::string &request_id)
   {
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
-        || !params.HasMember ("user_id") || !params["user_id"].IsString ())
+        || !nonempty_string (params, "user_id"))
     {
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    auto res = user_manager_.register_user (params["user_id"].GetString ());
+    const std::string user_id = params["user_id"].GetString ();
+    auto res = user_manager_.register_user (user_id);
     if (!res)
     {
       reply_error (identity, request_id, -32030, res.error ());
       return;
+    }
+    // ADR-041 §5: the call that creates a user also issues its first
+    // bound key. A repeat call is idempotent and never re-issues one.
+    std::optional<IssuedAccessKey> key;
+    if (res->created)
+    {
+      key = issue_user_access_key (user_id, "issued at user.register");
+      if (!key)
+      {
+        reply_error (identity, request_id, -32603,
+                     "Internal error: cannot issue access key");
+        return;
+      }
     }
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w (buf);
@@ -7442,8 +7561,88 @@ namespace agentos
     w.String (res->id.c_str ());
     w.Key ("created_at");
     w.Int64 (res->created_at);
+    if (key)
+    {
+      w.Key ("access_key");
+      write_issued_key (w, *key);
+    }
     w.EndObject ();
     reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_key_issue (const std::string &params_json,
+                                         const std::string &identity,
+                                         const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !nonempty_string (params, "user_id")
+        || (params.HasMember ("revoke_existing")
+            && !params["revoke_existing"].IsBool ())
+        || (params.HasMember ("description")
+            && !params["description"].IsString ()))
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    const std::string user_id = params["user_id"].GetString ();
+    // Unknown and disabled users are both -32020 (ADR-029).
+    if (!user_manager_.validate_user (user_id))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+    const bool revoke_existing = params.HasMember ("revoke_existing")
+                                 && params["revoke_existing"].GetBool ();
+    int revoked = 0;
+    if (revoke_existing)
+      revoked = db_.revoke_user_access_keys (user_id, "rotated");
+    const std::string description
+      = params.HasMember ("description") ? params["description"].GetString ()
+                                         : "issued by user.key.issue";
+    auto key = issue_user_access_key (user_id, description);
+    if (!key)
+    {
+      reply_error (identity, request_id, -32603,
+                   "Internal error: cannot issue access key");
+      return;
+    }
+    spdlog::info ("[orchestrator] key {} issued for user '{}' by {} "
+                  "(revoked {})",
+                  key->record.id, user_id, caller_.key_id, revoked);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("user_id");
+    w.String (user_id.c_str ());
+    w.Key ("access_key");
+    write_issued_key (w, *key);
+    w.Key ("revoked");
+    w.Int (revoked);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::cmd_user_key_revoke (const std::string &params_json,
+                                          const std::string &identity,
+                                          const std::string &request_id)
+  {
+    rapidjson::Document params;
+    if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !nonempty_string (params, "user_id")
+        || !nonempty_string (params, "key_id"))
+    {
+      reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    if (!db_.revoke_user_access_key (params["user_id"].GetString (),
+                                     params["key_id"].GetString (),
+                                     "revoked by user.key.revoke"))
+    {
+      reply_error (identity, request_id, -32020, "Not found");
+      return;
+    }
+    reply_ok (identity, request_id, "{\"ok\":true}");
   }
 
   void Orchestrator::cmd_user_list (const std::string &params_json,
@@ -7534,13 +7733,25 @@ namespace agentos
       reply_error (identity, request_id, -32602, "Invalid params");
       return;
     }
-    auto res = user_manager_.disable_user (params["user_id"].GetString ());
+    const std::string user_id = params["user_id"].GetString ();
+    auto res = user_manager_.disable_user (user_id);
     if (!res)
     {
       reply_error (identity, request_id, -32020, res.error ());
       return;
     }
-    reply_ok (identity, request_id, "{\"ok\":true}");
+    // ADR-041 §5: a disabled (deregistered or banned) user's keys stop
+    // working at once. user.enable does not bring them back.
+    const int revoked = db_.revoke_user_access_keys (user_id, "user disabled");
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+    w.StartObject ();
+    w.Key ("ok");
+    w.Bool (true);
+    w.Key ("revoked_keys");
+    w.Int (revoked);
+    w.EndObject ();
+    reply_ok (identity, request_id, buf.GetString ());
   }
 
   void Orchestrator::cmd_user_profile (const std::string &params_json,

@@ -1501,3 +1501,104 @@ TEST_F (OrchestratorTest, ServiceRole_UserBoundKeys)
   EXPECT_TRUE (err (call (svc, "user.key.issue", R"({"user_id":"alice"})"), "-32020"));
   EXPECT_TRUE (ok (call (bob, "job.list", "{}"))) << "other users unaffected";
 }
+
+// ADR-041 §9: user-bound keys reach the daemon's filesystem only through
+// inbox/<user_id>/ (asset.register) and export/<user_id>/ (asset.extract).
+TEST_F (OrchestratorTest, ServiceRole_AssetPathsAreConfined)
+{
+  const std::string svc = insert_key ("service");
+  auto call = [&] (const std::string &key, const std::string &method,
+                   const std::string &params) -> std::string
+  {
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":"t","method":")" + method
+                  + R"(","key":")" + key + R"(","params":)" + params + "}");
+    if (!wait_gateway (1))
+      return "timeout";
+    std::lock_guard<std::mutex> lk (mtx_);
+    return gateway_events_[0].outbound.message;
+  };
+  auto field = [] (const std::string &r, const char *a, const char *b = nullptr)
+  {
+    rapidjson::Document d;
+    d.Parse (r.c_str ());
+    if (d.HasParseError () || !d.HasMember ("result"))
+      return std::string{};
+    const auto &v = b ? d["result"][a][b] : d["result"][a];
+    return std::string (v.GetString ());
+  };
+  auto has = [] (const std::string &r, const char *s)
+  { return r.find (s) != std::string::npos; };
+
+  const std::string alice
+    = field (call (svc, "user.register", R"({"user_id":"alice"})"), "access_key", "key");
+  const std::string bob
+    = field (call (svc, "user.register", R"({"user_id":"bob"})"), "access_key", "key");
+  ASSERT_FALSE (alice.empty ());
+  ASSERT_FALSE (bob.empty ());
+
+  const fs::path inbox = home_ / "inbox" / "alice";
+  fs::create_directories (inbox);
+  std::ofstream (inbox / "a.txt") << "hello";
+  std::ofstream (home_ / "secret.txt") << "daemon-only";
+
+  // register: only from the user's own inbox.
+  const std::string r1 = call (alice, "asset.register",
+                               R"({"path":")" + (inbox / "a.txt").string ()
+                                 + R"(","filename":"worker.py"})");
+  const std::string asset_id = field (r1, "asset_id");
+  ASSERT_FALSE (asset_id.empty ()) << r1;
+  EXPECT_TRUE (has (call (alice, "asset.register",
+                          R"({"path":")" + (home_ / "secret.txt").string () + R"("})"),
+                    "-32011"));
+  EXPECT_TRUE (has (call (alice, "asset.register",
+                          R"({"path":")" + (inbox / ".." / ".." / "secret.txt").string ()
+                            + R"("})"),
+                    "-32011"));
+  fs::create_symlink (home_ / "secret.txt", inbox / "link.txt");
+  EXPECT_TRUE (has (call (alice, "asset.register",
+                          R"({"path":")" + (inbox / "link.txt").string () + R"("})"),
+                    "-32011"))
+    << "symlinks are resolved before the check";
+
+  // extract: default and explicit destinations under export/alice only.
+  const std::string e1
+    = call (alice, "asset.extract", R"({"asset_id":")" + asset_id + R"("})");
+  EXPECT_TRUE (has (e1, "\"result\"")) << e1;
+  EXPECT_TRUE (fs::exists (home_ / "export" / "alice" / "worker.py"));
+  EXPECT_TRUE (has (call (alice, "asset.extract",
+                          R"({"asset_id":")" + asset_id + R"(","dest_dir":")"
+                            + (home_ / "export" / "alice" / "sub").string () + R"("})"),
+                    "\"result\""));
+  const fs::path workers = home_ / "workers" / "victim";
+  EXPECT_TRUE (has (call (alice, "asset.extract",
+                          R"({"asset_id":")" + asset_id + R"(","dest_dir":")"
+                            + workers.string () + R"("})"),
+                    "-32011"));
+  EXPECT_FALSE (fs::exists (workers)) << "nothing is created outside export/";
+  EXPECT_TRUE (has (call (alice, "asset.extract",
+                          R"({"asset_id":")" + asset_id + R"(","dest_dir":")"
+                            + (home_ / "export" / "alice" / ".." / "bob").string ()
+                            + R"("})"),
+                    "-32011"));
+  fs::create_directories (home_ / "elsewhere");
+  fs::create_directory_symlink (home_ / "elsewhere", home_ / "export" / "alice" / "out");
+  EXPECT_TRUE (has (call (alice, "asset.extract",
+                          R"({"asset_id":")" + asset_id + R"(","dest_dir":")"
+                            + (home_ / "export" / "alice" / "out").string () + R"("})"),
+                    "-32011"));
+  EXPECT_FALSE (fs::exists (home_ / "elsewhere" / "worker.py"));
+  EXPECT_TRUE (has (call (bob, "asset.extract",
+                          R"({"asset_id":")" + asset_id + R"("})"),
+                    "-32020"));
+
+  // revoke_by_user: own user only.
+  EXPECT_TRUE (has (call (alice, "asset.revoke_by_user", R"({"user_id":"bob"})"),
+                    "-32011"));
+  EXPECT_TRUE (has (call (alice, "asset.revoke_by_user", "{}"), "\"result\""));
+  EXPECT_TRUE (has (call (alice, "asset.show", R"({"asset_id":")" + asset_id + R"("})"),
+                    "-32020"));
+}

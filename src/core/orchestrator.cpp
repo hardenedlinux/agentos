@@ -490,6 +490,7 @@ namespace agentos
         "job.submit",   "job.status",  "job.list",   "job.cancel",
         "user.profile", "cred.submit", "cred.list",  "cred.revoke",
         "asset.register", "asset.show", "asset.list", "asset.revoke",
+        "asset.revoke_by_user", "asset.extract",
       };
       return m;
     }
@@ -2906,6 +2907,31 @@ namespace agentos
       return true;
     }
 
+    // ADR-041 §9: a user_id used as one directory name under inbox/ or
+    // export/. user_id is opaque, so anything that could walk out of that
+    // directory is refused rather than escaped.
+    bool safe_path_component (const std::string &s)
+    {
+      return !s.empty () && s.size () <= 255 && s != "." && s != ".."
+             && s.find ('/') == std::string::npos
+             && s.find ('\0') == std::string::npos;
+    }
+
+    // True if p, with symlinks resolved, is base or inside it.
+    bool path_within (const std::filesystem::path &p,
+                      const std::filesystem::path &base)
+    {
+      std::error_code ec;
+      const auto rp = std::filesystem::canonical (p, ec);
+      if (ec)
+        return false;
+      const auto rb = std::filesystem::canonical (base, ec);
+      if (ec)
+        return false;
+      const auto rel = rp.lexically_relative (rb);
+      return !rel.empty () && *rel.begin () != "..";
+    }
+
     // Hardlink when possible (same filesystem, zero-copy); fall back to a
     // real copy on EXDEV (cross-device) or any other link() failure —
     // mirrors the uv global-cache pattern already used for Python deps.
@@ -2987,6 +3013,27 @@ namespace agentos
         reply_error (identity, request_id, -32011,
                      "asset path must be inside the job directory "
                        + channel_ctx_->job_dir);
+        return;
+      }
+    }
+
+    // ADR-041 §9: the daemon is not sandboxed, so a service key could
+    // otherwise have it read any file it can read (its own database and
+    // vault included) into the asset store. Service keys register only
+    // files under inbox/<user_id>/.
+    if (!channel_ctx_ && caller_.role == "service")
+    {
+      if (!safe_path_component (user_id))
+      {
+        reply_error (identity, request_id, -32602,
+                     "user_id cannot be used as a directory name");
+        return;
+      }
+      const fs::path inbox = agentos_home () / "inbox" / user_id;
+      if (!path_within (source_path, inbox))
+      {
+        reply_error (identity, request_id, -32011,
+                     "asset path must be inside " + inbox.string ());
         return;
       }
     }
@@ -3336,25 +3383,60 @@ namespace agentos
   // operational/debugging convenience (e.g. inspecting what actually got
   // registered), not part of the job pipeline (which reads directly from
   // the per-job materialized copy, never from an arbitrary extract
-  // destination). No ownership check, same posture as asset.show — this is
-  // an operator-level inspection tool, not a job-time data path.
+  // destination). Ownership is checked against user_id (ADR-029); for a
+  // service key the destination is confined to export/<user_id>/ (ADR-041).
   // ---------------------------------------------------------------------------
 
   void Orchestrator::cmd_asset_extract (const std::string &params_json,
                                         const std::string &identity,
                                         const std::string &request_id)
   {
+    // ADR-041 §9: for a service key dest_dir is optional and must lie
+    // under export/<user_id>/ (the default). The daemon is not sandboxed;
+    // an unconfined extract would let a caller write a file whose name it
+    // chose at asset.register anywhere the daemon can write, overwriting
+    // what is there -- a Worker's code, for instance.
+    const bool service = caller_.role == "service";
     rapidjson::Document params;
     if (params.Parse (params_json.c_str ()).HasParseError ()
+        || !params.IsObject ()
         || !params.HasMember ("asset_id") || !params["asset_id"].IsString ()
-        || !params.HasMember ("dest_dir") || !params["dest_dir"].IsString ())
+        || (params.HasMember ("dest_dir") && !params["dest_dir"].IsString ())
+        || (!service && !params.HasMember ("dest_dir")))
     {
       reply_error (identity, request_id, -32602,
                    "Invalid params: 'asset_id' and 'dest_dir' are required");
       return;
     }
     const std::string asset_id = params["asset_id"].GetString ();
-    const fs::path dest_dir = params["dest_dir"].GetString ();
+    fs::path dest_dir;
+    fs::path export_dir;
+    if (service)
+    {
+      const auto uid = required_user_id (params);
+      if (!uid || !safe_path_component (*uid))
+      {
+        reply_error (identity, request_id, -32602,
+                     "user_id cannot be used as a directory name");
+        return;
+      }
+      export_dir = agentos_home () / "export" / *uid;
+      dest_dir = params.HasMember ("dest_dir")
+                   ? fs::path (params["dest_dir"].GetString ())
+                   : export_dir;
+      // Lexical check first, so nothing is created outside export_dir;
+      // the canonical check after creation covers symlinks.
+      const auto rel
+        = dest_dir.lexically_normal ().lexically_relative (export_dir);
+      if (!dest_dir.is_absolute () || rel.empty () || *rel.begin () == "..")
+      {
+        reply_error (identity, request_id, -32011,
+                     "dest_dir must be inside " + export_dir.string ());
+        return;
+      }
+    }
+    else
+      dest_dir = params["dest_dir"].GetString ();
     if (!dest_dir.is_absolute ())
     {
       reply_error (identity, request_id, -32602,
@@ -3411,6 +3493,13 @@ namespace agentos
       safe_name = asset_id;
 
     const fs::path dest_path = dest_dir / safe_name;
+    if (service
+        && (!path_within (dest_dir, export_dir) || fs::is_symlink (dest_path)))
+    {
+      reply_error (identity, request_id, -32011,
+                   "dest_dir must be inside " + export_dir.string ());
+      return;
+    }
     fs::copy_file (blob_path, dest_path, fs::copy_options::overwrite_existing,
                    ec);
     if (ec)

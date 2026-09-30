@@ -204,3 +204,32 @@ TEST_F(KeyStoreFixture, DigestBackfillAndHashOnlyBoundKeys)
     EXPECT_EQ(db_->revoke_user_access_keys("u1", "t"), 1);
     EXPECT_FALSE(db_->find_active_access_key(bound->raw).has_value());
 }
+
+// ADR-015 amendment (2026-09-30): deployment-time Suite grants.
+TEST_F(KeyStoreFixture, SuiteGrantsCoverOnlyThatSuitesWorkers)
+{
+    db_->insert_installed_suite("auteur", "0.1.0", "/x");
+    db_->insert_suite_component("auteur", "worker", "auteur-video-produce-ad");
+    db_->insert_suite_component("auteur", "adviser", "auteur");
+    db_->insert_installed_suite("other", "0.1.0", "/y");
+    db_->insert_suite_component("other", "worker", "other-w");
+
+    EXPECT_FALSE(db_->worker_has_suite_grant("auteur-video-produce-ad", "network"));
+    EXPECT_FALSE(db_->set_suite_grant("auteur", "root", "cli:t"));
+    ASSERT_TRUE(db_->set_suite_grant("auteur", "network", "cli:t"));
+    EXPECT_TRUE(db_->worker_has_suite_grant("auteur-video-produce-ad", "network"));
+    EXPECT_FALSE(db_->worker_has_suite_grant("auteur-video-produce-ad", "gpu"));
+    EXPECT_FALSE(db_->worker_has_suite_grant("other-w", "network"));
+    EXPECT_FALSE(db_->worker_has_suite_grant("auteur", "network"))
+        << "only Workers carry grants";
+    ASSERT_EQ(db_->load_suite_grants("auteur").size(), 1u);
+    EXPECT_EQ(db_->load_suite_grants().size(), 1u);
+
+    db_->set_suite_enabled("auteur", false);
+    EXPECT_FALSE(db_->worker_has_suite_grant("auteur-video-produce-ad", "network"))
+        << "a removed Suite's approval is not in force";
+    db_->set_suite_enabled("auteur", true);
+    EXPECT_TRUE(db_->revoke_suite_grant("auteur", "network"));
+    EXPECT_FALSE(db_->revoke_suite_grant("auteur", "network"));
+    EXPECT_FALSE(db_->worker_has_suite_grant("auteur-video-produce-ad", "network"));
+}

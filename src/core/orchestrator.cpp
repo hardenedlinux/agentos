@@ -6518,16 +6518,22 @@ namespace agentos
     // the manifest asked for; this is an AND-gate, not an override, so
     // a trusted name still cannot obtain network access for a Worker
     // whose own manifest never declared it.
+    // ADR-015 amendment (2026-09-30): the operator's approval may also
+    // come from a deployment-time Suite grant (`agentos suite approve`,
+    // CLI only), which covers every Worker of that Suite.
     const auto &exempt_list = config_.trusted_workers.network_exempt;
     const bool operator_trusted
       = std::find (exempt_list.begin (), exempt_list.end (), worker->name)
-        != exempt_list.end ();
+          != exempt_list.end ()
+        || (worker->network
+            && db_.worker_has_suite_grant (worker->id.value (), "network"));
     req.network = worker->network && operator_trusted;
     // ADR-006/015: Forge-generated Workers are Tier-1 (tighter limits).
     req.forge_generated = db_.agent_is_forge_generated (worker->id.value ());
     if (worker->network && !operator_trusted)
       spdlog::info ("[orchestrator] worker '{}' declares network=true but is "
-                   "not in [trusted_workers].network_exempt — dispatching "
+                   "neither approved for its Suite (agentos suite approve) nor "
+                   "in [trusted_workers].network_exempt — dispatching "
                    "with network disabled for run {}",
                    worker->name, run_id);
     // ADR-015: the declared TCP ports are the only outbound TCP a Worker
@@ -6558,11 +6564,14 @@ namespace agentos
       const auto &gpu_list = config_.trusted_workers.gpu;
       const bool gpu_trusted
         = std::find (gpu_list.begin (), gpu_list.end (), worker->name)
-          != gpu_list.end ();
+            != gpu_list.end ()
+          || (worker->gpu
+              && db_.worker_has_suite_grant (worker->id.value (), "gpu"));
       req.gpu = worker->gpu && gpu_trusted;
       if (worker->gpu && !gpu_trusted)
         spdlog::info ("[orchestrator] worker '{}' declares gpu=true but is "
-                     "not in [trusted_workers].gpu -- dispatching without "
+                     "neither approved for its Suite (agentos suite approve) "
+                     "nor in [trusted_workers].gpu -- dispatching without "
                      "GPU access for run {}",
                      worker->name, run_id);
     }

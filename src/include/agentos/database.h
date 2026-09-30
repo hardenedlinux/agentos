@@ -583,6 +583,34 @@ namespace agentos
     load_suite_components (const std::string &suite_id);
     void set_suite_enabled (const std::string &suite_id, bool enabled);
 
+    // -- Suite grants (ADR-015 amendment 2026-09-30) -------------------------
+    // Deployment-time approval of the privileged grants ("network", "gpu")
+    // that a Suite's Workers declare in their manifests. Written only by
+    // the local CLI (`agentos suite approve`, `suite install --approve`);
+    // no JSON-RPC method reads or writes this table.
+    struct SuiteGrantRow
+    {
+      std::string suite_id;
+      std::string grant; // "network" | "gpu"
+      int64_t approved_at = 0;
+      std::string approved_by;
+    };
+    static bool suite_grant_valid (const std::string &grant);
+    bool set_suite_grant (const std::string &suite_id,
+                          const std::string &grant,
+                          const std::string &approved_by);
+    bool revoke_suite_grant (const std::string &suite_id,
+                             const std::string &grant);
+    // All grants, or one Suite's when suite_id is non-empty.
+    std::vector<SuiteGrantRow>
+    load_suite_grants (const std::string &suite_id = {});
+    // True if agent_id is a Worker of an installed, enabled Suite that has
+    // been approved for grant.
+    bool worker_has_suite_grant (const std::string &agent_id,
+                                 const std::string &grant);
+    // agents.manifest for one agent id.
+    std::optional<std::string> load_agent_manifest (const std::string &agent_id);
+
     // -- Asset registration (content-addressed local blob storage) ----------
     // A blob's real bytes live at ~/.agentos/assets/blobs/<sha256>/content,
     // deduplicated by content hash. This table is the queryable index:

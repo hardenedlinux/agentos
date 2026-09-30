@@ -535,6 +535,19 @@ namespace agentos
     if (!exec_ddl (schema_installed_suites))
       return false;
 
+    // ADR-015 amendment (2026-09-30): Suite-level deployment approvals.
+    static const char *schema_suite_grants = R"(
+      CREATE TABLE IF NOT EXISTS suite_grants (
+          suite_id    TEXT NOT NULL,
+          grant_kind  TEXT NOT NULL CHECK (grant_kind IN ('network', 'gpu')),
+          approved_at INTEGER NOT NULL,
+          approved_by TEXT NOT NULL,
+          PRIMARY KEY (suite_id, grant_kind)
+      );
+    )";
+    if (!exec_ddl (schema_suite_grants))
+      return false;
+
     // ADR-038 interaction continuations
     static const char *schema_interaction_continuations = R"(
       CREATE TABLE IF NOT EXISTS interaction_continuations (
@@ -2917,6 +2930,107 @@ namespace agentos
       rows.push_back (std::move (row));
     }
     return rows;
+  }
+
+  bool Database::suite_grant_valid (const std::string &grant)
+  {
+    return grant == "network" || grant == "gpu";
+  }
+
+  bool Database::set_suite_grant (const std::string &suite_id,
+                                  const std::string &grant,
+                                  const std::string &approved_by)
+  {
+    if (!db_ || suite_id.empty () || !suite_grant_valid (grant))
+      return false;
+    Stmt stmt (prepare (R"(
+      INSERT OR REPLACE INTO suite_grants
+          (suite_id, grant_kind, approved_at, approved_by)
+      VALUES (?, ?, ?, ?)
+  )"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, grant.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64 (stmt, 3, now_unix ());
+    sqlite3_bind_text (stmt, 4, approved_by.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_DONE;
+  }
+
+  bool Database::revoke_suite_grant (const std::string &suite_id,
+                                     const std::string &grant)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (
+      "DELETE FROM suite_grants WHERE suite_id = ? AND grant_kind = ?"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, grant.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (db_) > 0;
+  }
+
+  std::vector<Database::SuiteGrantRow>
+  Database::load_suite_grants (const std::string &suite_id)
+  {
+    std::vector<SuiteGrantRow> rows;
+    if (!db_)
+      return rows;
+    Stmt stmt (prepare (R"(
+      SELECT suite_id, grant_kind, approved_at, approved_by
+      FROM suite_grants
+      WHERE ?1 = '' OR suite_id = ?1
+      ORDER BY suite_id, grant_kind
+  )"));
+    if (!stmt.s)
+      return rows;
+    sqlite3_bind_text (stmt, 1, suite_id.c_str (), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      SuiteGrantRow r;
+      r.suite_id = column_text_or_empty (stmt, 0);
+      r.grant = column_text_or_empty (stmt, 1);
+      r.approved_at = sqlite3_column_int64 (stmt, 2);
+      r.approved_by = column_text_or_empty (stmt, 3);
+      rows.push_back (std::move (r));
+    }
+    return rows;
+  }
+
+  bool Database::worker_has_suite_grant (const std::string &agent_id,
+                                         const std::string &grant)
+  {
+    if (!db_)
+      return false;
+    Stmt stmt (prepare (R"(
+      SELECT 1
+      FROM suite_grants g
+      JOIN suite_components c ON c.suite_id = g.suite_id
+      JOIN installed_suites s ON s.suite_id = g.suite_id
+      WHERE c.component_id = ? AND c.component_type = 'worker'
+        AND g.grant_kind = ? AND s.enabled = 1
+      LIMIT 1
+  )"));
+    if (!stmt.s)
+      return false;
+    sqlite3_bind_text (stmt, 1, agent_id.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 2, grant.c_str (), -1, SQLITE_TRANSIENT);
+    return sqlite3_step (stmt) == SQLITE_ROW;
+  }
+
+  std::optional<std::string>
+  Database::load_agent_manifest (const std::string &agent_id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare ("SELECT manifest FROM agents WHERE id = ?"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, agent_id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+    return column_text_or_empty (stmt, 0);
   }
 
   void Database::set_suite_enabled (const std::string &suite_id, bool enabled)

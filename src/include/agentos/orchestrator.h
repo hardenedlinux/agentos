@@ -351,12 +351,24 @@ namespace agentos
     // sets out_id on success; returns false and sets out_error otherwise.
     // Neither replies to the client — callers own that.
     // ---------------------------------------------------------------------------
+    // ADR-030 all-or-nothing Suite install: how to undo one package
+    // directory swap. `previous` is where the replaced package was parked
+    // (empty if dest did not exist before).
+    struct PackageSwap
+    {
+      std::filesystem::path dest;
+      std::filesystem::path previous;
+    };
     bool register_worker_package (const std::filesystem::path &src_dir,
                                   std::string &out_worker_id,
-                                  std::string &out_error);
+                                  std::string &out_error,
+                                  PackageSwap *swap = nullptr);
     bool register_adviser_package (const std::filesystem::path &src_dir,
                                    std::string &out_adviser_id,
-                                   std::string &out_error);
+                                   std::string &out_error,
+                                   PackageSwap *swap = nullptr);
+    // Undo package swaps (reverse order) after a failed Suite install.
+    static void undo_package_swaps (const std::vector<PackageSwap> &swaps);
 
     // ---------------------------------------------------------------------------
     // Pipeline execution

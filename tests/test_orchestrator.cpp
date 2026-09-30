@@ -759,6 +759,74 @@ TEST_F (OrchestratorTest, PlanReady_NoWorkerForCommand_ReportsExhaustedToMaster)
 // Pipeline: plan_ready with a registered worker → WorkerDone → job done
 // ---------------------------------------------------------------------------
 
+// ADR-030: suite.install is all or nothing. A Suite whose second
+// component is invalid must leave the previously installed Adviser package,
+// its agents row, and the installed-suite list exactly as they were.
+TEST_F (OrchestratorTest, SuiteInstall_FailureRollsBackEverything)
+{
+  const std::string key = insert_key ("admin");
+  auto call = [&] (const std::string &id, const std::string &method,
+                   const std::string &params) -> std::string
+  {
+    {
+      std::lock_guard<std::mutex> lk (mtx_);
+      gateway_events_.clear ();
+    }
+    send_inbound (R"({"jsonrpc":"2.0","id":")" + id + R"(","method":")"
+                  + method + R"(","key":")" + key + R"(","params":)" + params
+                  + "}");
+    if (!wait_gateway (1))
+      return "timeout";
+    std::lock_guard<std::mutex> lk (mtx_);
+    return gateway_events_[0].outbound.message;
+  };
+
+  // v1 of the Adviser, registered on its own.
+  const fs::path v1 = home_ / "adv-v1";
+  fs::create_directories (v1);
+  std::ofstream (v1 / "manifest.toml")
+    << "[meta]\nid = \"suite-a\"\ndescription = \"v1\"\n";
+  std::ofstream (v1 / "skill.md") << "v1 skill";
+  ASSERT_NE (call ("1", "adviser.register",
+                   R"({"path":")" + v1.string () + R"("})")
+               .find ("\"result\""),
+             std::string::npos);
+
+  // A Suite carrying v2 of that Adviser plus a broken Worker.
+  const fs::path suite = home_ / "suite-src";
+  fs::create_directories (suite / "advisers" / "suite-a");
+  fs::create_directories (suite / "workers" / "broken");
+  std::ofstream (suite / "suite.toml")
+    << "[meta]\nid = \"suite-a\"\nversion = \"2.0.0\"\n";
+  std::ofstream (suite / "advisers" / "suite-a" / "manifest.toml")
+    << "[meta]\nid = \"suite-a\"\ndescription = \"v2\"\n";
+  std::ofstream (suite / "advisers" / "suite-a" / "skill.md") << "v2 skill";
+  std::ofstream (suite / "workers" / "broken" / "manifest.json") << "{ not json";
+
+  const std::string r = call ("2", "suite.install",
+                              R"({"path":")" + suite.string () + R"("})");
+  EXPECT_NE (r.find ("\"error\""), std::string::npos) << r;
+
+  // Package directory: v1 back in place, nothing of v2 left.
+  std::ifstream skill (home_ / "advisers" / "suite-a" / "skill.md");
+  std::string content ((std::istreambuf_iterator<char> (skill)), {});
+  EXPECT_EQ (content, "v1 skill");
+  // Database: agents row still v1, no installed suite recorded.
+  auto row = db_->load_agent ("suite-a");
+  ASSERT_TRUE (row);
+  EXPECT_EQ (row->description, "v1");
+  EXPECT_FALSE (db_->load_installed_suite ("suite-a"));
+  EXPECT_FALSE (db_->load_agent ("broken"));
+
+  // A valid Suite still installs afterwards (no transaction left open).
+  fs::remove_all (suite / "workers");
+  const std::string ok = call ("3", "suite.install",
+                               R"({"path":")" + suite.string () + R"("})");
+  EXPECT_NE (ok.find ("\"result\""), std::string::npos) << ok;
+  EXPECT_EQ (db_->load_agent ("suite-a")->description, "v2");
+  EXPECT_TRUE (db_->load_installed_suite ("suite-a"));
+}
+
 // ADR-031 §14.2: the reviewer flag comes only from an explicit declaration
 // and is re-evaluated on every registration.
 TEST_F (OrchestratorTest, Register_ReviewerDeclaration)

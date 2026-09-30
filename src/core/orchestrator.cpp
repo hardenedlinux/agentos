@@ -295,8 +295,11 @@ namespace agentos
     // renames of ADR-030's update sequence and restores the old package
     // if the second one fails.
     bool install_package_dir (const fs::path &src_dir,
-                              const fs::path &dest_dir, std::string &out_error)
+                              const fs::path &dest_dir, std::string &out_error,
+                              fs::path *out_previous = nullptr)
     {
+      if (out_previous)
+        out_previous->clear ();
       const fs::path parent = dest_dir.parent_path ();
       const std::string name = dest_dir.filename ().string ();
       if (name.empty () || name.front () == '.')
@@ -358,8 +361,14 @@ namespace agentos
         // staging now holds the previous version; park it for GC. If
         // even that fails it stays under .staging/, also GC'd at start.
         if (::rename (staging.c_str (), old_dir.c_str ()) != 0)
+        {
           spdlog::warn ("[orchestrator] cannot park old package {}: {}",
                         staging.string (), std::strerror (errno));
+          if (out_previous)
+            *out_previous = staging;
+        }
+        else if (out_previous)
+          *out_previous = old_dir;
         return true;
       }
       if (errno != EINVAL && errno != ENOSYS && errno != EOPNOTSUPP)
@@ -389,6 +398,8 @@ namespace agentos
         discard_staging ();
         return false;
       }
+      if (out_previous)
+        *out_previous = old_dir;
       return true;
     }
 
@@ -2031,7 +2042,8 @@ namespace agentos
 
   bool Orchestrator::register_worker_package (const fs::path &src_dir,
                                               std::string &out_worker_id,
-                                              std::string &out_error)
+                                              std::string &out_error,
+                                              PackageSwap *swap)
   {
     // The daemon is a separate, long-running process — a relative path
     // resolves against ITS working directory, not the caller's. Silently
@@ -2142,8 +2154,13 @@ namespace agentos
     }
 
     const fs::path dest_dir = agentos_home () / "workers" / worker_id;
-    if (!install_package_dir (src_dir, dest_dir, out_error))
-      return false;
+    {
+      fs::path previous;
+      if (!install_package_dir (src_dir, dest_dir, out_error, &previous))
+        return false;
+      if (swap)
+        *swap = PackageSwap{dest_dir, previous};
+    }
 
     const fs::path installed_entrypoint = dest_dir / entrypoint.filename ();
 
@@ -2222,7 +2239,8 @@ namespace agentos
 
   bool Orchestrator::register_adviser_package (const fs::path &src_dir,
                                                std::string &out_adviser_id,
-                                               std::string &out_error)
+                                               std::string &out_error,
+                                               PackageSwap *swap)
   {
     if (!src_dir.is_absolute ())
     {
@@ -2276,8 +2294,13 @@ namespace agentos
     }
 
     const fs::path dest_dir = agentos_home () / "advisers" / adviser_id;
-    if (!install_package_dir (src_dir, dest_dir, out_error))
-      return false;
+    {
+      fs::path previous;
+      if (!install_package_dir (src_dir, dest_dir, out_error, &previous))
+        return false;
+      if (swap)
+        *swap = PackageSwap{dest_dir, previous};
+    }
 
     const std::string installed_skill_path = (dest_dir / "skill.md").string ();
     // agents.manifest stores the manifest.toml text verbatim (ADR-018's
@@ -2535,8 +2558,29 @@ namespace agentos
       return;
     }
 
+    // ADR-030: installation is all or nothing. Every database write below
+    // happens in one transaction, and every package directory swap is
+    // recorded so it can be reversed; the first failure undoes both and
+    // leaves the previous installation exactly as it was.
     std::vector<std::pair<std::string, std::string>>
-      registered; // (type, id) — for rollback bookkeeping / suite_components
+      registered; // (type, id) — suite_components rows
+    std::vector<PackageSwap> swaps;
+
+    if (!db_.begin_transaction ())
+    {
+      reply_error (identity, request_id, -32603,
+                   "suite install failed: cannot start a database "
+                   "transaction");
+      return;
+    }
+    auto fail = [&] (const std::string &message)
+    {
+      db_.rollback_transaction ();
+      undo_package_swaps (swaps);
+      spdlog::error ("[orchestrator] suite {} install rolled back: {}",
+                     suite_id, message);
+      reply_error (identity, request_id, -32602, message);
+    };
 
     // Register every bundled Adviser (advisers/<name>/).
     const fs::path advisers_dir = suite_dir / "advisers";
@@ -2547,13 +2591,15 @@ namespace agentos
         if (!entry.is_directory ())
           continue;
         std::string adviser_id, error;
-        if (!register_adviser_package (entry.path (), adviser_id, error))
+        PackageSwap swap;
+        if (!register_adviser_package (entry.path (), adviser_id, error,
+                                       &swap))
         {
-          reply_error (identity, request_id, -32602,
-                       "suite install failed registering adviser at "
-                         + entry.path ().string () + ": " + error);
+          fail ("suite install failed registering adviser at "
+                + entry.path ().string () + ": " + error);
           return;
         }
+        swaps.push_back (std::move (swap));
         registered.emplace_back ("adviser", adviser_id);
       }
     }
@@ -2567,13 +2613,15 @@ namespace agentos
         if (!entry.is_directory ())
           continue;
         std::string worker_id, error;
-        if (!register_worker_package (entry.path (), worker_id, error))
+        PackageSwap swap;
+        if (!register_worker_package (entry.path (), worker_id, error,
+                                      &swap))
         {
-          reply_error (identity, request_id, -32602,
-                       "suite install failed registering worker at "
-                         + entry.path ().string () + ": " + error);
+          fail ("suite install failed registering worker at "
+                + entry.path ().string () + ": " + error);
           return;
         }
+        swaps.push_back (std::move (swap));
         registered.emplace_back ("worker", worker_id);
       }
     }
@@ -2586,11 +2634,18 @@ namespace agentos
     // its planning Adviser differently from the Suite id, this copy step
     // will silently miss; worth promoting to an explicit suite.toml
     // '[pipeline] adviser = "..."' field later rather than relying on the
-    // naming convention.
+    // naming convention. A declared doc that cannot be installed fails the
+    // whole install (ADR-030 all-or-nothing).
     auto pipeline = suite_toml["pipeline"];
     const std::string pipeline_doc = pipeline["doc"].value_or (std::string ());
-    if (!pipeline_doc.empty () && fs::exists (suite_dir / pipeline_doc))
+    if (!pipeline_doc.empty ())
     {
+      if (!fs::exists (suite_dir / pipeline_doc))
+      {
+        fail ("suite install failed: [pipeline] doc " + pipeline_doc
+              + " not found in " + suite_dir.string ());
+        return;
+      }
       const fs::path knowledge_dir
         = agentos_home () / "advisers" / suite_id / "knowledge";
       std::error_code ec;
@@ -2599,14 +2654,22 @@ namespace agentos
         install_file_atomic (suite_dir / pipeline_doc,
                              knowledge_dir / "pipeline.md", ec);
       if (ec)
-        spdlog::warn ("[orchestrator] suite {} install: could not copy "
-                      "pipeline doc: {}",
-                      suite_id, ec.message ());
+      {
+        fail ("suite install failed: cannot install pipeline doc into "
+              + knowledge_dir.string () + ": " + ec.message ());
+        return;
+      }
     }
 
     db_.insert_installed_suite (suite_id, version, suite_dir.string ());
     for (const auto &[type, id] : registered)
       db_.insert_suite_component (suite_id, type, id);
+
+    if (!db_.commit_transaction ())
+    {
+      fail ("suite install failed: database commit failed");
+      return;
+    }
 
     // Single refresh after all components are registered, not per-component
     // — avoids N redundant full rebuilds during one suite.install call.
@@ -2624,6 +2687,26 @@ namespace agentos
     w.Int (static_cast<int> (registered.size ()));
     w.EndObject ();
     reply_ok (identity, request_id, buf.GetString ());
+  }
+
+  void Orchestrator::undo_package_swaps (const std::vector<PackageSwap> &swaps)
+  {
+    for (auto it = swaps.rbegin (); it != swaps.rend (); ++it)
+    {
+      if (it->dest.empty ())
+        continue;
+      std::error_code ec;
+      fs::remove_all (it->dest, ec);
+      if (ec)
+        spdlog::error ("[orchestrator] rollback: cannot remove {}: {}",
+                       it->dest.string (), ec.message ());
+      if (!it->previous.empty ()
+          && ::rename (it->previous.c_str (), it->dest.c_str ()) != 0)
+        spdlog::error ("[orchestrator] rollback: cannot restore {} from {}: "
+                       "{}",
+                       it->dest.string (), it->previous.string (),
+                       std::strerror (errno));
+    }
   }
 
   void Orchestrator::cmd_suite_remove (const std::string &params_json,

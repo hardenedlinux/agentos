@@ -3269,6 +3269,23 @@ namespace agentos
            && sqlite3_column_int (stmt, 0) != 0;
   }
 
+  bool Database::begin_transaction ()
+  {
+    return db_ && exec_ddl ("BEGIN IMMEDIATE");
+  }
+
+  bool Database::commit_transaction ()
+  {
+    return db_ && exec_ddl ("COMMIT");
+  }
+
+  void Database::rollback_transaction ()
+  {
+    if (db_ && !sqlite3_get_autocommit (db_))
+      if (!exec_ddl ("ROLLBACK"))
+        spdlog::error ("[database] ROLLBACK failed: {}", sqlite3_errmsg (db_));
+  }
+
   bool Database::agent_is_forge_generated (const std::string &id)
   {
     if (!db_)

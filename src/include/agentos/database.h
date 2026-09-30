@@ -313,6 +313,12 @@ namespace agentos
     bool agent_is_reviewer (const std::string &id);
     // ADR-006: Tier-1 = Forge-generated (agents.approved_by == "forge").
     bool agent_is_forge_generated (const std::string &id);
+    // Explicit transaction for multi-step operations that must be all or
+    // nothing (ADR-030 Suite install). Not nestable. The Orchestrator is the
+    // sole writer, so no other write can interleave.
+    [[nodiscard]] bool begin_transaction ();
+    [[nodiscard]] bool commit_transaction ();
+    void rollback_transaction ();
     // ADR-031 §14.5: jobs.failure_kind / jobs.review_json.
     struct JobFailure
     {

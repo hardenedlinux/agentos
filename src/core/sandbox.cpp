@@ -72,7 +72,11 @@ namespace agentos
   // Helper: apply seccomp whitelist
   static bool apply_seccomp ()
   {
-    scmp_filter_ctx ctx = seccomp_init (SCMP_ACT_KILL);
+    // KILL_PROCESS, not KILL (= kill the calling thread only): a thread
+    // that died on a missing syscall left the rest of the process running
+    // without it -- a hang or a misleading error instead of a SIGSYS exit
+    // the Dispatcher reports.
+    scmp_filter_ctx ctx = seccomp_init (SCMP_ACT_KILL_PROCESS);
 
     if (!ctx)
       {
@@ -936,6 +940,27 @@ namespace agentos
     write_paths.push_back (job_dir);
     write_paths.push_back (run_dir);
 
+    // A private, writable temp directory inside the run workspace. Nothing
+    // else a Worker can write is a temp directory: /tmp, /var/tmp and the
+    // cwd are all outside its Landlock grants, so every library that falls
+    // back to them fails -- SQLite reports "unable to open database file"
+    // the first time it needs a temp file (sorts, indexes, VACUUM, large
+    // transactions), Python's tempfile raises FileNotFoundError. Removed
+    // with the run directory.
+    {
+      const fs::path tmp = fs::path (run_dir) / "tmp";
+      std::error_code ec;
+      fs::create_directories (tmp, ec);
+      if (ec)
+        spdlog::warn ("[sandbox] cannot create {}: {}", tmp.string (),
+                      ec.message ());
+      else
+      {
+        setenv ("TMPDIR", tmp.c_str (), 1);
+        setenv ("SQLITE_TMPDIR", tmp.c_str (), 1);
+      }
+    }
+
     read_paths.push_back ((agentos_home () / "skills").string ());
 
     // Implicit grant: system binary/library paths. LANDLOCK_ACCESS_FS_READ_FILE
@@ -961,6 +986,17 @@ namespace agentos
     // Refuse loudly instead of silently running on CPU.
     std::vector<std::string> device_paths;
     std::vector<std::string> rw_file_dirs;
+    // The standard data devices every runtime assumes: subprocess output
+    // redirected to /dev/null, libraries seeding from /dev/urandom. Read
+    // and write of these character devices only (no ioctl): writing to
+    // the random devices merely mixes entropy, unprivileged.
+    for (const char *dev : { "/dev/null", "/dev/zero", "/dev/full",
+                             "/dev/random", "/dev/urandom" })
+    {
+      std::error_code ec;
+      if (fs::exists (dev, ec))
+        device_paths.emplace_back (dev);
+    }
     if (gpu)
     {
       if (privileged)

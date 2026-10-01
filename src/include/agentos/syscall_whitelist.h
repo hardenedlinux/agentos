@@ -187,4 +187,10 @@ int syscalls[] = {
   // or a child it waits on exits by signal.
   SCMP_SYS (clock_nanosleep),
   SCMP_SYS (restart_syscall),
+  // Durable writes (SQLite commits, any fsync-before-rename pattern).
+  SCMP_SYS (fsync),
+  SCMP_SYS (fdatasync),
+  // glibc realloc() of any block above the mmap threshold (128 KiB by
+  // default) grows it with mremap: any Worker building a large buffer.
+  SCMP_SYS (mremap),
 };

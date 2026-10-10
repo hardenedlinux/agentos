@@ -1225,6 +1225,20 @@ namespace agentos
       spdlog::error ("[database] update_job_error: {}", sqlite3_errmsg (db_));
   }
 
+  std::optional<std::string>
+  Database::load_job_payload (const std::string &id)
+  {
+    if (!db_)
+      return std::nullopt;
+    Stmt stmt (prepare ("SELECT payload FROM jobs WHERE id = ?"));
+    if (!stmt.s)
+      return std::nullopt;
+    sqlite3_bind_text (stmt, 1, id.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_ROW)
+      return std::nullopt;
+    return column_text_or_empty (stmt, 0);
+  }
+
   std::optional<Job> Database::load_job (const std::string &id)
   {
     if (!db_)

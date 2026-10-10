@@ -143,8 +143,20 @@ namespace agentos
                                         const std::string &step_id,
                                         const std::string &worker_id,
                                         std::string_view provider,
-                                        int pipe_write_fd)
+                                        int pipe_write_fd,
+                                        std::string_view account)
   {
+    // The credential row is keyed "<provider>:<account>" when the job named
+    // an account (e.g. one shop of a multi-shop user), plain "<provider>"
+    // otherwise. Grants are per base provider: a grant lets a Worker use
+    // that provider's credentials, the job decides which account.
+    std::string key (provider);
+    if (!account.empty ())
+    {
+      key += ':';
+      key += account;
+    }
+
     // 1. Load job; check phase.
     auto job_opt = db_.load_job (job_id);
     if (!job_opt || job_opt->phase != std::string (db::job_phase::executing))
@@ -171,12 +183,12 @@ namespace agentos
     }
 
     // 3. Load credential.
-    auto cred_opt = db_.load_credential (user_id, std::string (provider));
+    auto cred_opt = db_.load_credential (user_id, key);
     if (!cred_opt)
     {
       spdlog::warn (
         "[cred_vault] get_token: no credential for user={} provider={}",
-        user_id, provider);
+        user_id, key);
       close (pipe_write_fd);
       return {TokenResult::Denied, std::nullopt};
     }
@@ -242,8 +254,7 @@ namespace agentos
     rapidjson::Writer<rapidjson::StringBuffer> writer (buf);
     writer.StartObject ();
     writer.Key ("provider");
-    writer.String (provider.data (),
-                   static_cast<rapidjson::SizeType> (provider.size ()));
+    writer.String (key.c_str (), static_cast<rapidjson::SizeType> (key.size ()));
     writer.Key ("token");
     writer.String (plain.c_str (),
                    static_cast<rapidjson::SizeType> (plain.size ()));

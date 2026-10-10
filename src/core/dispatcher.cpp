@@ -286,10 +286,22 @@ namespace agentos
       }
       setenv ("AGENTOS_CHANNEL_FD", std::to_string (kChannelFd).c_str (), 1);
 
-      // A Worker inherits exactly stdin, stdout, stderr and its channel.
-      // Close every other descriptor the daemon had open, whether or not
-      // it was marked close-on-exec.
-      syscall (SYS_close_range, kChannelFd + 1, ~0U, 0);
+      // ADR-028: the credential pipe is fd 4. The caller guarantees
+      // cred_fd > kCredFd, so neither dup2 above can have clobbered it and
+      // this dup2 always clears FD_CLOEXEC on the target.
+      int first_closed_fd = kChannelFd + 1;
+      if (req.cred_fd >= 0)
+      {
+        if (req.cred_fd <= kCredFd || dup2 (req.cred_fd, kCredFd) < 0)
+          _exit (1);
+        setenv ("AGENTOS_CRED_FD", std::to_string (kCredFd).c_str (), 1);
+        first_closed_fd = kCredFd + 1;
+      }
+
+      // A Worker inherits exactly stdin, stdout, stderr, its channel and,
+      // when granted, its credential fd. Close every other descriptor the
+      // daemon had open, whether or not it was marked close-on-exec.
+      syscall (SYS_close_range, first_closed_fd, ~0U, 0);
 
       // Tell the worker where to write result.json (ADR-016 Result File
       // Wire Format). setenv() only touches this process's own environ

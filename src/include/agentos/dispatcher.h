@@ -62,7 +62,15 @@ struct DispatchRequest
   // ADR-006/015: Tier-1 (Forge-generated, agents.approved_by == "forge")
   // Workers get the tighter Tier-1 resource limits.
   bool                     forge_generated = false;
+  // ADR-028: read end of the credential pipe, already filled and at EOF
+  // (CredVault::get_token ran in the daemon before fork). Becomes fd 4
+  // (kCredFd) in the Worker. -1 = no credential. The caller keeps
+  // ownership and closes it after fork_exec() returns.
+  int                      cred_fd = -1;
 };
+
+// ADR-028: the credential fd number inside the Worker (AGENTOS_CRED_FD).
+inline constexpr int kCredFd = 4;
 
 // ---------------------------------------------------------------------------
 // DispatchResult — returned synchronously to Orchestrator after fork

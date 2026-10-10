@@ -52,12 +52,17 @@ public:
 
     /// Retrieve a plaintext credential token for a step.
     /// Writes JSON directly to pipe_write_fd and then closes it.
+    /// The grant is checked against the base `provider`; the credential is
+    /// looked up as "<provider>:<account>" when `account` is non-empty,
+    /// otherwise as "<provider>". The JSON's "provider" field carries that
+    /// full key, so the Worker learns which account the token belongs to.
     GetTokenOutcome get_token(
         const std::string &job_id,
         const std::string &step_id,
         const std::string &worker_id,
         std::string_view   provider,
-        int                pipe_write_fd);
+        int                pipe_write_fd,
+        std::string_view   account = {});
 
     // ---- cred.* RPC methods ----
 

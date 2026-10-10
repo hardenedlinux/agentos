@@ -182,6 +182,24 @@ namespace agentos
       return true;
     }
 
+    // ADR-028: job.submit's credential_account selects which of a user's
+    // accounts for a provider a job acts on (e.g. a shop domain), giving
+    // the credential key "<provider>:<account>". Restricted to a hostname-
+    // like token so it can never smuggle a ':' or other separator into the
+    // key.
+    bool is_valid_credential_account (const std::string &account)
+    {
+      if (account.empty () || account.size () > 253)
+        return false;
+      for (char c : account)
+      {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_'))
+          return false;
+      }
+      return true;
+    }
+
     // True iff `candidate` resolves to a location on or under `base`.
     // Uses weakly_canonical (resolves symlinks and ".." on whatever
     // prefix already exists on disk, without requiring the final
@@ -1123,6 +1141,21 @@ namespace agentos
           : "oneshot";
     const std::string job_id = new_uuid ();
 
+    // ADR-028: optional credential_account. Validated before any side
+    // effect; persisted with the submitted params (jobs.payload) and read
+    // back at dispatch time, so it survives a daemon restart.
+    if (params.HasMember ("credential_account"))
+    {
+      if (!params["credential_account"].IsString ()
+          || !is_valid_credential_account (
+            params["credential_account"].GetString ()))
+      {
+        reply_error (identity, request_id, -32602,
+                     "Invalid params: credential_account");
+        return;
+      }
+    }
+
     // ADR-038: optional continuation_id from job.submit params
     std::string continuation_id;
     if (params.HasMember ("continuation_id") && params["continuation_id"].IsString ())
@@ -1287,7 +1320,10 @@ namespace agentos
     Task task;
     task.id = TaskId (job_id);
     task.goal = goal;
-    task.input_json = (params.HasMember ("input")) ? params_json : "{}";
+    task.input_json = (params.HasMember ("input")
+                       || params.HasMember ("credential_account"))
+                        ? params_json
+                        : "{}";
     task.user_id = user_id;
     db_.store_job (task);
     db_.update_job_phase (TaskId (job_id), "planning");
@@ -6657,6 +6693,71 @@ namespace agentos
                    req.task_json);
     }
 
+    // ADR-028: credential injection. CredVault runs here, in the daemon,
+    // before fork: the forked child of a multi-threaded process must not
+    // touch CredVault's mutex, SQLite or OpenSSL. The token goes straight
+    // from CredVault into the pipe, which then holds the whole JSON plus
+    // EOF; the child only dup2()s the read end to fd 4.
+    int cred_read_fd = -1;
+    if (!worker->credential_provider.empty ())
+    {
+      std::string account;
+      if (auto payload = db_.load_job_payload (job.job_id); payload)
+      {
+        rapidjson::Document pdoc;
+        if (!pdoc.Parse (payload->c_str ()).HasParseError ()
+            && pdoc.IsObject () && pdoc.HasMember ("credential_account")
+            && pdoc["credential_account"].IsString ())
+          account = pdoc["credential_account"].GetString ();
+      }
+
+      std::string cred_error;
+      int pfd[2];
+      if (pipe2 (pfd, O_CLOEXEC) != 0)
+        cred_error = "credential pipe failed";
+      else
+      {
+        // Keep the read end above fd 4, so the child's dup2() onto fd 3/4
+        // can never clobber it (see Dispatcher::fork_exec).
+        cred_read_fd = fcntl (pfd[0], F_DUPFD_CLOEXEC, kCredFd + 1);
+        close (pfd[0]);
+        if (cred_read_fd < 0)
+        {
+          close (pfd[1]);
+          cred_error = "credential pipe failed";
+        }
+        else
+        {
+          // get_token closes pfd[1] on every path.
+          const auto outcome = cred_vault_.get_token (
+            job.job_id, step.step.id, worker->id.value (),
+            worker->credential_provider, pfd[1], account);
+          if (outcome.status == TokenResult::Delay)
+            cred_error = "credential for '" + worker->credential_provider
+                         + "' is not ready yet";
+          else if (outcome.status != TokenResult::Ready)
+            cred_error = "credential for '" + worker->credential_provider
+                         + "' unavailable";
+        }
+      }
+      if (!cred_error.empty ())
+      {
+        if (cred_read_fd >= 0)
+          close (cred_read_fd);
+        spdlog::error ("[orchestrator] job {} step {} worker '{}' account "
+                       "'{}': {}",
+                       job.job_id, step.step.id, worker->name, account,
+                       cred_error);
+        const std::string job_id = job.job_id;
+        const std::string step_id = step.step.id;
+        db_.update_step_status (job_id, step_id, db::step_status::failed,
+                                cred_error);
+        finish_job (job_id, false, "step " + step_id + ": " + cred_error);
+        return;
+      }
+      req.cred_fd = cred_read_fd;
+    }
+
     // Persist worker_run before fork (ADR-022: persist before act).
     WorkerRun run;
     run.run_id = run_id;
@@ -6680,12 +6781,18 @@ namespace agentos
       spdlog::error ("[orchestrator] could not record worker run {} for job "
                      "{} step {}; not dispatching",
                      run_id, job.job_id, step.step.id);
+      if (cred_read_fd >= 0)
+        close (cred_read_fd);
       const std::string job_id = job.job_id;
       finish_job (job_id, false, "internal error: worker run not recorded");
       return;
     }
 
     auto result = dispatcher_.fork_exec (req);
+    // The child holds its own copy of the credential pipe (fd 4); the
+    // daemon's copy is closed whether or not the fork succeeded.
+    if (cred_read_fd >= 0)
+      close (cred_read_fd);
     if (!result.ok)
     {
       spdlog::error ("[orchestrator] fork_exec failed for job {}: {}",
@@ -7432,6 +7539,17 @@ namespace agentos
         || !params.HasMember ("provider") || !params["provider"].IsString ())
     {
       reply_error (identity, request_id, -32602, "Invalid params");
+      return;
+    }
+    // Grants are per base provider ("shopify"); the account half of a
+    // "<provider>:<account>" credential key is chosen per job, never
+    // granted. A grant naming an account would never match get_token.
+    if (std::string_view (params["provider"].GetString ()).find (':')
+        != std::string_view::npos)
+    {
+      reply_error (identity, request_id, -32602,
+                   "Invalid params: grant the base provider, without "
+                   "':<account>'");
       return;
     }
     // ADR-028 audit trail: record the id of the access key that made this

@@ -200,6 +200,9 @@ namespace agentos
     void set_job_deliverable_kind (const std::string &job_id,
                                    const std::string &deliverable_kind);
     std::optional<Job> load_job (const std::string &id);
+    // The job.submit params persisted at submission (jobs.payload); "{}"
+    // when nothing structured was submitted. nullopt if the job is missing.
+    std::optional<std::string> load_job_payload (const std::string &id);
     std::vector<Job> load_jobs (std::optional<std::string_view> type_filter,
                                 std::optional<std::string_view> phase_filter,
                                 int limit, int offset);

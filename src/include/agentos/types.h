@@ -202,6 +202,12 @@ namespace agentos
     // `network`, necessary but not sufficient -- the Worker must also be
     // named in config.toml [trusted_workers].gpu.
     bool gpu = false;
+    // ADR-028: manifest requires.credentials -- the base provider whose
+    // credential is injected on fd 4 (AGENTOS_CRED_FD). At most one per
+    // Worker, since ADR-028 defines a single credential fd. Empty means the
+    // Worker receives no credential. The job selects the account (e.g. one
+    // shop of a multi-shop user) via job.submit's credential_account.
+    std::string credential_provider;
   };
 
   // Sandbox tiers (ADR-006)

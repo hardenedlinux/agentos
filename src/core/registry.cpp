@@ -212,6 +212,39 @@ namespace agentos
                           "tcp_connect_ports entry",
                           agent_id);
         }
+      // ADR-028: requires.credentials names the base provider whose
+      // credential is injected on fd 4. ADR-028 defines one credential fd,
+      // so at most one entry. A malformed declaration rejects the Worker
+      // instead of silently dispatching it without the credential it needs.
+      if (req.HasMember ("credentials"))
+      {
+        const auto &creds = req["credentials"];
+        if (!creds.IsArray () || creds.Size () > 1)
+        {
+          spdlog::error ("[registry] worker '{}': requires.credentials must "
+                         "be an array with at most one provider",
+                         agent_id);
+          return false;
+        }
+        if (creds.Size () == 1)
+        {
+          const std::string provider
+            = creds[0].IsString () ? creds[0].GetString () : "";
+          bool valid = !provider.empty () && provider.size () <= 64;
+          for (char c : provider)
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                  || c == '_' || c == '-'))
+              valid = false;
+          if (!valid)
+          {
+            spdlog::error ("[registry] worker '{}': invalid provider name "
+                           "in requires.credentials",
+                           agent_id);
+            return false;
+          }
+          out_worker.credential_provider = provider;
+        }
+      }
     }
 
     if (!doc.HasMember ("capabilities") || !doc["capabilities"].IsArray ())

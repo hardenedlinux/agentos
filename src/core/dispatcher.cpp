@@ -441,7 +441,9 @@ namespace agentos
       spdlog::warn ("[dispatcher] run_id={} worker-reported error: {}", run_id,
                     err);
       warn_output_log (run_id, log_file (run_id));
-      return {false, exit_code, {}, err};
+      CollectResult r{false, exit_code, {}, err};
+      r.reported_error = true;
+      return r;
     }
 
     if (status == "rejected")

@@ -151,6 +151,28 @@ TEST_F (DispatcherTest, Collect_StatusRejected_CarriesResult)
   EXPECT_FALSE (dispatcher_.collect (run_id, job_dir, 0).rejected);
 }
 
+// ADR-031 §11 amendment: only a Worker-reported error is repairable; a
+// crash or a Worker Contract violation is not.
+TEST_F (DispatcherTest, Collect_ReportedErrorIsFlagged)
+{
+  const std::string run_id  = "run-collect-reported-error";
+  const std::string job_dir = (home_ / "layers" / "runs" / run_id).string ();
+  fs::create_directories (job_dir);
+  std::ofstream (job_dir + "/result.json")
+    << R"({"status":"error","error":"CSS has unbalanced braces"})";
+
+  auto res = dispatcher_.collect (run_id, job_dir, 0);
+  EXPECT_FALSE (res.ok);
+  EXPECT_TRUE (res.reported_error);
+  EXPECT_EQ (res.error, "CSS has unbalanced braces");
+
+  EXPECT_FALSE (dispatcher_.collect (run_id, job_dir, 1).reported_error);
+  std::ofstream (job_dir + "/result.json") << "not json";
+  EXPECT_FALSE (dispatcher_.collect (run_id, job_dir, 0).reported_error);
+  std::ofstream (job_dir + "/result.json") << R"({"status":"ok","result":{}})";
+  EXPECT_FALSE (dispatcher_.collect (run_id, job_dir, 0).reported_error);
+}
+
 TEST_F (DispatcherTest, Collect_NonZeroExitCode_Propagated)
 {
   const std::string run_id  = "run-collect-fail";

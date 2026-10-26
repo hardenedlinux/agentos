@@ -371,6 +371,7 @@ namespace agentos
         MasterDecision, // Master has reached a decision
         TimerFired,     // from PeriodicExecutor (scheduled task)
         ChannelRequest, // ADR-042: a Worker's request on its job channel
+        StepRepaired,   // ADR-031 §11 amendment: Adviser output repair done
       };
 
     Kind kind;

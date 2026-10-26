@@ -29,6 +29,7 @@
 #include "agentos/time_utils.h"
 #include "agentos/memory_curve.h"
 #include "agentos/review.h"
+#include "agentos/step_repair.h"
 #include "agentos/user_facts.h"
 #include "agentos/user_manager.h"
 #include "agentos/uuid.h"
@@ -852,6 +853,9 @@ namespace agentos
       break;
     case OrchestratorEvent::Kind::ChannelRequest:
       handle_channel_request (msg);
+      break;
+    case OrchestratorEvent::Kind::StepRepaired:
+      handle_step_repaired (msg);
       break;
     }
   }
@@ -2125,6 +2129,35 @@ namespace agentos
           return 0;
         }
         spdlog::info ("[orchestrator] AGENTOS_MAX_STEP_RETRIES={}", n);
+        return n;
+      }();
+      return value;
+    }
+
+    // ADR-031 §11 amendment: Adviser output repairs per step. A Worker
+    // that reports status "error" on Adviser output is usually one small
+    // defect away from success (unbalanced braces, a missing field), so the
+    // LLM corrects that output, up to 3 times, before the step counts as
+    // failed: a few cheap repair calls cost far less than running the
+    // whole Suite again.
+    // AGENTOS_MAX_STEP_REPAIRS=<n> (n >= 0) overrides; 0 disables repair.
+    int max_step_repairs ()
+    {
+      static const int value = [] {
+        const char *env = std::getenv ("AGENTOS_MAX_STEP_REPAIRS");
+        if (!env || !*env)
+          return 3;
+        int n = -1;
+        const char *end = env + std::strlen (env);
+        auto [ptr, ec] = std::from_chars (env, end, n);
+        if (ec != std::errc () || ptr != end || n < 0)
+        {
+          spdlog::warn ("[orchestrator] ignoring invalid "
+                        "AGENTOS_MAX_STEP_REPAIRS='{}'; using 3",
+                        env);
+          return 3;
+        }
+        spdlog::info ("[orchestrator] AGENTOS_MAX_STEP_REPAIRS={}", n);
         return n;
       }();
       return value;
@@ -7129,6 +7162,10 @@ namespace agentos
     {
       spdlog::warn ("[orchestrator] collect failed for run_id={}: {}", run_id,
                     collected.error);
+      // ADR-031 §11 amendment: a Worker that ran and refused its input
+      // gets that input repaired instead of a blind retry.
+      if (collected.reported_error && start_step_repair (job, collected.error))
+        return;
       on_step_failed (job_id, run_id, exit_code);
       return;
     }
@@ -7196,14 +7233,242 @@ namespace agentos
       return;
     }
 
-    // step.attempts counts failures, i.e. total attempts made.
-    spdlog::error ("[orchestrator] step {} ({}) failed after {} attempt(s) "
+    // step.attempts counts failures, i.e. total attempts made; a repaired
+    // run is one more attempt.
+    const int total_attempts = step.attempts + step.repairs;
+    const std::string repaired
+      = step.repairs > 0
+          ? " (" + std::to_string (step.repairs) + " after output repair)"
+          : "";
+    spdlog::error ("[orchestrator] step {} ({}) failed after {} attempt(s){} "
                   "-- failing job {}",
-                  step.step.id, step.step.command, step.attempts, job_id);
+                  step.step.id, step.step.command, total_attempts, repaired,
+                  job_id);
     finish_job (job_id, false,
                "step " + step.step.id + " (" + step.step.command
-                 + ") failed after " + std::to_string (step.attempts)
-                 + " attempt(s)");
+                 + ") failed after " + std::to_string (total_attempts)
+                 + " attempt(s)" + repaired);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ADR-031 §11 amendment: Adviser output repair
+  // ---------------------------------------------------------------------------
+  //
+  // A Worker-target step reported status "error" (ADR-016) on input an
+  // Adviser-target step produced. The Adviser's output is corrected by one
+  // LLM call that sees the output and the Worker's error, the corrected
+  // output replaces the Adviser step's tasks.result, and the Worker step is
+  // dispatched again. The Plan is not changed: no step is added or
+  // repeated, so the pipeline stays linear (ADR-022).
+
+  bool Orchestrator::start_step_repair (ActiveJob &job, const std::string &error)
+  {
+    if (job.pending_steps.empty ())
+      return false;
+    ActiveStep &step = job.pending_steps.front ();
+    if (step.step.target_type != "worker" || step.repair_pending)
+      return false;
+
+    const int max_repairs = max_step_repairs ();
+    if (step.repairs >= max_repairs)
+      return false;
+
+    const auto plan = db_.load_steps_for_job (job.job_id);
+    std::vector<RepairSource> sources;
+    for (const auto &id :
+         repair_candidates (plan, step.step.id, step.step.params))
+    {
+      auto s = std::find_if (plan.begin (), plan.end (),
+                             [&] (const Step &p) { return p.id == id; });
+      // A reviewer's verdict is a business conclusion (ADR-031 §14), not
+      // material to be rewritten until the next step accepts it.
+      if (s == plan.end () || db_.agent_is_reviewer (s->command))
+        continue;
+      rapidjson::Document probe;
+      if (probe.Parse (s->result_json.c_str ()).HasParseError ()
+          || !probe.IsObject ())
+        continue;
+      sources.push_back ({s->id, s->command, s->result_json});
+    }
+    if (sources.empty ())
+    {
+      spdlog::info ("[orchestrator] job {} step {}: no Adviser output to "
+                    "repair",
+                    job.job_id, step.step.id);
+      return false;
+    }
+
+    step.repair_pending = true;
+    job.current_run_id.clear ();
+
+    std::string source_ids;
+    for (const auto &s : sources)
+      source_ids += (source_ids.empty () ? "" : ",") + s.step_id;
+    spdlog::warn ("[orchestrator] job {} step {} ({}) rejected its input; "
+                  "repairing output of step(s) {} (repair {}/{})",
+                  job.job_id, step.step.id, step.step.command, source_ids,
+                  step.repairs + 1, max_repairs);
+
+    std::string user_prompt
+      = repair_user_prompt (step.step.id, step.step.command,
+                            step.step.description, error, sources);
+
+    std::thread (
+      [this, job_id = job.job_id, step_id = step.step.id,
+       user_id = job.user_id, user_prompt = std::move (user_prompt),
+       sources = std::move (sources)] () mutable
+      {
+        LlmClient client (llm_, config_.llm);
+        LlmRequest req;
+        req.system_prompt = repair_system_prompt ();
+        req.user_prompt = std::move (user_prompt);
+        // ADR-040: keep the tenant identity attached to every LLM request.
+        req.user_id = std::move (user_id);
+        req.max_tokens = adviser_max_tokens ();
+
+        auto result = client.complete (req);
+
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w (buf);
+        w.StartObject ();
+        w.Key ("step_id");
+        w.String (step_id.c_str ());
+        if (!result.ok)
+        {
+          w.Key ("ok");
+          w.Bool (false);
+          w.Key ("reason");
+          w.String (("LLM call failed: " + result.error).c_str ());
+        }
+        else
+        {
+          w.Key ("tokens_prompt");
+          w.Int (result.value.prompt_tokens);
+          w.Key ("tokens_completion");
+          w.Int (result.value.completion_tokens);
+          const auto parsed
+            = parse_repair_reply (result.value.content, sources);
+          w.Key ("ok");
+          w.Bool (parsed.ok);
+          if (!parsed.ok)
+          {
+            w.Key ("reason");
+            w.String (parsed.error.c_str ());
+          }
+          else
+          {
+            w.Key ("repairs");
+            w.StartObject ();
+            for (const auto &[id, fixed] : parsed.repairs)
+            {
+              w.Key (id.c_str ());
+              // parse_repair_reply re-serialised a validated object.
+              w.RawValue (fixed.c_str (), fixed.size (),
+                          rapidjson::kObjectType);
+            }
+            w.EndObject ();
+          }
+        }
+        w.EndObject ();
+
+        OrchestratorEvent ev;
+        ev.kind = OrchestratorEvent::Kind::StepRepaired;
+        ev.job_id = job_id;
+        ev.payload_json = buf.GetString ();
+        enqueue (std::move (ev));
+      })
+      .detach ();
+    return true;
+  }
+
+  void Orchestrator::handle_step_repaired (const OrchestratorEvent &ev)
+  {
+    auto it = active_jobs_.find (ev.job_id);
+    if (it == active_jobs_.end ())
+      return; // job ended while the repair ran
+
+    rapidjson::Document doc;
+    if (doc.Parse (ev.payload_json.c_str ()).HasParseError ()
+        || !doc.IsObject () || !doc.HasMember ("step_id")
+        || !doc["step_id"].IsString ())
+    {
+      spdlog::error ("[orchestrator] malformed StepRepaired event for job {}",
+                     ev.job_id);
+      return;
+    }
+    const std::string step_id = doc["step_id"].GetString ();
+
+    ActiveJob &job = it->second;
+    if (job.pending_steps.empty ()
+        || job.pending_steps.front ().step.id != step_id
+        || !job.pending_steps.front ().repair_pending)
+    {
+      spdlog::warn ("[orchestrator] stale StepRepaired for job {} step {}; "
+                    "ignored",
+                    ev.job_id, step_id);
+      return;
+    }
+    ActiveStep &step = job.pending_steps.front ();
+    step.repair_pending = false;
+
+    // The repair call is billed whether or not it helped; it is spent on
+    // behalf of the step that failed.
+    const int tp = doc.HasMember ("tokens_prompt")
+                       && doc["tokens_prompt"].IsInt ()
+                     ? doc["tokens_prompt"].GetInt ()
+                     : 0;
+    const int tc = doc.HasMember ("tokens_completion")
+                       && doc["tokens_completion"].IsInt ()
+                     ? doc["tokens_completion"].GetInt ()
+                     : 0;
+    if (tp > 0 || tc > 0)
+      db_.update_step_tokens (job.job_id, step_id, tp, tc);
+
+    const bool ok = doc.HasMember ("ok") && doc["ok"].IsBool ()
+                    && doc["ok"].GetBool () && doc.HasMember ("repairs")
+                    && doc["repairs"].IsObject ();
+    if (!ok)
+    {
+      const std::string reason
+        = doc.HasMember ("reason") && doc["reason"].IsString ()
+            ? doc["reason"].GetString ()
+            : "unknown";
+      spdlog::warn ("[orchestrator] job {} step {}: output repair failed: {}",
+                    job.job_id, step_id, reason);
+      on_step_failed (job.job_id, /*run_id=*/"", /*exit_code=*/0);
+      return;
+    }
+
+    const auto plan = db_.load_steps_for_job (job.job_id);
+    const std::string prev_id = previous_step_id (plan, step_id);
+    const auto &repairs = doc["repairs"];
+    for (auto m = repairs.MemberBegin (); m != repairs.MemberEnd (); ++m)
+    {
+      const std::string id = m->name.GetString ();
+      rapidjson::StringBuffer rbuf;
+      rapidjson::Writer<rapidjson::StringBuffer> rw (rbuf);
+      m->value.Accept (rw);
+      const std::string fixed = rbuf.GetString ();
+
+      // tasks.result keeps only the corrected output; the original stays
+      // in the daemon log.
+      auto orig = std::find_if (plan.begin (), plan.end (),
+                                [&] (const Step &p) { return p.id == id; });
+      spdlog::info ("[orchestrator] job {} step {}: output repaired for "
+                    "step {}; original: {}",
+                    job.job_id, step_id, id,
+                    orig != plan.end () ? orig->result_json : "");
+      db_.update_step_result (job.job_id, id, fixed);
+      // $prev_result is the previous step's result (ADR-022).
+      if (id == prev_id)
+        job.last_step_result = fixed;
+    }
+
+    // Counts repairs that led to another run. A repair whose LLM call
+    // failed went through on_step_failed instead and counts as an attempt
+    // there, so attempts + repairs is the number of runs made.
+    step.repairs++;
+    dispatch_next_step (job);
   }
 
   // ADR-031 §13.4: an unresolvable reference fails the referencing step

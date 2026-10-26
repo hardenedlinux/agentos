@@ -99,6 +99,11 @@ struct CollectResult
   // the Worker is a declared reviewer, so it decides whether this is a
   // review verdict (ADR-031 §14) or a Worker Contract violation.
   bool        rejected  = false;
+  // result.json reported status "error": the Worker ran to completion and
+  // refused its input, as opposed to crashing or breaking the Worker
+  // Contract. Only this kind of failure is eligible for Adviser output
+  // repair (ADR-031 §11 amendment).
+  bool        reported_error = false;
 };
 
 // ---------------------------------------------------------------------------

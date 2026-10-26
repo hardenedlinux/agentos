@@ -68,6 +68,11 @@ namespace agentos
     // whether it is a declared reviewer (ADR-031 §14.2, agents.is_reviewer).
     std::string agent_id;
     bool reviewer = false;
+    // ADR-031 §11 amendment: successful Adviser output repairs for this
+    // step (each led to one more run), and whether one is in flight (the
+    // step is then not dispatched).
+    int repairs = 0;
+    bool repair_pending = false;
   };
 
   struct ActiveJob
@@ -469,6 +474,14 @@ namespace agentos
     // Exhausting retries fails the whole job.
     void on_step_failed (const std::string &job_id, const std::string &run_id,
                          int exit_code);
+
+    // ADR-031 §11 amendment: the front Worker-target step reported status
+    // "error". If the repair budget allows and the step consumed Adviser
+    // output, ask the LLM to correct that output (detached thread, result
+    // delivered as StepRepaired) and return true. Otherwise return false
+    // and the caller takes the normal on_step_failed path.
+    bool start_step_repair (ActiveJob &job, const std::string &error);
+    void handle_step_repaired (const OrchestratorEvent &ev);
 
     // Mark a job done/failed, remove from active_jobs_, notify Gateway.
     void finish_job (const std::string &job_id, bool success,

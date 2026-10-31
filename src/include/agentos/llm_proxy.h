@@ -118,4 +118,9 @@ namespace agentos
   // "sha256_<hex>" so tenants stay distinct and raw ids never leave.
   std::string deepseek_user_id (const std::string &uid);
 
+  /// Request body serialisers (ADR-017 "Provider abstraction", "Image
+  /// input"). Declared here so tests can check the wire shape.
+  std::string build_anthropic_body (const LlmRequest &req);
+  std::string build_openai_body (const LlmRequest &req, bool is_deepseek);
+
 } // namespace agentos

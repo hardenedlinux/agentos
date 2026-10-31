@@ -57,6 +57,9 @@ std::optional<Config> load_config(std::string_view path, std::string& error) {
             if (auto v = llm_tbl->at_path("rate_limit_max_wait_s").as_integer()) {
                 cfg.llm.rate_limit_max_wait_s = static_cast<int>(v->get());
             }
+            if (auto v = llm_tbl->at_path("vision_model").as_string()) {
+                cfg.llm.vision_model = v->get();
+            }
         }
 
         // [forge]

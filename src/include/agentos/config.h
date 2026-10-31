@@ -26,6 +26,11 @@ struct Config {
         // llm_proxy.cpp's retry_deepseek_429(). Has no effect on non-DeepSeek
         // base_urls, whose 4xx responses (429 included) are never retried.
         int         rate_limit_max_wait_s = 600;
+
+        // ADR-017 "Image input": model used for an Adviser-target step that
+        // carries an image. Empty = use `model`. Set it when `model` cannot
+        // read images (e.g. DeepSeek: only the Flash model accepts them).
+        std::string vision_model;
     } llm;
 
     struct Forge {

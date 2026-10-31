@@ -26,6 +26,7 @@
 #include "agentos/orchestrator.h"
 #include "agentos/cred_vault.h"
 #include "agentos/home_init.h"
+#include "agentos/image_input.h"
 #include "agentos/time_utils.h"
 #include "agentos/memory_curve.h"
 #include "agentos/review.h"
@@ -6104,6 +6105,13 @@ namespace agentos
   // Pipeline execution
   // ---------------------------------------------------------------------------
 
+  namespace
+  {
+    // ADR-031 §10a: reserved Adviser-target step input key that attaches
+    // one job asset to the LLM request as an image.
+    constexpr const char *kImageParam = "$image";
+  } // namespace
+
   // ADR-031 §13.1–§13.3: static validation of a Plan's step ids and the
   // reference tokens in its step inputs. Returns an empty string when the
   // Plan is valid, else a description of the first violation.
@@ -6127,6 +6135,26 @@ namespace agentos
         return where + " id '" + id + "' does not match [A-Za-z0-9_-]{1,64}";
       if (earlier.count (id))
         return "duplicate step id '" + id + "'";
+
+      // ADR-031 §10a: "$image" only on an Adviser-target step, and only as
+      // an $asset: reference (ownership is checked with the other $asset:
+      // tokens below). Never a URL, a path or a $step: result.
+      if (s.HasMember ("input") && s["input"].IsObject ()
+          && s["input"].HasMember (kImageParam))
+      {
+        const bool adviser_step
+          = s.HasMember ("target_type") && s["target_type"].IsString ()
+            && std::string_view (s["target_type"].GetString ()) == "adviser";
+        if (!adviser_step)
+          return "step '" + id
+                 + "' input '$image' is only allowed on a target_type "
+                   "\"adviser\" step";
+        const auto &iv = s["input"][kImageParam];
+        if (!iv.IsString ()
+            || std::string_view (iv.GetString ()).rfind ("$asset:", 0) != 0)
+          return "step '" + id
+                 + "' input '$image' must be an $asset:<asset_id> reference";
+      }
 
       if (s.HasMember ("input") && s["input"].IsObject ())
       {
@@ -6939,11 +6967,42 @@ namespace agentos
       }
     }
 
+    // ADR-031 §10a: "$image" is not a prompt parameter. Resolve it to the
+    // asset's materialized path here; the file is read, checked and
+    // encoded in the Adviser thread, off the Orchestrator's event loop.
+    auto prompt_params = step.step.params;
+    std::string image_path;
+    if (auto it = prompt_params.find (kImageParam); it != prompt_params.end ())
+    {
+      const std::string ref = it->second;
+      std::string img_unresolved;
+      std::unordered_map<std::string, std::string> resolved_image;
+      if (ref.rfind ("$asset:", 0) == 0)
+        resolved_image = resolve_step_references ({{kImageParam, ref}},
+                                                  job.last_step_result,
+                                                  job.job_id, img_unresolved);
+      rapidjson::Document pd;
+      const auto rit = resolved_image.find (kImageParam);
+      if (ref.rfind ("$asset:", 0) != 0 || !img_unresolved.empty ()
+          || rit == resolved_image.end ()
+          || pd.Parse (rit->second.c_str ()).HasParseError ()
+          || !pd.IsString ())
+      {
+        fail_step_unresolved_reference (
+          job, img_unresolved.empty ()
+                 ? ref + " ($image must be an $asset:<asset_id>)"
+                 : img_unresolved);
+        return;
+      }
+      image_path = pd.GetString ();
+      prompt_params.erase (it);
+    }
+
     // ADR-031 §10: resolve $prev_result / $step:<id>.<field> before
     // building the prompt.
     std::string unresolved;
     auto resolved_params
-      = resolve_step_references (step.step.params, job.last_step_result,
+      = resolve_step_references (prompt_params, job.last_step_result,
                                  job.job_id, unresolved);
     if (!unresolved.empty ())
     {
@@ -7011,11 +7070,13 @@ namespace agentos
     }
 
     const std::string job_user_id = job.user_id;
+    const std::string vision_model = config_.llm.vision_model;
 
     std::thread (
       [this, job_id, step_id, adviser_id, job_user_id = std::move (job_user_id),
        system_prompt = std::move (system_prompt),
-       user_prompt = std::move (user_prompt)] () mutable
+       user_prompt = std::move (user_prompt),
+       image_path = std::move (image_path), vision_model] () mutable
       {
         LlmClient client (llm_, config_.llm);
         LlmRequest req;
@@ -7024,6 +7085,40 @@ namespace agentos
         // ADR-040: keep the tenant identity attached to every LLM request.
         req.user_id = std::move (job_user_id);
         req.max_tokens = adviser_max_tokens ();
+
+        // ADR-031 §10a / ADR-017 "Image input": attach the step's image.
+        // A file that is unreadable, too large or not JPEG/PNG/GIF/WebP
+        // fails the step without calling the provider. Only the reason is
+        // logged, never the image data.
+        if (!image_path.empty ())
+        {
+          auto img = load_adviser_image (image_path);
+          if (!img.ok)
+          {
+            spdlog::error ("[orchestrator] adviser-step image rejected for "
+                           "job {} step {}: {}",
+                           job_id, step_id, img.error);
+            OrchestratorEvent fail;
+            fail.job_id = job_id;
+            fail.kind = OrchestratorEvent::Kind::AdviserFailed;
+            rapidjson::StringBuffer fbuf;
+            rapidjson::Writer<rapidjson::StringBuffer> fw (fbuf);
+            fw.StartObject ();
+            fw.Key ("job_id");
+            fw.String (job_id.c_str ());
+            fw.Key ("step_id");
+            fw.String (step_id.c_str ());
+            fw.Key ("reason");
+            fw.String (("image input: " + img.error).c_str ());
+            fw.EndObject ();
+            fail.payload_json = fbuf.GetString ();
+            enqueue (std::move (fail));
+            return;
+          }
+          req.image = std::move (img.value);
+          if (!vision_model.empty ())
+            req.model = vision_model;
+        }
 
         auto result = client.complete (req);
 

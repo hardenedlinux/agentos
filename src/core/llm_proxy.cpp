@@ -175,8 +175,10 @@ namespace agentos
       return res; // last result (429, or empty on network failure)
     }
 
-    // Serialise an Anthropic-format request body.
-    std::string build_anthropic_body (const LlmRequest &req)
+  } // namespace
+
+  // Serialise an Anthropic-format request body.
+  std::string build_anthropic_body (const LlmRequest &req)
     {
       rapidjson::Document doc;
       doc.SetObject ();
@@ -202,12 +204,44 @@ namespace agentos
       {
         rapidjson::Value msg (rapidjson::kObjectType);
         msg.AddMember ("role", rapidjson::Value ("user", 4, alloc), alloc);
-        msg.AddMember (
-          "content",
-          rapidjson::Value (
-            req.user_prompt.c_str (),
-            static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc),
-          alloc);
+        rapidjson::Value text (
+          req.user_prompt.c_str (),
+          static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc);
+        if (!req.image)
+          msg.AddMember ("content", text, alloc);
+        else
+        {
+          // ADR-017 "Image input": [image block, text block].
+          rapidjson::Value source (rapidjson::kObjectType);
+          source.AddMember ("type", rapidjson::Value ("base64", 6, alloc),
+                            alloc);
+          source.AddMember (
+            "media_type",
+            rapidjson::Value (req.image->media_type.c_str (),
+                              static_cast<rapidjson::SizeType> (
+                                req.image->media_type.size ()),
+                              alloc),
+            alloc);
+          source.AddMember (
+            "data",
+            rapidjson::Value (req.image->base64.c_str (),
+                              static_cast<rapidjson::SizeType> (
+                                req.image->base64.size ()),
+                              alloc),
+            alloc);
+          rapidjson::Value image_block (rapidjson::kObjectType);
+          image_block.AddMember ("type", rapidjson::Value ("image", 5, alloc),
+                                 alloc);
+          image_block.AddMember ("source", source, alloc);
+          rapidjson::Value text_block (rapidjson::kObjectType);
+          text_block.AddMember ("type", rapidjson::Value ("text", 4, alloc),
+                                alloc);
+          text_block.AddMember ("text", text, alloc);
+          rapidjson::Value content (rapidjson::kArrayType);
+          content.PushBack (image_block, alloc);
+          content.PushBack (text_block, alloc);
+          msg.AddMember ("content", content, alloc);
+        }
         msgs.PushBack (msg, alloc);
       }
       doc.AddMember ("messages", msgs, alloc);
@@ -250,12 +284,37 @@ namespace agentos
       {
         rapidjson::Value user (rapidjson::kObjectType);
         user.AddMember ("role", rapidjson::Value ("user", 4, alloc), alloc);
-        user.AddMember (
-          "content",
-          rapidjson::Value (
-            req.user_prompt.c_str (),
-            static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc),
-          alloc);
+        rapidjson::Value text (
+          req.user_prompt.c_str (),
+          static_cast<rapidjson::SizeType> (req.user_prompt.size ()), alloc);
+        if (!req.image)
+          user.AddMember ("content", text, alloc);
+        else
+        {
+          // ADR-017 "Image input": [text part, image_url part] with an
+          // inline data: URL. Images are allowed in the user message only.
+          const std::string url = "data:" + req.image->media_type + ";base64,"
+                                  + req.image->base64;
+          rapidjson::Value text_part (rapidjson::kObjectType);
+          text_part.AddMember ("type", rapidjson::Value ("text", 4, alloc),
+                               alloc);
+          text_part.AddMember ("text", text, alloc);
+          rapidjson::Value image_url (rapidjson::kObjectType);
+          image_url.AddMember (
+            "url",
+            rapidjson::Value (url.c_str (),
+                              static_cast<rapidjson::SizeType> (url.size ()),
+                              alloc),
+            alloc);
+          rapidjson::Value image_part (rapidjson::kObjectType);
+          image_part.AddMember ("type",
+                                rapidjson::Value ("image_url", 9, alloc), alloc);
+          image_part.AddMember ("image_url", image_url, alloc);
+          rapidjson::Value content (rapidjson::kArrayType);
+          content.PushBack (text_part, alloc);
+          content.PushBack (image_part, alloc);
+          user.AddMember ("content", content, alloc);
+        }
         messages.PushBack (user, alloc);
       }
 
@@ -294,6 +353,8 @@ namespace agentos
       return buf.GetString ();
     }
 
+  namespace
+  {
     // Extract content string from a parsed Anthropic response.
     Result<std::string> extract_anthropic_content (const rapidjson::Document &d)
     {

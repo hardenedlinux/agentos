@@ -624,7 +624,10 @@ if __name__ == "__main__":
         out << "# 0 = auto (a fixed default sized for network I/O concurrency,\n";
         out << "# not the host's core count). Set explicitly to match your\n";
         out << "# LLM provider's account-level concurrent-request ceiling.\n";
-        out << "max_concurrent = 0\n\n";
+        out << "max_concurrent = 0\n";
+        out << "# Model for Adviser steps that carry an image (ADR-017).\n";
+        out << "# Empty = use model. DeepSeek: only deepseek-flash reads images.\n";
+        out << "vision_model = \"\"\n\n";
         out << "[daemon]\n";
         out << "log_level = \"info\"\n";
         out << "max_concurrent_jobs = 4\n\n";

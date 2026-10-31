@@ -1,6 +1,7 @@
 #ifndef AGENTOS_LLM_CLIENT_H
 #define AGENTOS_LLM_CLIENT_H
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -11,6 +12,13 @@ namespace agentos {
 
 class LlmProxy;   // forward declaration
 
+/// One image attached to the user message (ADR-017 "Image input").
+/// The daemon sends it inline as base64; never logged.
+struct LlmImage {
+    std::string media_type;      // image/jpeg | image/png | image/gif | image/webp
+    std::string base64;          // standard base64 of the image bytes, no data: prefix
+};
+
 struct LlmRequest {
     std::string base_url;        // provider endpoint (scheme + host, no path)
     std::string api_key;         // credential
@@ -20,6 +28,7 @@ struct LlmRequest {
     std::string user_prompt;
     int         max_tokens = 1024;
     std::string api_path = "/v1/chat/completions"; // OpenAI‑compatible path
+    std::optional<LlmImage> image; // at most one image, sent with user_prompt
 };
 
 struct LlmResponse {
